@@ -720,7 +720,7 @@ async def _carry_reingest_forward(
     final: bool,
     config,
 ) -> None:
-    """Hand a re-ingest's freshly inserted facts to the store's carry-forward (DESIGN.md §7).
+    """Hand a re-ingest's freshly inserted facts to the store's carry-forward.
 
     In the transaction that inserted them, so a fact's carried claim, retention and the evidence other
     claims re-point at it commit with the fact itself. A no-op when the outgoing facts carried nothing.

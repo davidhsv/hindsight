@@ -568,7 +568,7 @@ async def _restore_lifecycle(
     result: ImportResult,
     sections: _ArchiveLifecycle,
 ) -> _LifecycleRestore:
-    """Write the imported memories' claims and retention, then the edges between them (DESIGN.md §7).
+    """Write the imported memories' claims and retention, then the edges between them.
 
     After the replay, so every memory a claim pointer or an edge names has its target id. A
     reference to a memory that did not come back is dropped (a pointer cleared, an evidence row

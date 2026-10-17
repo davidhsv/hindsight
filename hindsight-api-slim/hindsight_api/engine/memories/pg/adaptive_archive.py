@@ -1,4 +1,4 @@
-"""Adaptive state across a curation invalidate → restore round trip (DESIGN.md §7, R26).
+"""Adaptive state across a curation invalidate → restore round trip.
 
 Invalidation MOVES a memory: its row is copied to ``invalidated_memory_units`` and deleted from
 ``memory_units``, and the FK cascade takes everything adaptive memory keeps about it — the
@@ -40,8 +40,7 @@ locked one row at a time ``FOR UPDATE``, in id order, like every Oracle adaptive
 Known gap: if a claim and its evidence fact are BOTH invalidated, evidence first, and restored in
 the same order, the edge is lost — the claim's snapshot was taken after the cascade had already
 removed it, and the evidence fact's restore found the claim still archived. The causal-link
-snapshot avoids this by merging descriptors parked on archived peers; claims are first written in
-P3, which owns that extension.
+snapshot avoids this by merging descriptors parked on archived peers; the claim snapshot does not.
 """
 
 from __future__ import annotations
@@ -652,7 +651,7 @@ async def unpark_adaptive_state(
     dropped += await _restore_relations(conn, relations_t, bank_id, self_id, old_id, snapshot, live)
 
     if retired:
-        # Requeue invariant (DESIGN.md §7): restore_memory reset consolidated_at to NULL, but a
+        # Requeue invariant: restore_memory reset consolidated_at to NULL, but a
         # retired raw fact must never read as pending, or consolidation would re-ask about it and
         # could rebuild the retired belief as a new active observation.
         await conn.execute(

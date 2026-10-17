@@ -1,4 +1,4 @@
-"""Context-admission metrics (A28-A32): pure functions over what an arm admitted per query.
+"""Context-admission metrics: pure functions over what an arm admitted per query.
 
 Vocabulary, per query ``q``:
 

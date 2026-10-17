@@ -1,4 +1,4 @@
-"""Reinforcement producers: which operations emit evidence that a memory was useful (DESIGN.md §4.3).
+"""Reinforcement producers: which operations emit evidence that a memory was useful.
 
 Four producers hand events to ``MemoriesExtension.record_reinforcement``:
 
@@ -9,7 +9,7 @@ Four producers hand events to ``MemoriesExtension.record_reinforcement``:
   (``successful_reflect_use``), off the response path (:class:`BackgroundReinforcement`).
 - **recall** — the final results of an HTTP or MCP recall (``final_external_recall``), off the
   response path, and only while the static recall switch is on (default off: being selected is
-  not evidence of being useful, A42). Internal recalls never pass the flag that enables it.
+  not evidence of being useful). Internal recalls never pass the flag that enables it.
 - **explicit confirm** — the HTTP surface's own request-path write.
 
 Nothing is written unless the bank's effective mode is rank or lifecycle and its reinforcement
@@ -71,7 +71,7 @@ def recall_reinforcement_allowed(settings: AdaptiveSettings) -> bool:
 
     The one place recall reinforcement is decided, so the context-admission track can force it off
     here: when admission filters a recall, its final results are the admitted set, and reinforcing
-    them would turn admission decisions into retention (A42, "no popularity loop").
+    them would turn admission decisions into retention: a popularity loop where what is shown stays because it was shown.
     """
     return reinforcement_allowed(settings) and settings.recall_reinforcement_enabled
 
@@ -223,7 +223,7 @@ class ObservationEvidence:
     An observation is reinforced by a source fact only when the fact's evidence key is new for it:
     not the key of any source it already had, nor of one attached earlier in the batch. Ten facts
     from one session therefore count once, and a fact re-stating an observation counts only when
-    it comes from somewhere the observation has not heard it from (R10).
+    it comes from somewhere the observation has not heard it from.
 
     - :meth:`created`: a new observation, one ``initial`` event per distinct key of its creating
       facts, anchored on the earliest of them.

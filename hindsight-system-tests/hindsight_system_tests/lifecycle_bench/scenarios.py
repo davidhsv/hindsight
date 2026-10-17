@@ -1,4 +1,4 @@
-"""The memory_lifecycle scenarios: the 13 R34 situations plus error injection.
+"""The memory_lifecycle scenarios: the 13 lifecycle situations plus error injection.
 
 Each scenario is one bank. Raw facts are labelled by ``document_id`` (one document per
 labelled memory), observations through the documents of the facts they cite. Patterns are
@@ -31,7 +31,7 @@ from .model import (
 )
 
 # ---------------------------------------------------------------------------
-# R34 scenarios
+# Lifecycle situations
 # ---------------------------------------------------------------------------
 
 PREFERENCE_REVERSAL = Scenario(
@@ -1197,9 +1197,8 @@ SPLIT_GENERALIZATION = Scenario(
             stale_pattern=_JF_STALE,
         ),
     ),
-    # Semantic truth: the blanket rule no longer holds as stated. DESIGN §5.2 does no raw
-    # inheritance on a split, so a conformant lifecycle reports this as a mismatch — kept,
-    # because that is the cost of the choice and the report should show it.
+    # Semantic truth: the blanket rule no longer holds as stated, so its raw fact is superseded
+    # with the observation it was consolidated into, and current recall answers from the facets.
     expected_states={"jf-general": "superseded", "jf-paging": "active", "jf-detail": "active"},
 )
 

@@ -137,7 +137,7 @@ def _absent(value: object) -> bool:
     return value is None
 
 
-#: Archive entries for the lifecycle audit trail and claim evidence (DESIGN.md §7). Written only when
+#: Archive entries for the lifecycle audit trail and claim evidence. Written only when
 #: non-empty, for the same reason; they cite memories by their source ids (``source_id``).
 LIFECYCLE_RELATIONS_ENTRY = "lifecycle_relations.json"
 CLAIM_EVIDENCE_ENTRY = "claim_evidence.json"

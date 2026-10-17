@@ -1,4 +1,4 @@
-"""Adaptive-memory archiving and pruning (R25), on pg0 with the ``memory`` fixture.
+"""Adaptive-memory archiving and pruning, on pg0 with the ``memory`` fixture.
 
 The sweep is driven through the clock seam (every ``now`` is passed in, or ``adaptive.clock`` is
 patched for the engine job), over retention rows seeded with a known stability and anchor so that
@@ -109,6 +109,12 @@ async def _row(memory, memory_id: str):
             "SELECT retention_state, below_threshold_since, archived_at FROM memory_retention_state WHERE memory_id = $1",
             uuid.UUID(memory_id),
         )
+
+
+async def _live_ids(memory, bank_id: str, request_context) -> set[str]:
+    """The ids of the bank's live (not curation-invalidated) memories."""
+    page = await memory.list_memory_units(bank_id, state="valid", limit=1000, request_context=request_context)
+    return {str(item["id"]) for item in page["items"]}
 
 
 async def _sweep(memory, bank_id: str, at: datetime, **overrides):
@@ -495,8 +501,7 @@ async def test_prune_is_off_by_default_and_deletes_only_eligible_archived_memori
     monkeypatch.setattr(clock, "utcnow", lambda: day(BELOW + 12))
     pruned = await memory.run_adaptive_memory_maintenance(bank_id, request_context=request_context)
     assert pruned.pruned == 1
-    async with pool.acquire() as conn:
-        live = {str(r["id"]) for r in await conn.fetch("SELECT id FROM memory_units WHERE bank_id = $1", bank_id)}
+    live = await _live_ids(memory, bank_id, request_context)
     assert plain not in live
     assert {evidence, held, source, successor, observation, retired} <= live
     await memory.delete_bank(bank_id, request_context=request_context)
@@ -559,8 +564,7 @@ async def test_protected_rows_at_the_head_of_the_archive_do_not_stall_prune(
     result = await memory.run_adaptive_memory_maintenance(bank_id, request_context=request_context)
 
     assert result.pruned == 1
-    async with pool.acquire() as conn:
-        live = {str(r["id"]) for r in await conn.fetch("SELECT id FROM memory_units WHERE bank_id = $1", bank_id)}
+    live = await _live_ids(memory, bank_id, request_context)
     assert plain not in live
     assert {*sources, observation} <= live
     await memory.delete_bank(bank_id, request_context=request_context)
@@ -595,9 +599,7 @@ async def test_prune_rechecks_a_page_under_row_locks_before_deleting(
     result = await memory.run_adaptive_memory_maintenance(bank_id, request_context=request_context)
 
     assert result.pruned == 1
-    pool = await memory._get_pool()
-    async with pool.acquire() as conn:
-        live = {str(r["id"]) for r in await conn.fetch("SELECT id FROM memory_units WHERE bank_id = $1", bank_id)}
+    live = await _live_ids(memory, bank_id, request_context)
     assert plain not in live
     assert {held, revived} <= live
     await memory.delete_bank(bank_id, request_context=request_context)

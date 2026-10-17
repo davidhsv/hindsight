@@ -24,7 +24,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 @dataclass
 class ReingestCarry:
-    """The lifecycle state one full-replace re-ingest carries onto its re-extracted facts (DESIGN.md §7).
+    """The lifecycle state one full-replace re-ingest carries onto its re-extracted facts.
 
     ``handle_document_tracking`` fills ``stash`` before the outgoing facts are deleted; each batch that
     inserts facts hands them to ``carry_forward_reingest``, and the last one (or the retain's own

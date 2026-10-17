@@ -2,7 +2,7 @@
 
 The writers behind ``MemoriesExtension.lock_claims`` / ``cas_retire`` / ``set_claim`` /
 ``add_claim_evidence`` / ``insert_relation`` / ``inherit_from_observation`` and the invariants the
-rest of the store keeps for them (DESIGN.md §3, §5, §7):
+rest of the store keeps for them:
 
 - **Locking.** ``lock_claims`` is the only way to take claim-row locks: one sorted pass that upserts
   default ``active`` rows (parents ``FOR KEY SHARE``, the ``bulk_insert_links`` shape) and then
@@ -36,6 +36,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -63,7 +64,7 @@ logger = logging.getLogger(__name__)
 
 _RAW_FACT_TYPES_SQL = "'experience', 'world'"
 _RETIREABLE_SQL = "'active', 'uncertain'"
-#: ``retired_via`` values whose successor an observation rebuild re-links (DESIGN.md §7).
+#: ``retired_via`` values whose successor an observation rebuild re-links.
 _RELINKABLE_VIA_SQL = "'supersedes', 'refutes', 'inherited'"
 _CLAIM_COLUMNS = (
     "memory_id AS claim_memory_id, truth_status, confidence, valid_from, valid_to, retired_via, "
@@ -359,14 +360,24 @@ async def claim_evidence(
 # --------------------------------------------------------------------------- relations
 
 
+@dataclass
+class _EndpointSnapshot:
+    """What a relation records about a live endpoint, so the edge stays readable once it is deleted."""
+
+    text: str
+    fact_type: str
+    tags: list[str]
+    source_memory_ids: list[str] = field(default_factory=list)
+
+
 async def _snapshots(
     conn, *, fq_table: Callable[[str], str], bank_id: str, memory_ids: Sequence[Any]
-) -> dict[str, dict[str, Any]]:
+) -> dict[str, _EndpointSnapshot]:
     """The audit snapshot of each live memory: text, fact_type, tags and (observations) source ids."""
     ids = _uuids(memory_ids)
     if not ids:
         return {}
-    out: dict[str, dict[str, Any]] = {}
+    out: dict[str, _EndpointSnapshot] = {}
     observations: list[str] = []
     for chunk in _chunks(conn, ids):
         for row in await conn.fetch(
@@ -376,18 +387,15 @@ async def _snapshots(
             chunk,
         ):
             key = str(row["id"])
-            out[key] = {
-                "text": row["text"],
-                "fact_type": row["fact_type"],
-                "tags": _str_list(conn, row["tags"]),
-                "source_memory_ids": [],
-            }
+            out[key] = _EndpointSnapshot(
+                text=row["text"], fact_type=row["fact_type"], tags=_str_list(conn, row["tags"])
+            )
             if row["fact_type"] == "observation":
                 observations.append(key)
     if observations:
         sources = await observation_sources(conn, fq_table=fq_table, bank_id=bank_id, observation_ids=observations)
         for key, source_ids in sources.items():
-            out[key]["source_memory_ids"] = source_ids
+            out[key].source_memory_ids = source_ids
     return out
 
 
@@ -425,8 +433,8 @@ async def insert_relation(
         relation_type=relation_type,
         source_memory_id=source,
         target_memory_id=target,
-        source_snapshot=json.dumps(snaps.get(str(source), {}) if source else {}),
-        target_snapshot=json.dumps(snaps.get(str(target), {}) if target else {}),
+        source_snapshot=json.dumps(asdict(snaps[str(source)]) if source else {}),
+        target_snapshot=json.dumps(asdict(snaps[str(target)]) if target else {}),
         origin=origin,
         reason=reason,
         confidence=confidence,
@@ -698,6 +706,8 @@ async def inherit_from_observation(
     evidence_ids: Sequence[str],
     candidate_source_ids: Sequence[str] | None,
     reason: str | None = None,
+    retired_via: str = "inherited",
+    ignored_citer_ids: Sequence[str] = (),
     now: datetime | None = None,
 ) -> list[str]:
     """Retire the raw sources of a retired observation that no live observation still stands on.
@@ -746,12 +756,13 @@ async def inherit_from_observation(
         return []
 
     citing = await _observations_citing(conn, fq_table=fq_table, bank_id=bank_id, unit_ids=eligible)
-    others = sorted({o for obs_ids in citing.values() for o in obs_ids if o != obs_key})
+    ignored = {obs_key, *(str(i) for i in _uuids(ignored_citer_ids))}
+    others = sorted({o for obs_ids in citing.values() for o in obs_ids if o not in ignored})
     other_claims = await claims_for(conn, fq_table=fq_table, bank_id=bank_id, memory_ids=others)
 
     def _live_elsewhere(fact_id: str) -> bool:
         for other in citing.get(fact_id, set()):
-            if other == obs_key:
+            if other in ignored:
                 continue
             claim = other_claims.get(other)
             if claim is None or claim.truth_status in (TruthStatus.ACTIVE, TruthStatus.UNCERTAIN):
@@ -777,7 +788,7 @@ async def inherit_from_observation(
         await conn.execute(
             f"""
             UPDATE {fq_table("memory_claim_state")}
-            SET truth_status = $3, retired_via = 'inherited',
+            SET truth_status = $3, retired_via = $9,
                 superseded_by_id = {_pointer_sql(units, 4)},
                 inherited_from_id = {_pointer_sql(units, 5)},
                 valid_to = $6, reason = $7, updated_at = $8
@@ -791,6 +802,7 @@ async def inherit_from_observation(
             valid_to,
             reason if reason is not None else f"inherited:{status.value}",
             when,
+            retired_via,
         )
     evidence = _uuids(evidence_ids)
     if evidence:
@@ -1022,7 +1034,7 @@ def _requeue_set(clear_failed: bool) -> str:
     return "consolidated_at = NULL" + (", consolidation_failed_at = NULL" if clear_failed else "")
 
 
-#: Never requeue a superseded or refuted fact (DESIGN.md §7): consolidating it again would let the
+#: Never requeue a superseded or refuted fact: consolidating it again would let the
 #: model rebuild a current observation from a retired belief.
 def _not_retired(fq_table: Callable[[str], str]) -> str:
     return (

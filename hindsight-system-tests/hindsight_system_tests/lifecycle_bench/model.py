@@ -202,7 +202,7 @@ class Scenario:
     id: str
     title: str
     covers: tuple[str, ...]
-    """The R34 scenarios / error injections this bank exercises."""
+    """The lifecycle situations / error injections this bank exercises."""
     steps: tuple[Step, ...]
     queries: tuple[Query, ...]
     groups: dict[str, tuple[str, ...]] = field(default_factory=dict)

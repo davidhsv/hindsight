@@ -338,7 +338,7 @@ async def delete_document_rows(
     # Drop the facts' links in lock order before the cascade reaches them (#4251).
     await ops.delete_unit_links(conn, fq_table("memory_links"), bank_id, unit_ids)
     # The lifecycle side, before the cascade: relation rows in one order for their SET NULL, and the
-    # claims only these facts justified back to active (DESIGN.md §7).
+    # claims only these facts justified back to active.
     await relock_relations_before_delete(conn, fq_table=fq_table, bank_id=bank_id, unit_ids=unit_ids)
     await repair_lifecycle_for_deleted_facts(conn, fq_table=fq_table, bank_id=bank_id, doomed_ids=unit_ids)
 

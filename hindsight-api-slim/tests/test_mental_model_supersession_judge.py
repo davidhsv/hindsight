@@ -39,7 +39,8 @@ NEW = "The billing service was upgraded and now runs Java 25."
 QUERY = "Which Java version does the billing service run?"
 
 
-async def _seed_observations(memory, bank_id: str) -> tuple[str, str]:
+async def _seed_observations(memory, bank_id: str) -> str:
+    """Seed OLD superseded by NEW; the superseded observation's id."""
     texts = [OLD, NEW]
     embeddings = await embedding_utils.generate_embeddings_batch(memory.embeddings, texts)
     ids = [str(uuid.uuid4()) for _ in texts]
@@ -71,7 +72,7 @@ async def _seed_observations(memory, bank_id: str) -> tuple[str, str]:
                 reason=None,
                 confidence=None,
             )
-    return ids[0], ids[1]
+    return ids[0]
 
 
 async def test_a_page_grounded_on_a_superseded_claim_is_regenerated_from_the_successor(memory_real_llm):
@@ -80,7 +81,7 @@ async def test_a_page_grounded_on_a_superseded_claim_is_regenerated_from_the_suc
     bank_id = f"test-mm-supersession-judge-{uuid.uuid4().hex[:8]}"
     await memory.ensure_bank_profile(bank_id=bank_id, request_context=rc)
     await memory._config_resolver.update_bank_config(bank_id, {"adaptive_memory_mode": "lifecycle"})
-    old, _new = await _seed_observations(memory, bank_id)
+    old = await _seed_observations(memory, bank_id)
 
     content = "## Runtime\n\nThe billing service runs Java 21.\n"
     model = await memory.create_mental_model(

@@ -13,7 +13,7 @@ from typing import Literal
 
 
 class AdaptiveMode(str, Enum):
-    """``adaptive_memory_mode``, the per-bank umbrella switch (DESIGN.md §2).
+    """``adaptive_memory_mode``, the per-bank umbrella switch.
 
     Declared in rising order of effect; ``config.ADAPTIVE_MEMORY_MODES`` keeps the same tuple
     (it cannot import the engine) and a test holds the two equal.
@@ -114,7 +114,7 @@ class AdaptiveState:
 
 @dataclass(frozen=True)
 class ReinforcementEvent:
-    """One piece of evidence that a memory was useful (DESIGN.md §4.3).
+    """One piece of evidence that a memory was useful.
 
     ``weight`` is the source weight (``adaptive_memory_source_weights[source_type]``), resolved
     by the producer; ``independence_weight`` discounts evidence whose provenance is weak (a

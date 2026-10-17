@@ -34,13 +34,14 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import asyncpg
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic.json_schema import DEFAULT_REF_TEMPLATE, GenerateJsonSchema, JsonSchemaMode
 
 from ...config import get_config
 from ...metrics import get_metrics_collector
 from ...worker.stage import set_stage
 from ..adaptive import clock as adaptive_clock
 from ..adaptive.claims import RETIRED_STATUSES
-from ..adaptive.models import AdaptiveMode, TruthStatus
+from ..adaptive.models import AdaptiveMode, ClaimState, TruthStatus
 from ..adaptive.producers import (
     FactEvidence,
     ObservationEvidence,
@@ -851,7 +852,7 @@ class _DeleteAction(BaseModel):
     reason: str = ""  # LLM's one-sentence justification (diagnostic only)
 
 
-# Lifecycle-mode actions (adaptive memory, DESIGN.md §5.1). Every label is optional and lenient: a
+# Lifecycle-mode actions (adaptive memory). Every label is optional and lenient: a
 # malformed entry is dropped by its ``mode="before"`` normalizer rather than rejecting the response
 # (#4152), and whether a named id is one the model was shown is checked after miscopied ids are
 # repaired (``_resolve_miscopied_ids``), in ``lifecycle.plan_lifecycle``. Only ``_build_response_model
@@ -1411,6 +1412,45 @@ def _pin_nullable_id(ids: Sequence[str]) -> Callable[[dict[str, Any]], None]:
     return pin
 
 
+#: ``$defs`` names of the id enums the lifecycle schema spells once and references from every field.
+_BATCH_FACT_ID_DEF = "BatchFactId"
+_RETIRABLE_OBSERVATION_ID_DEF = "RetirableObservationId"
+_SHOWN_SOURCE_ID_DEF = "ShownSourceFactId"
+
+
+def _hoist_id_enums(
+    schema: dict[str, Any], enums: Mapping[str, Sequence[str]], *, ref_template: str = DEFAULT_REF_TEMPLATE
+) -> dict[str, Any]:
+    """Spell each pinned id list once under ``$defs`` and ``$ref`` it wherever a field pins it.
+
+    The lifecycle labels pin the pool's retirable ids on five fields and the shown source ids on
+    three. Inline, every id is repeated on each of them, so the schema (sent as input on every call)
+    grows with the pool several times over. The constraint itself is unchanged, and every provider
+    path already resolves ``$defs`` references (the create and update actions are references too).
+    """
+    names = {json.dumps(list(ids)): name for name, ids in enums.items() if ids}
+    used: dict[str, list[Any]] = {}
+
+    def hoist(node: Any) -> Any:
+        if isinstance(node, dict):
+            if set(node) == {"type", "enum"} and node["type"] == "string":
+                name = names.get(json.dumps(node["enum"]))
+                if name is not None:
+                    used[name] = node["enum"]
+                    return {"$ref": ref_template.format(model=name)}
+            return {key: hoist(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [hoist(item) for item in node]
+        return node
+
+    hoisted = hoist(schema)
+    if used:
+        defs = hoisted.setdefault("$defs", {})
+        for name, ids in used.items():
+            defs[name] = {"type": "string", "enum": list(ids)}
+    return hoisted
+
+
 def _build_lifecycle_response_model(
     cap: int | None,
     *,
@@ -1423,7 +1463,8 @@ def _build_lifecycle_response_model(
 
     Target lists are ``enum``-pinned to the pool's retirable observation ids and the source-id lists
     to the source fact ids the pool showed with them, so a grammar-constrained provider can only
-    name what it was shown. A subclass per batch, like the base constrained model.
+    name what it was shown. Each id list is spelled once in the JSON schema (``_hoist_id_enums``).
+    A subclass per batch, like the base constrained model.
     """
     ids_schema = _fact_ids_schema(fact_ids, supports_max_items)
     targets = _pinned_ids_schema(target_ids, supports_max_items)
@@ -1455,9 +1496,27 @@ def _build_lifecycle_response_model(
             default_factory=list, description=_KEEPS_DESCRIPTION, json_schema_extra=sources
         )
 
+    shared_enums = {
+        _BATCH_FACT_ID_DEF: list(fact_ids or []),
+        _RETIRABLE_OBSERVATION_ID_DEF: list(target_ids),
+        _SHOWN_SOURCE_ID_DEF: list(source_ids),
+    }
+
     class _LifecycleConsolidationBatchResponse(_ConsolidationBatchResponse):
         creates: list[_Create] = Field(default=[], max_length=cap)
         updates: list[_Update] = []
+
+        @classmethod
+        def model_json_schema(
+            cls,
+            by_alias: bool = True,
+            ref_template: str = DEFAULT_REF_TEMPLATE,
+            schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
+            mode: JsonSchemaMode = "validation",
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            schema = super().model_json_schema(by_alias, ref_template, schema_generator, mode, **kwargs)
+            return _hoist_id_enums(schema, shared_enums, ref_template=ref_template)
 
     return _LifecycleConsolidationBatchResponse
 
@@ -3046,7 +3105,7 @@ async def _process_memory_batch(
         plan = lifecycle_plan.for_create(create) if lifecycle_plan is not None else None
         labelled = plan is not None and plan.labelled
         if plan is not None and lifecycle_pool is not None:
-            create_source_ids = _lifecycle_create_sources(plan, lifecycle_pool, create_source_ids)
+            create_source_ids = _lifecycle_create_sources(plan, create_source_ids)
 
         # Reconcile against observations shown to the LLM: an exact-text match means
         # this CREATE reproduces verbatim an observation the model already had in context.
@@ -3896,7 +3955,7 @@ async def _record_observation_reinforcement(conn, bank_id: str, evidence: Observ
 
 # --------------------------------------------------------------------------- lifecycle mode
 #
-# The claim lifecycle's half of a batch (DESIGN.md §5; the labels are planned in ``lifecycle``). Every
+# The claim lifecycle's half of a batch (the labels are planned in ``lifecycle``). Every
 # helper below runs only when the bank's effective mode is lifecycle (or, for the shadow, observe),
 # so an off or rank bank never reaches one.
 
@@ -3969,21 +4028,15 @@ def _cap_lifecycle_creates(
     llm_result.creates = kept
 
 
-def _lifecycle_create_sources(
-    plan: claim_lifecycle.SuccessorPlan,
-    lifecycle_pool: Mapping[str, claim_lifecycle.PoolEntry],
-    cited_ids: list[uuid.UUID],
-) -> list[uuid.UUID]:
-    """A labelled create's sources: its cited facts, the replaced observation's sources it keeps,
-    and — for a split facet — every source of the parent (the facets divide the parent's evidence;
-    the parent's raw facts stay current). Never the replaced observation's other sources: those are
-    what the retirement passes its status down to."""
-    extra = list(plan.keeps)
-    if plan.split_from is not None and (parent := lifecycle_pool.get(plan.split_from)) is not None:
-        extra += list(parent.source_ids)
+def _lifecycle_create_sources(plan: claim_lifecycle.SuccessorPlan, cited_ids: list[uuid.UUID]) -> list[uuid.UUID]:
+    """A labelled create's sources: its cited facts and the replaced observation's sources it keeps.
+
+    Never the replaced (or split) observation's other sources: those are what the retirement passes
+    its status down to. A split facet records the parent's sources as claim evidence instead
+    (``_apply_split``), so the over-general raw facts do not stay current through the facets."""
     ids = list(cited_ids)
     seen = {str(i) for i in ids}
-    for sid in extra:
+    for sid in plan.keeps:
         if sid not in seen:
             seen.add(sid)
             ids.append(uuid.UUID(sid))
@@ -4034,9 +4087,12 @@ async def _lock_lifecycle_claims(
         await state.store.lock_observation_tags(
             conn=conn, fq_table=state.fq_table, bank_id=state.bank_id, observation_id=observation_id
         )
-    # Raw inheritance candidates: the sources of whatever may be retired with a successor.
+    # Raw inheritance candidates: the sources of whatever may be retired (with a successor, or split).
     conflict_targets = [c.target_id for p in prepared_creates if p.lifecycle_plan for c in p.lifecycle_plan.conflicts]
-    inheriting = list(dict.fromkeys([*plan.retire_target_ids(), *conflict_targets]))
+    split_parents = [
+        p.lifecycle_plan.split_from for p in prepared_creates if p.lifecycle_plan and p.lifecycle_plan.split_from
+    ]
+    inheriting = list(dict.fromkeys([*plan.retire_target_ids(), *conflict_targets, *split_parents]))
     if inheriting:
         state.sources = await state.store.observation_sources(conn, bank_id=state.bank_id, observation_ids=inheriting)
         facts += [s for sources in state.sources.values() for s in sources]
@@ -4319,13 +4375,22 @@ async def _apply_conflict(
 async def _apply_split(
     conn: "DatabaseConnection", state: claim_lifecycle.ApplyState, parent: str, children: list[_PreparedCreate]
 ) -> None:
-    """Retire a split parent once its facets exist: one ``splits`` relation per facet, no successor
-    pointer (there are several), and no raw inheritance (the facets carry its sources)."""
+    """Retire a split parent once its facets exist.
+
+    The parent is superseded with no successor pointer (there are several facets) and one
+    ``splits`` relation per facet. Its raw sources inherit the retirement (``retired_via='splits'``,
+    no successor) under the usual exclusions, where the facets themselves do not count as
+    observations still standing on them: the over-general statement becomes history and current
+    recall answers from the facets. Each facet keeps the parent's sources as claim evidence, not as
+    its own sources.
+    """
     written = [c for c in children if c.observation_id is not None]
     if len(written) < 2:
         state.drops.drop("split_incomplete", f"split of {parent}: {len(written)} facet(s) written")
         return
     plans = [c.lifecycle_plan for c in written if c.lifecycle_plan is not None]
+    valid_to = min(p.t_star for p in plans)
+    cited = list(dict.fromkeys(f for p in plans for f in p.cited))
     won = await claim_lifecycle.retire(
         conn,
         state,
@@ -4333,15 +4398,41 @@ async def _apply_split(
         status=TruthStatus.SUPERSEDED,
         retired_via="splits",
         successor_id=None,
-        valid_to=min(p.t_star for p in plans),
+        valid_to=valid_to,
         reason="consolidation:split",
         relation=None,
-        evidence_ids=list(dict.fromkeys(f for p in plans for f in p.cited)),
+        evidence_ids=cited,
     )
     if not won:
         return
     state.count("split")
+    facets = [str(c.observation_id) for c in written]
+    parent_sources = state.sources.get(parent, [])
+    if parent_sources:
+        inherited = await state.store.inherit_from_observation(
+            conn,
+            bank_id=state.bank_id,
+            observation_id=parent,
+            to_status=TruthStatus.SUPERSEDED,
+            successor_id=None,
+            valid_to=valid_to,
+            evidence_ids=cited,
+            candidate_source_ids=parent_sources,
+            reason="consolidation:split",
+            retired_via="splits",
+            ignored_citer_ids=facets,
+            now=state.now,
+        )
+        state.transitions["inherited"] += len(inherited)
     for child in written:
+        if parent_sources:
+            await state.store.add_claim_evidence(
+                conn,
+                bank_id=state.bank_id,
+                memory_id=str(child.observation_id),
+                evidence_ids=parent_sources,
+                now=state.now,
+            )
         await state.store.insert_relation(
             conn,
             bank_id=state.bank_id,
@@ -4577,7 +4668,7 @@ async def _shape_lifecycle_pools(
     """
     ids = list(dict.fromkeys(str(o.id) for r in recalls for o in r.results))
     store = get_memories()
-    claims: dict[str, Any] = {}
+    claims: dict[str, ClaimState] = {}
     if ids:
         async with acquire_with_retry(pool) as conn:
             claims = await store.claims_for(conn, bank_id=bank_id, memory_ids=ids)

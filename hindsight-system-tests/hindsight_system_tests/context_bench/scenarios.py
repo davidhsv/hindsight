@@ -4,7 +4,7 @@ Projects: ``a`` = Payments API (acme/payments-api), ``b`` = FlowKeeper (acme/flo
 ``c`` = audit-api (acme/audit-api). ``g.*`` memories belong to no project (the user's own),
 ``s.*`` memories live in the session bank.
 
-The core memories are written around collisions the benchmark is about (A26/A59): a joke
+The core memories are written around collisions the benchmark is about: a joke
 that shares a task's vocabulary, the same technology in another project, the same project
 in another subsystem, an old debugging episode, a superseded or refuted fact. Background
 memories (``bg.*``) are per-project facts on topics no query asks about; they make the bank
@@ -56,7 +56,7 @@ def m(
 
 
 CORE: tuple[Memory, ...] = (
-    # --- Deployment (A6: the Kubernetes-gods joke against "How is the Payments API deployed?")
+    # --- Deployment (the Kubernetes-gods joke against "How is the Payments API deployed?")
     m(
         "a.deploy.argo",
         "durable_fact",
@@ -126,7 +126,7 @@ CORE: tuple[Memory, ...] = (
         age=75,
         env="prod",
     ),
-    # --- The Friday deploy set (A59: facts vs joke vs failure vs frontend)
+    # --- The Friday deploy set (facts vs joke vs failure vs frontend)
     m(
         "a.friday.policy",
         "procedure",
@@ -256,7 +256,7 @@ CORE: tuple[Memory, ...] = (
         module="ledger",
         age=170,
     ),
-    # --- Tests, VPN timeouts, JUnit 404/500, lock ordering (A39)
+    # --- Tests, VPN timeouts, JUnit 404/500, lock ordering
     m(
         "c.vpn.timeout",
         "debugging_episode",
@@ -631,7 +631,7 @@ CORE: tuple[Memory, ...] = (
         module="deploy",
         age=95,
     ),
-    # --- Specific historical episodes an exact cue must retrieve (A21)
+    # --- Specific historical episodes an exact cue must retrieve
     m(
         "a.fin1602",
         "debugging_episode",
@@ -1532,7 +1532,7 @@ QUERIES: tuple[Query, ...] = (
     q("n10", "none_relevant", "What's a good recipe for sourdough bread?", None, purpose="explicit_search"),
     q("n11", "none_relevant", "How does FlowKeeper integrate with Salesforce?", "b"),
     q("n12", "none_relevant", "How do I rotate the audit-api's Stripe API keys?", "c"),
-    # --- all_candidates_irrelevant (A60): close candidates exist, none of them is the answer
+    # --- all_candidates_irrelevant: close candidates exist, none of them is the answer
     q(
         "z01",
         "cross_project",
@@ -1541,7 +1541,7 @@ QUERIES: tuple[Query, ...] = (
         ["bg.search.c"],
         hard=["b.pg.trgm"],
         module="db",
-        notes="FlowKeeper PostgreSQL vs audit-api (A26); relabelled in adjudication: audit-api searches with OpenSearch, which answers the question",
+        notes="FlowKeeper PostgreSQL vs audit-api; relabelled in adjudication: audit-api searches with OpenSearch, which answers the question",
     ),
     q(
         "z02",
@@ -1636,7 +1636,7 @@ QUERIES: tuple[Query, ...] = (
         ["c.db.pool"],
         hard=["b.pg.pool"],
         module="db",
-        notes="FlowKeeper PostgreSQL vs audit-api (A26)",
+        notes="FlowKeeper PostgreSQL vs audit-api",
     ),
     q(
         "x02",
@@ -1858,7 +1858,7 @@ QUERIES: tuple[Query, ...] = (
         hard=["c.frontend.rq", "b.frontend.rq", "b.pg.pool", "c.vpn.timeout", "c.db.liquibase"],
         module="db",
         env="staging",
-        notes="React Query vs PostgreSQL migration timeout (A26)",
+        notes="React Query vs PostgreSQL migration timeout",
     ),
     q(
         "w02",
@@ -1868,7 +1868,7 @@ QUERIES: tuple[Query, ...] = (
         ["c.junit.404", "c.junit.500"],
         hard=["c.vpn.timeout", "c.vpn.joke"],
         module="tests",
-        notes="VPN timeout vs JUnit 404/500 (A26)",
+        notes="VPN timeout vs JUnit 404/500",
     ),
     q(
         "w03",
@@ -2019,7 +2019,7 @@ QUERIES: tuple[Query, ...] = (
         ["c.ingest.lock"],
         hard=["c.vpn.timeout", "c.db.v42", "b.pg.advisory"],
         module="ingest",
-        notes="VPN timeout vs lock-ordering timeout (A39)",
+        notes="VPN timeout vs lock-ordering timeout",
     ),
     # --- humor_casual: jokes and small talk that share the task's vocabulary
     q(
@@ -2031,7 +2031,7 @@ QUERIES: tuple[Query, ...] = (
         acceptable=["a.deploy.canary", "a.deploy.rollback"],
         hard=["a.joke.k8sgods", "a.deploy.ssh", "b.deploy.helm", "c.deploy.ecs"],
         module="deploy",
-        notes="Kubernetes-gods joke vs deployment query (A6/A26)",
+        notes="Kubernetes-gods joke vs deployment query",
     ),
     q(
         "h02",
@@ -2043,7 +2043,7 @@ QUERIES: tuple[Query, ...] = (
         hard=["a.friday.joke", "a.friday.frontend", "b.friday.casual"],
         module="deploy",
         env="prod",
-        notes="Friday deploy set (A59)",
+        notes="Friday deploy set",
     ),
     q(
         "h03",
@@ -2052,7 +2052,7 @@ QUERIES: tuple[Query, ...] = (
         "a",
         ["a.friday.incident", "a.friday.policy"],
         hard=["a.friday.joke", "b.friday.casual", "a.friday.frontend"],
-        notes="Friday deploy set (A59)",
+        notes="Friday deploy set",
     ),
     q(
         "h04",
@@ -2063,7 +2063,7 @@ QUERIES: tuple[Query, ...] = (
         acceptable=["a.friday.policy"],
         hard=["a.friday.joke", "a.friday.incident"],
         module="frontend",
-        notes="Friday deploy set (A59)",
+        notes="Friday deploy set",
     ),
     q(
         "h05",
@@ -2073,7 +2073,7 @@ QUERIES: tuple[Query, ...] = (
         ["a.friday.joke"],
         hard=["a.friday.policy", "a.joke.k8sgods", "b.friday.casual"],
         purpose="explicit_search",
-        notes="Friday deploy set (A59); humor must be reachable (A15)",
+        notes="Friday deploy set; humor must be reachable",
     ),
     q(
         "h06",
@@ -2254,7 +2254,7 @@ QUERIES: tuple[Query, ...] = (
         module="scheduler",
         notes="refuted speculation",
     ),
-    # --- exact_historical_cue: a precise cue to an old episode must admit it (A21)
+    # --- exact_historical_cue: a precise cue to an old episode must admit it
     q(
         "e01",
         "exact_historical_cue",
@@ -2264,7 +2264,7 @@ QUERIES: tuple[Query, ...] = (
         hard=["c.vpn.joke", "c.junit.500", "c.tests.flaky"],
         purpose="historical_search",
         module="tests",
-        notes="exact VPN-timeout historical cue (A26)",
+        notes="exact VPN-timeout historical cue",
     ),
     q(
         "e02",
@@ -2273,7 +2273,7 @@ QUERIES: tuple[Query, ...] = (
         "a",
         ["a.fin1602"],
         purpose="historical_search",
-        notes="A21",
+        notes="exact historical cue",
     ),
     q(
         "e03",
@@ -2531,7 +2531,7 @@ QUERIES: tuple[Query, ...] = (
         hard=["c.vpn.timeout"],
         module="tests",
     ),
-    # --- coding_session (A58): session 5 returns to session 1's auth bug
+    # --- coding_session: session 5 returns to session 1's auth bug
     q(
         "cs1",
         "coding_session",

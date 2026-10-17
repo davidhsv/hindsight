@@ -1139,7 +1139,7 @@ class DataAccessOps(ABC):
 
     # -- Adaptive memory: retention state and the reinforcement ledger ------
     #
-    # The lock protocol every adaptive writer follows (DESIGN.md §3 Locking): the parent
+    # The lock protocol every adaptive writer follows: the parent
     # ``memory_units`` rows first, in id order, so a concurrent delete cannot take them before
     # the side rows reference them (PG's deferred FKs check only at COMMIT, #1882); then the
     # retention rows ``FOR UPDATE`` in id order, which is where writers of one memory serialize.
@@ -1216,7 +1216,7 @@ class DataAccessOps(ABC):
         """Write every writable column of the given retention rows and stamp ``updated_at = now``."""
         ...
 
-    # -- Claim lifecycle (DESIGN.md §3 Locking, §5, §7) ---------------------
+    # -- Claim lifecycle -------------------------------------------------------
     #
     # Same protocol as the retention writers above: parents locked in id order in the statement that
     # inserts the side rows (PG ``FOR KEY SHARE``; Oracle per-row ``FOR UPDATE``), then the claim rows

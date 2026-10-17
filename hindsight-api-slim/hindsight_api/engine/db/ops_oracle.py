@@ -1710,10 +1710,10 @@ class OracleOps(DataAccessOps):
 
         async def _lock() -> RetentionLock:
             # One savepoint per attempt. ORA-00060 rolls back only the statement that hit it, so
-            # without the savepoint a retry would still hold every lock this phase already took
+            # without the savepoint a retry would still hold every lock this pass already took
             # and walk straight back into the same cycle; rolling back to it releases them first.
             async with conn.transaction():
-                # Sorted per-row parent locks (DESIGN.md §3). Background producers skip a row
+                # Sorted per-row parent locks. Background producers skip a row
                 # another transaction holds (a memory being deleted) rather than wait on it.
                 parents = []
                 for memory_id in ids:
@@ -1896,7 +1896,7 @@ class OracleOps(DataAccessOps):
         ids: Sequence[uuid_mod.UUID],
         skip_locked: bool,
     ) -> list[uuid_mod.UUID]:
-        """Sorted per-row parent locks (DESIGN.md §3); the ids that are live and now locked."""
+        """Sorted per-row parent locks; the ids that are live and now locked."""
         live: list[uuid_mod.UUID] = []
         for memory_id in sorted(set(ids)):
             row = await conn.fetchrow(

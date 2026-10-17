@@ -1,4 +1,4 @@
-"""Only the requeue helper may put a memory back in the consolidation queue (DESIGN.md §7).
+"""Only the requeue helper may put a memory back in the consolidation queue.
 
 The requeue invariant: a superseded or refuted raw fact never has ``consolidated_at IS NULL``.
 Requeuing one would hand a retired belief back to consolidation, whose pool no longer shows it

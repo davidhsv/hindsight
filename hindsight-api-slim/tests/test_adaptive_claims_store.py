@@ -512,6 +512,49 @@ async def test_explicit_candidates_limit_inheritance_to_the_named_sources(memory
     assert await _status(memory, outsider) == "active", "not a source of the observation"
 
 
+@pytest.mark.asyncio
+async def test_a_split_inheritance_ignores_the_facets_but_not_other_live_observations(memory, request_context):
+    bank_id = await _bank(memory, request_context)
+    general, shared, cited = await _seed(memory, bank_id, 3)
+    parent = await _observation(memory, bank_id, [general, shared])
+    facet = await _observation(memory, bank_id, [general, cited])
+    other = await _observation(memory, bank_id, [shared])
+    store = get_memories()
+    async with _tx(memory) as conn:
+        await store.lock_claims(
+            conn, bank_id=bank_id, memory_ids=[parent, facet, other, general, shared, cited], skip_locked=False
+        )
+        await store.cas_retire(
+            conn,
+            bank_id=bank_id,
+            memory_id=parent,
+            to_status=SUPERSEDED,
+            retired_via="splits",
+            superseded_by_id=None,
+            valid_to=day(4),
+            reason=None,
+            confidence=None,
+        )
+        inherited = await store.inherit_from_observation(
+            conn,
+            bank_id=bank_id,
+            observation_id=parent,
+            to_status=SUPERSEDED,
+            successor_id=None,
+            valid_to=day(4),
+            evidence_ids=[cited],
+            candidate_source_ids=[general, shared],
+            retired_via="splits",
+            ignored_citer_ids=[facet],
+        )
+    assert inherited == [general], "the facet citing it does not keep it current"
+    claim = await _claim(memory, general)
+    assert (claim["truth_status"], claim["retired_via"], claim["superseded_by_id"]) == ("superseded", "splits", None)
+    assert (str(claim["inherited_from_id"]), claim["valid_to"]) == (parent, day(4))
+    assert await _evidence_of(memory, general) == [cited]
+    assert await _status(memory, shared) == "active", "another live observation still stands on it"
+
+
 # =========================================================================== the requeue invariant
 
 

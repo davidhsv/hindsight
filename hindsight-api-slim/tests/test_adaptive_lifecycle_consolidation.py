@@ -58,7 +58,7 @@ from hindsight_api.engine.memory_engine import count_tokens
 from hindsight_api.engine.providers.mock_llm import MockLLM
 from hindsight_api.engine.response_models import LLMCallResult, MemoryFact, TokenUsage
 from hindsight_api.engine.retain import embedding_utils
-from hindsight_api.engine.structured_output import strict_json_schema
+from hindsight_api.engine.structured_output import provider_json_schema, strict_json_schema
 
 pytestmark = pytest.mark.memory_backend_incompatible
 
@@ -468,22 +468,68 @@ def _lifecycle_model(**overrides: Any):
     return _build_response_model(**kwargs)
 
 
+def _inline_refs(schema: dict[str, Any]) -> dict[str, Any]:
+    """``schema`` with every ``$ref`` to a non-object ``$defs`` entry replaced by that entry, and
+    those entries dropped: the shape a schema has when nothing is shared between fields."""
+    defs = schema.get("$defs") or {}
+    shared = {f"#/$defs/{name}": d for name, d in defs.items() if d.get("type") != "object"}
+
+    def inline(node: Any) -> Any:
+        if isinstance(node, dict):
+            if set(node) == {"$ref"} and node["$ref"] in shared:
+                return dict(shared[node["$ref"]])
+            return {k: inline(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [inline(v) for v in node]
+        return node
+
+    out = inline(schema)
+    out["$defs"] = {name: d for name, d in out["$defs"].items() if f"#/$defs/{name}" not in shared}
+    return out
+
+
 def test_the_lifecycle_schema_is_strict_valid_and_pins_every_label_to_what_was_shown():
     schema = strict_json_schema(_lifecycle_model())
     _walk_strict(schema)
-    create = schema["$defs"]["_Create"]["properties"]
-    update = schema["$defs"]["_Update"]["properties"]
+    inline = _inline_refs(schema)
+    create = inline["$defs"]["_Create"]["properties"]
+    update = inline["$defs"]["_Update"]["properties"]
     for name in ("supersedes", "refutes", "refines", "conflicts_with"):
         assert create[name]["items"]["enum"] == ["o1", "o2"]
     assert create["split_from"]["anyOf"][0]["enum"] == ["o1", "o2"]
     assert create["keeps_source_ids"]["items"]["enum"] == ["s1"]
     assert update["retires_source_ids"]["items"]["enum"] == ["s1"]
+    assert create["source_fact_ids"]["items"]["enum"] == update["source_fact_ids"]["items"]["enum"] == ["f1", "f2"]
     assert update["relation"]["anyOf"][0]["enum"] == ["supersedes", "refutes", "historical"]
     # Lifecycle labels come after the base fields, in generation order.
     assert list(create)[:3] == ["text", "source_fact_ids", "reason"]
     # Nothing retirable in the pool: the label lists can only be empty.
     empty = strict_json_schema(_lifecycle_model(target_ids=[], source_ids=[]))["$defs"]["_Create"]["properties"]
     assert empty["supersedes"]["maxItems"] == 0 and "enum" not in empty["supersedes"].get("items", {})
+
+
+@pytest.mark.parametrize("serialize", [strict_json_schema, provider_json_schema], ids=["strict", "provider"])
+def test_the_lifecycle_schema_spells_each_pinned_id_once_and_constrains_exactly_what_inline_pinning_did(
+    serialize, monkeypatch
+):
+    """The schema is input on every call: an id repeated on every label field made it grow several
+    times over with the pool. Each id list is one ``$defs`` entry; resolving the references gives
+    back the schema with the lists inline, so the constraint is the same."""
+    targets = [f"{i:08d}-0000-4000-8000-000000000000" for i in range(25)]
+    sources = [f"{i:08d}-1111-4000-8000-000000000000" for i in range(30)]
+    facts = [f"{i:08d}-2222-4000-8000-000000000000" for i in range(10)]
+    model = _build_response_model(5, fact_ids=facts, lifecycle=True, target_ids=targets, source_ids=sources)
+    schema = serialize(model)
+    text = json.dumps(schema)
+    assert all(text.count(i) == 1 for i in [*targets, *sources, *facts])
+    shared = {name: d["enum"] for name, d in schema["$defs"].items() if d.get("type") == "string"}
+    assert shared == {"BatchFactId": facts, "RetirableObservationId": targets, "ShownSourceFactId": sources}
+    if serialize is strict_json_schema:
+        _walk_strict(schema)
+    monkeypatch.setattr(consolidator, "_hoist_id_enums", lambda schema, enums, **_: schema)
+    inline = serialize(model)
+    assert _inline_refs(schema) == inline
+    assert count_tokens(json.dumps(schema)) < count_tokens(json.dumps(inline)) / 2
 
 
 def test_the_lifecycle_model_is_lenient_a_bad_label_is_dropped_not_fatal():
@@ -512,7 +558,7 @@ def test_the_lifecycle_model_is_lenient_a_bad_label_is_dropped_not_fatal():
 
 def test_the_lifecycle_label_overhead_in_output_tokens(capsys):
     """Measured, not asserted against a target: the strict schema makes every label mandatory to
-    emit, so an action with no label still spends tokens on empty ones. Reported in P3-NOTES."""
+    emit, so an action with no label still spends tokens on empty ones."""
     base = _build_response_model(3, fact_ids=["f1", "f2"])
     lifecycle_model = _lifecycle_model()
     schema_tokens = {
@@ -1007,12 +1053,16 @@ async def test_an_out_of_order_old_fact_is_attached_to_the_retired_observation_a
 
 
 @pytest.mark.asyncio
-async def test_a_split_retires_the_parent_and_its_facets_carry_its_sources(memory, request_context):
+async def test_a_split_retires_the_parent_and_its_raw_sources_which_the_facets_keep_as_evidence(
+    memory, request_context
+):
     bank_id = await _bank(memory, request_context)
     v = _View(memory, bank_id, request_context)
     s1 = await _old_fact(memory, bank_id, "The data team owns ingestion and reporting.", at=day(10))
     parent = await _observation(memory, bank_id, "The data team owns ingestion and reporting.", [s1], at=day(10))
-    await _unit(memory, bank_id, "Ingestion moved to the platform team; the data team keeps reporting.", at=day(40))
+    split = await _unit(
+        memory, bank_id, "Ingestion moved to the platform team; the data team keeps reporting.", at=day(40)
+    )
 
     def respond(prompt: _Prompt) -> dict[str, Any]:
         fact = prompt.fact("Ingestion moved")
@@ -1034,9 +1084,23 @@ async def test_a_split_retires_the_parent_and_its_facets_carry_its_sources(memor
         None,
     )
     for child in children:
-        assert s1 in await v.sources(child)
+        assert await v.sources(child) == [split]
+        assert await v.evidence(child) == [s1]
         assert ("splits", child, parent) in await v.relations()
-    assert await v.status(s1) == "active"  # no raw inheritance: the facets stand on it
+    raw = await v.claim(s1)
+    assert raw is not None
+    assert (raw.truth_status, raw.retired_via, raw.superseded_by_id, str(raw.inherited_from_id)) == (
+        "superseded",
+        "splits",
+        None,
+        parent,
+    )
+    assert raw.valid_to == day(40)
+    query = "Who owns ingestion and reporting?"
+    current = await _recall_ids(memory, bank_id, request_context, query)
+    assert {s1, parent}.isdisjoint(current) and set(children) <= current
+    historical = await _recall_ids(memory, bank_id, request_context, query, lifecycle_view="historical")
+    assert {s1, parent} <= historical
 
 
 @pytest.mark.asyncio

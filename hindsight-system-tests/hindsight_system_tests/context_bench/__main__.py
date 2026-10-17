@@ -10,7 +10,7 @@ Examples (from ``hindsight-system-tests/``)::
     uv run python -m hindsight_system_tests.context_bench run --label base-jev --profile jev \\
         --api-dir /path/to/base/hindsight-api-slim --variants jev --reuse <out>/runs/base-local.json
 
-    # A feature server: send the A49 context + purpose and set its mode.
+    # A feature server: send the request context + purpose and set its mode.
     uv run python -m hindsight_system_tests.context_bench run --label feat-filter \\
         --api-dir /path/to/feature/hindsight-api-slim --variants plain,tags --send-context \\
         --server-env HINDSIGHT_API_CONTEXT_ADMISSION_MODE=filter
@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--variants", default="local-baselines", help=f"comma list; presets: {', '.join(PRESETS)}")
     run_p.add_argument("--profile", choices=PROFILES, default="local")
     run_p.add_argument("--server-env", action="append", default=[], metavar="KEY=VALUE")
-    run_p.add_argument("--send-context", action="store_true", help="send the A49 context and purpose fields")
+    run_p.add_argument("--send-context", action="store_true", help="send the request context and purpose fields")
     run_p.add_argument("--max-tokens", type=int, default=4096)
     run_p.add_argument("--pg0", default=DEFAULT_PG0, help="pg0 instance:port of this benchmark's own")
     run_p.add_argument("--reuse", type=Path, help="a run file whose schema and banks to query instead of ingesting")

@@ -1,4 +1,4 @@
-"""Retention math: retrievability, stability and reinforcement (DESIGN.md §4.1, §4.3).
+"""Retention math: retrievability, stability and reinforcement.
 
 Everything here is pure and takes ``now`` explicitly; nothing reads a clock. Naive datetimes are
 read as UTC, the convention the rest of recall scoring uses.
@@ -209,7 +209,7 @@ def apply_events(
     *,
     initial: bool = False,
 ) -> AppliedEvents:
-    """Apply reinforcement events to one memory's retention state (DESIGN.md §4.3).
+    """Apply reinforcement events to one memory's retention state.
 
     Events are applied in ``event_time`` order (ties keep their input order). For each:
 

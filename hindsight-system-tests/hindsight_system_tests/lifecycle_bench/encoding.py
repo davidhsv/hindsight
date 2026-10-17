@@ -3,8 +3,8 @@
 Three layers, so the same decision can be replayed against any arm:
 
 1. **Capabilities.** The request's own JSON schema says whether the server speaks the
-   lifecycle contract (``supersedes`` / ``refutes`` on creates, ``relation`` on updates —
-   DESIGN §5.1). An arm is never told which encoding to expect; it advertises it.
+   lifecycle contract (``supersedes`` / ``refutes`` on creates, ``relation`` on updates).
+   An arm is never told which encoding to expect; it advertises it.
 2. **Needle form.** A decision is encoded as a ``NeedleReply``: the reply's action structure
    with every fact and observation named by a substring of its *text*, never by a runtime
    UUID. Author-written decisions produce one; a frozen real-model fixture *is* one. That is
@@ -61,7 +61,7 @@ Relation = Literal["supersedes", "refutes", "historical"]
 #: grammar-enforced (``llm_strict_schema_consolidation`` is off by default).
 _SCHEMA_IN_PROMPT = "You must respond with valid JSON matching this schema:\n"
 
-#: The lifecycle fields DESIGN §5.1 adds; any one of them on the schema means "lifecycle".
+#: The lifecycle label fields; any one of them on the schema means "lifecycle".
 LIFECYCLE_CREATE_FIELDS = frozenset({"supersedes", "refutes", "conflicts_with", "split_from", "refines"})
 LIFECYCLE_UPDATE_FIELDS = frozenset({"relation", "retires_source_ids"})
 

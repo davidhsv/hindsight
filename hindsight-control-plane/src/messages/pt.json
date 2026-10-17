@@ -695,6 +695,7 @@
       "webhookDelivery": "Entrega de webhook",
       "graphMaintenance": "Manutenção do grafo",
       "vectorIndexMaintenance": "Manutenção do índice vetorial",
+      "adaptiveMemoryMaintenance": "Manutenção da memória adaptativa",
       "exportDocuments": "Exportar documentos",
       "importDocuments": "Importar documentos",
       "exportBank": "Exportar banco",
@@ -2021,7 +2022,9 @@
         "retain": "Falha ao executar Retain em lote",
         "retainAsync": "Falha ao executar Retain em lote assíncrono",
         "history": "Falha ao buscar histórico de observações",
-        "update": "Falha ao atualizar a memória"
+        "update": "Falha ao atualizar a memória",
+        "confirm": "Falha ao confirmar a memória",
+        "lifecycle": "Falha ao atualizar o ciclo de vida da memória"
       },
       "documents": {
         "fetchList": "Falha ao buscar documentos",
@@ -2259,5 +2262,32 @@
     "pausedTitle": "A última atualização falhou, por isso este modelo já não se atualiza sozinho — atualize-o para retomar",
     "retrying": "A repetir",
     "retryingTitle": "A última tentativa falhou e há outra em fila — as atualizações automáticas só param se esta também falhar"
+  },
+  "memoryLifecycle": {
+    "sectionTitle": "Memória adaptativa",
+    "truthStatus": "Estado de verdade",
+    "status": {
+      "active": "Ativa",
+      "uncertain": "Incerta",
+      "superseded": "Substituída",
+      "refuted": "Refutada"
+    },
+    "until": "até {date}",
+    "supersededByTitle": "Substituída por {id}",
+    "validity": "Válida",
+    "unknownStart": "antes de qualquer registro",
+    "openEnd": "agora",
+    "supersededBy": "Substituída por",
+    "retiredVia": "Retirada via",
+    "reason": "Motivo",
+    "retrievability": "Recuperabilidade",
+    "stability": "Estabilidade",
+    "stabilityValue": "{days} dias",
+    "reinforcements": "Reforços",
+    "importance": "Importância",
+    "exempt": "Isenta do esquecimento",
+    "yes": "Sim",
+    "archived": "Arquivada",
+    "observeShadow": "O modo de observação a marcaria como"
   }
 }

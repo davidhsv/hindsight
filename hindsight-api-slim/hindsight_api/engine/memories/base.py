@@ -2082,7 +2082,7 @@ class MemoriesExtension(Extension, ABC):
     async def archive_sweep(
         self, conn, *, bank_id: str, now: datetime, settings: AdaptiveSettings, batch: int = 500
     ) -> ArchiveResult:
-        """One archive pass over the bank's materialized retention rows (adaptive memory R25).
+        """One archive pass over the bank's materialized retention rows (adaptive memory).
 
         Tracks ``below_threshold_since`` (set when retrievability falls below
         ``settings.archive_threshold``, cleared when it is back at or above it) and archives a row
@@ -2146,7 +2146,7 @@ class MemoriesExtension(Extension, ABC):
 
     # ------------------------------------------------------------------ claim lifecycle
     #
-    # Truth status, evidence and the lifecycle audit trail (DESIGN.md §5, §7). Every writer runs on
+    # Truth status, evidence and the lifecycle audit trail. Every writer runs on
     # the caller's connection, inside its transaction, and assumes the rows it writes were locked by
     # ONE ``lock_claims`` pass in that transaction. The defaults are what a store without adaptive
     # state answers: nothing locked, nothing written, nothing found.
@@ -2249,6 +2249,8 @@ class MemoriesExtension(Extension, ABC):
         evidence_ids: Sequence[str],
         candidate_source_ids: Sequence[str] | None,
         reason: str | None = None,
+        retired_via: str = "inherited",
+        ignored_citer_ids: Sequence[str] = (),
         now: datetime | None = None,
     ) -> list[str]:
         """Retire a retired observation's raw sources that no live observation still stands on.
@@ -2256,9 +2258,10 @@ class MemoriesExtension(Extension, ABC):
         Candidates are ``candidate_source_ids`` (all the observation's sources when None), minus
         sources another active|uncertain observation still cites, experience facts, dated facts
         (``occurred_start``), and sources whose tags are not a superset of the observation's. The rest
-        are CAS-retired as ``inherited`` (with ``valid_to`` and the evidence) and stamped consolidated.
-        The candidates must be in the caller's ``lock_claims`` pass. Returns the inherited ids.
-        Default: none.
+        are CAS-retired with ``retired_via`` (``inherited``; a split passes ``splits``), ``valid_to``
+        and the evidence, and stamped consolidated. ``ignored_citer_ids`` are observations whose
+        citing a source does not keep it current (a split's facets). The candidates must be in the
+        caller's ``lock_claims`` pass. Returns the inherited ids. Default: none.
         """
         return []
 
@@ -2283,7 +2286,7 @@ class MemoriesExtension(Extension, ABC):
         """Return raw facts to the consolidation queue: the ONLY way to clear ``consolidated_at``.
 
         ``clear_failed`` also clears ``consolidation_failed_at``. Never requeues a fact whose claim is
-        superseded or refuted (DESIGN.md §7). ``reason`` tags the log line. Returns how many were
+        superseded or refuted. ``reason`` tags the log line. Returns how many were
         requeued (Postgres) — this default, for a store without claims, clears the marker through
         :meth:`mark_consolidated` and returns how many ids it was given.
         """
@@ -4728,7 +4731,7 @@ class MemoriesExtension(Extension, ABC):
         """
         raise NotImplementedError("this store cannot restore archived memories")
 
-    # Adaptive-memory state across a transfer (DESIGN.md §7). Retention and claim ride on each
+    # Adaptive-memory state across a transfer. Retention and claim ride on each
     # TransferFact / TransferObservation (the store's ``load_transfer_*`` fill them); the edges
     # between memories travel in two archive sections keyed by source ids. A store without adaptive
     # state exports none of them and restores nothing: the defaults below.

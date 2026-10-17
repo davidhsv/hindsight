@@ -141,7 +141,7 @@ class Query:
         return self.purpose != "historical_search"
 
     def context(self) -> dict[str, str]:
-        """The A49 request ``context`` a feature server receives; a base server ignores it."""
+        """The request ``context`` a feature server receives; a base server ignores it."""
         out: dict[str, str] = {"branch": "main"}
         if self.repository:
             out["repository"] = self.repository

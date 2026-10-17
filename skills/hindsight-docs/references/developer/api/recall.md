@@ -326,7 +326,7 @@ Only for banks whose [adaptive memory mode](../configuration.md#adaptive-memory)
 { "query": "which Java version does billing run", "as_of": "2026-01-20T00:00:00Z" }
 ```
 
-`as_of` filters by what was true, not by when a memory was stored, and it does not move the ranking clock: [`query_timestamp`](#query_timestamp) still anchors recency. A lifecycle-mode recall that cannot read the claims answers 503 (retry it) rather than return memories it could not check. See [Claim views in recall](../configuration.md#claim-views-in-recall) for the full rules.
+`as_of` filters by what was true, not by when a memory was stored, and it does not move the ranking clock: [`query_timestamp`](#query_timestamp) still anchors recency. A lifecycle-mode recall that cannot read the claims answers 503 (retry it) rather than return memories it could not check. When neither is set, a bank with `adaptive_memory_historical_cues` on answers a query that asks about the past ("what did we use before the upgrade?") from the historical view. MCP recall takes neither field and always uses the bank's default view and cues. See [Adaptive memory](../adaptive-memory.md#history-views) for the concepts and a worked example, and [Claim views in recall](../configuration.md#claim-views-in-recall) for the full rules.
 
 ### include
 

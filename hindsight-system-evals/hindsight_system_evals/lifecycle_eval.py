@@ -159,14 +159,15 @@ def _http(base_url: str, api_key: str | None) -> httpx.AsyncClient:
 async def _lifecycles(base_url: str, api_key: str | None, bank_id: str, ids: Iterable[str]) -> dict[str, _Lifecycle]:
     # Bounded: a noisy bank holds ~250 memories, one GET each.
     gate = asyncio.Semaphore(16)
+    memory_ids = list(ids)
     async with _http(base_url, api_key) as http:
 
-        async def one(memory_id: str) -> tuple[str, _Lifecycle | None]:
+        async def one(memory_id: str) -> _Lifecycle | None:
             async with gate:
-                return memory_id, await _get_lifecycle(http, bank_id, memory_id)
+                return await _get_lifecycle(http, bank_id, memory_id)
 
-        pairs = await asyncio.gather(*(one(i) for i in ids))
-    return {memory_id: lc for memory_id, lc in pairs if lc is not None}
+        found = await asyncio.gather(*(one(i) for i in memory_ids))
+    return {memory_id: lc for memory_id, lc in zip(memory_ids, found, strict=True) if lc is not None}
 
 
 def retired_fn(base_url: str, api_key: str | None) -> RetiredFn:

@@ -761,8 +761,8 @@ IMPLICIT = "implicit"
 def _truth_status(memory: Mapping[str, Any]) -> str | None:
     """The claim state GET memory reports under ``lifecycle``, wherever the shape puts it.
 
-    The ``lifecycle`` key is the feature's (DESIGN §5.6) and its exact nesting is not frozen
-    yet, so both a nested ``claim.truth_status`` and a flat ``truth_status`` are read. A
+    The ``lifecycle`` key is the feature's and the benchmark does not depend on its exact
+    nesting, so both a nested ``claim.truth_status`` and a flat ``truth_status`` are read. A
     ``lifecycle`` key without a claim is ``IMPLICIT``; no key at all is ``None`` (no state).
     """
     lifecycle = memory.get("lifecycle")

@@ -1,7 +1,7 @@
 """Lifecycle consolidation: an LLM response's lifecycle labels in, validated claim transitions out.
 
-Adaptive memory in ``lifecycle`` mode keeps a retired belief instead of rewriting or deleting it
-(DESIGN.md §5). The model labels what it would have done anyway — an UPDATE that ``supersedes`` or
+Adaptive memory in ``lifecycle`` mode keeps a retired belief instead of rewriting or deleting it.
+The model labels what it would have done anyway — an UPDATE that ``supersedes`` or
 ``refutes`` its target, a CREATE naming what it replaces, refines, contradicts or splits, an old
 fact attached to a retired observation as ``historical`` — and this module turns those labels into
 claim transitions the store applies:
@@ -158,7 +158,7 @@ def top_trust(metadatas: Iterable[Mapping[str, Any] | None], trust: Mapping[str,
 
 @dataclass(frozen=True)
 class ConflictOutcome:
-    """How a ``conflicts_with`` label resolves (DESIGN.md §5.4). ``winner`` None: both sides uncertain."""
+    """How a ``conflicts_with`` label resolves. ``winner`` None: both sides uncertain."""
 
     winner: Literal["new", "existing"] | None
     new_confidence: float
@@ -409,7 +409,7 @@ def plan_lifecycle(
 ) -> LifecyclePlan:
     """Normalise and validate one response's lifecycle labels; mutates ``llm_result`` to what applies.
 
-    Normalisation (DESIGN.md §5.2, P3 contract): a labelled UPDATE becomes a successor CREATE
+    Normalisation: a labelled UPDATE becomes a successor CREATE
     (``new_create(text, fact_ids, reason)``) and the target keeps its text; a delete of a retirement
     target is absorbed into the retirement; an unlabelled update of a retirement target loses its
     text change (its facts join the successor); updates onto a retired observation are dropped (the
@@ -896,7 +896,7 @@ async def inherit(
     keeps: Sequence[str],
     recited: set[str],
 ) -> list[str]:
-    """Pass a retired observation's status down to the raw facts that only it stood on (DESIGN.md §5.3)."""
+    """Pass a retired observation's status down to the raw facts that only it stood on."""
     if target.explicit_sources is not None:
         candidates = list(target.explicit_sources)
     else:

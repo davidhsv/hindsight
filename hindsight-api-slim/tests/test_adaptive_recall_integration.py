@@ -12,8 +12,8 @@ Seeding uses raw SQL, and the module is therefore ``memory_backend_incompatible`
 - memories go straight into ``memory_units`` because the ranking predictions need exact texts
   and ``mentioned_at`` values, which the retain pipeline (LLM extraction, ingest clock) does not
   let a test pin;
-- retention and claim rows go straight into their tables because P1 ships the reader only; the
-  writers (reinforcement, lifecycle) arrive in later phases and nothing public can create a row yet.
+- retention and claim rows go straight into their tables so each ranking case starts from an exact
+  retention or claim state, which the public writers (reinforcement, lifecycle) cannot pin.
 Assertions go through ``recall_async`` and the store's public reader.
 """
 
@@ -541,7 +541,7 @@ async def test_the_loader_returns_stored_rows_and_probes_the_primary_keys(memory
                     forced_plan = "\n".join(r[0] for r in await conn.fetch(f"EXPLAIN {sql}", *args))
                 logger.info("adaptive loader plan (default):\n%s\n(seqscan off):\n%s", default_plan, forced_plan)
                 print(f"\n--- {sql}\n{default_plan}\n--- enable_seqscan=off\n{forced_plan}")
-                # Measured on a 50k-memory bank with ANALYZEd stats (P1-NOTES.md), the planner probes
+                # Measured on a 50k-memory bank with ANALYZEd stats, the planner probes
                 # the retention primary key with the id list; on these few rows it may prefer a
                 # bank_id index instead. Either is an index probe, on both sides of the join; a
                 # sequential scan the planner cannot avoid is the regression.

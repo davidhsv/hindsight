@@ -56,7 +56,7 @@ async def delete_memory(*, conn, ops, fq_table: Callable[[str], str], bank_id: s
     if bank_id:
         await ops.delete_unit_links(conn, fq_table("memory_links"), bank_id, [unit_id])
     # The lifecycle side, before the cascade: relation rows in one order for their SET NULL, and the
-    # claims this memory alone justified back to active (DESIGN.md §7). Unscoped deletes resolve the bank.
+    # claims this memory alone justified back to active. Unscoped deletes resolve the bank.
     lifecycle_bank = bank_id or await conn.fetchval(
         f"SELECT bank_id FROM {fq_table('memory_units')} WHERE id = $1", unit_id
     )

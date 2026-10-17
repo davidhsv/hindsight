@@ -45,6 +45,9 @@ import type {
   BankConfigResponse,
   CreateBankRequest,
   Budget,
+  ConfirmMemoryResponse,
+  MemoryLifecycle,
+  RecallLifecycle,
   BankTemplateManifest,
   BankTemplateConfig,
   BankTemplateMentalModel,
@@ -782,6 +785,93 @@ export class HindsightClient {
     });
 
     return this.validateResponse(response, "listMemories");
+  }
+
+  /**
+   * Explicitly confirm that a memory (a fact or an observation) still holds.
+   *
+   * The confirmation reinforces the memory, so it stays readily recallable for longer.
+   * Needs the bank's adaptive memory mode to be "rank" or "lifecycle" with reinforcement
+   * enabled; the server answers 409 otherwise, and 404 for a memory that is missing or
+   * invalidated.
+   */
+  async confirmMemory(
+    bankId: string,
+    memoryId: string,
+    options?: {
+      /** Identifies this piece of evidence. A memory is confirmed at most once per key, so a retry is reported as deduplicated and changes nothing. Omitted, every call counts as a separate confirmation. */
+      sourceKey?: string;
+      /** When the confirmation happened (ISO 8601; no offset means UTC). Defaults to now; may be in the past, not in the future. */
+      eventTime?: string;
+      /** Free-text note for the server's audit log; not stored with the memory. */
+      reason?: string;
+      signal?: AbortSignal;
+    }
+  ): Promise<ConfirmMemoryResponse> {
+    const response = await sdk.confirmMemory({
+      client: this.client,
+      path: { bank_id: bankId, memory_id: memoryId },
+      body: {
+        source_key: options?.sourceKey,
+        event_time: options?.eventTime,
+        reason: options?.reason,
+      },
+      signal: options?.signal,
+    });
+
+    return this.validateResponse(response, "confirmMemory");
+  }
+
+  /**
+   * Change how a memory is retained, or what should be believed about it.
+   *
+   * The retention options need the bank's adaptive memory mode to be "rank" or "lifecycle",
+   * the truth options "lifecycle"; the server answers 409 otherwise (and when retiring a
+   * memory that is already retired), and 404 for a memory that is missing or invalidated.
+   * Omitted options leave that setting as it is; at least one must be given. Resolves with
+   * the memory's lifecycle view after the change (the one `GET /memories/{memory_id}` shows
+   * under `lifecycle`).
+   */
+  async updateMemoryLifecycle(
+    bankId: string,
+    memoryId: string,
+    options: {
+      /** How much the memory matters, in [0, 1] (0.5 is neutral). Rescales the stability it has learned, so earlier reinforcement is kept. */
+      importance?: number;
+      /** true exempts the memory from retention decay; false lifts the exemption and clears its reason. */
+      forgettingExempt?: boolean;
+      /** Why the memory is exempt. */
+      exemptionReason?: string;
+      /** "superseded" or "refuted" retires the memory from current recall, "active" restores it, "uncertain" marks it contested. */
+      truthStatus?: "active" | "uncertain" | "superseded" | "refuted";
+      /** With "superseded"/"refuted": the memory that replaces this one, a different live memory of the same bank with exactly the same tags. */
+      supersededBy?: string;
+      /** Why the truth status changed; recorded on the claim. */
+      reason?: string;
+      /** true places the memory on hold: never archived or pruned, always fully retrievable. false lifts the exemption. Not combined with forgettingExempt or exemptionReason. */
+      hold?: boolean;
+      /** "active" returns an archived memory to normal recall. */
+      retentionState?: "active";
+      signal?: AbortSignal;
+    }
+  ): Promise<MemoryLifecycle> {
+    const response = await sdk.updateMemoryLifecycle({
+      client: this.client,
+      path: { bank_id: bankId, memory_id: memoryId },
+      body: {
+        importance: options.importance,
+        forgetting_exempt: options.forgettingExempt,
+        exemption_reason: options.exemptionReason,
+        truth_status: options.truthStatus,
+        superseded_by: options.supersededBy,
+        reason: options.reason,
+        hold: options.hold,
+        retention_state: options.retentionState,
+      },
+      signal: options.signal,
+    });
+
+    return this.validateResponse(response, "updateMemoryLifecycle");
   }
 
   /**
@@ -2161,6 +2251,9 @@ export type {
   BankConfigResponse,
   CreateBankRequest,
   Budget,
+  ConfirmMemoryResponse,
+  MemoryLifecycle,
+  RecallLifecycle,
   BankTemplateManifest,
   BankTemplateConfig,
   BankTemplateMentalModel,

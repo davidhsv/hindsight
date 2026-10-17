@@ -489,7 +489,7 @@ class PostgresMemories(MemoriesExtension):
     ) -> None:
         if when is None:
             # A clear is a requeue, and a requeue goes through the one helper that keeps retired
-            # facts out of the queue (DESIGN.md §7); callers should name it directly.
+            # facts out of the queue; callers should name it directly.
             await self.requeue_units(
                 conn, bank_id=bank_id, unit_ids=unit_ids, reason="mark_consolidated", clear_failed=failed
             )
@@ -849,6 +849,8 @@ class PostgresMemories(MemoriesExtension):
         evidence_ids: Sequence[str],
         candidate_source_ids: Sequence[str] | None,
         reason: str | None = None,
+        retired_via: str = "inherited",
+        ignored_citer_ids: Sequence[str] = (),
         now: datetime | None = None,
     ) -> list[str]:
         return await pg_claims.inherit_from_observation(
@@ -862,6 +864,8 @@ class PostgresMemories(MemoriesExtension):
             evidence_ids=evidence_ids,
             candidate_source_ids=candidate_source_ids,
             reason=reason,
+            retired_via=retired_via,
+            ignored_citer_ids=ignored_citer_ids,
             now=now,
         )
 

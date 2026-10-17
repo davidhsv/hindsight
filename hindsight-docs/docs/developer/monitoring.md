@@ -208,7 +208,7 @@ contributes three — so they are not bounded by the number of batches in the ru
 
 ### Adaptive Memory Metrics
 
-Recorded only for banks whose adaptive memory mode is not `off` (see [Adaptive memory](/developer/configuration#adaptive-memory)); a server with the feature off exports none of them. Exported names are the OTel instrument name with dots turned into underscores and `_total` added to counters; histograms export `_bucket`, `_sum` and `_count`. The first column is the name the requirements use for each signal.
+Recorded only for banks whose [adaptive memory](./adaptive-memory.mdx) mode is not `off` (settings under [Adaptive memory](./configuration.mdx#adaptive-memory)); a server with the feature off exports none of them. Exported names are the OTel instrument name with dots turned into underscores and `_total` added to counters; histograms export `_bucket`, `_sum` and `_count`. The first column is a short name for each signal; operational counters, which report the machinery rather than memory behaviour, have none. To evaluate `observe` mode, compare `top_k_changed_total` with your recall count: it is how often `rank` would have changed the results callers saw.
 
 | Signal | Exported (Prometheus) | OTel instrument | Type | Labels | Recorded when |
 |--------|-----------------------|-----------------|------|--------|---------------|

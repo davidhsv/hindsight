@@ -406,7 +406,7 @@ async def delete_chunks(*, conn, fq_table: Callable[[str], str], bank_id: str, c
     """Delete the named chunks with their memories and links, taking row locks in a total order."""
     from .adaptive_claims import relock_relations_before_delete, repair_lifecycle_for_deleted_facts
 
-    # The facts these chunks own, for the lifecycle side of their delete (DESIGN.md §7): relation
+    # The facts these chunks own, for the lifecycle side of their delete: relation
     # rows locked in one order for the SET NULL cascade, and claims only these facts justified
     # reverted, both before any row goes.
     doomed = [

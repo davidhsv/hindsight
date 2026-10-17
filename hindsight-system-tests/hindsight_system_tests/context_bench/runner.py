@@ -9,7 +9,7 @@ One run = one server profile (a checkout plus server env) and a list of request
 - ``final@0.30`` / ``reranker@0.30`` — plus a ``min_scores`` floor on that stage;
 - components join with ``+`` (``tags+final@0.30``); ``#2`` repeats a variant (determinism).
 
-With ``send_context`` every request also carries the A49 ``context`` object and ``purpose``,
+With ``send_context`` every request also carries the request ``context`` object and ``purpose``,
 which a server without the admission layer ignores (FastAPI drops unknown fields).
 
 Rows keep labels and scores, not judgments: the report applies client-side gates and

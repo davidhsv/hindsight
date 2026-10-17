@@ -14,7 +14,7 @@ without touching this file:
   extended past 0.9, applied client-side (see ``CLIENT_SWEEPS``).
 
 The default cap is ``INJECTION_CAP`` (10): what an agent would inject. Thresholds are picked
-per family on the dev split by F0.5 (precision-favoured, A23 auto_context), ties broken by
+per family on the dev split by F0.5 (precision-favoured, as auto_context is), ties broken by
 lower pollution; the holdout split is then scored once at that threshold.
 """
 
@@ -41,9 +41,9 @@ INJECTION_CAP = 10
 REPEAT_SUFFIX = "-repeat"
 TIE_TOLERANCE = 1e-6
 
-#: Client-side floors over the ungated rows. ``semantic`` is arm B: the A33 sweep plus two
+#: Client-side floors over the ungated rows. ``semantic`` is arm B: the threshold sweep plus two
 #: midpoints, because bge-small cosines of relevant memories sit in a narrow 0.7-0.9 band.
-#: ``final`` extends arm C past the A33 range: the server sweep peaks at its 0.9 edge, and the
+#: ``final`` extends arm C past the sweep's range: the server sweep peaks at its 0.9 edge, and the
 #: server's ``min_scores.final`` equals this client-side floor on every swept threshold
 #: (``server_vs_client_min_scores`` in summary.json), so the extension costs no server run.
 CLIENT_SWEEPS = {"semantic": (*SWEEP, 0.75, 0.85), "final": (0.95, 0.97, 0.99)}
@@ -117,14 +117,22 @@ def admitted_labels(row: QueryRow, config: Config) -> tuple[str, ...]:
     return tuple(labels if config.cap is None else labels[: config.cap])
 
 
-def _family_of(variant: str) -> tuple[str, float | None] | None:
+@dataclass(frozen=True)
+class _Family:
+    """The arm a run variant belongs to, and the gate threshold it was run at (None: ungated)."""
+
+    name: str
+    threshold: float | None
+
+
+def _family_of(variant: str) -> _Family | None:
     if "#" in variant:
         return None  # a repeat: determinism only
     match = re.fullmatch(r"(?:(tags)\+)?(final|reranker|semantic|keyword)@([0-9.]+)", variant)
     if match:
         prefix = f"{match.group(1)}+" if match.group(1) else ""
-        return f"{prefix}{match.group(2)}", float(match.group(3))
-    return variant, None
+        return _Family(f"{prefix}{match.group(2)}", float(match.group(3)))
+    return _Family(variant, None)
 
 
 def configs_for(record: RunRecord) -> list[Config]:
@@ -139,8 +147,8 @@ def configs_for(record: RunRecord) -> list[Config]:
         family = _family_of(variant)
         if family is None:
             continue
-        name, threshold = family
-        family_key = f"{record.label}:{name}"
+        threshold = family.threshold
+        family_key = f"{record.label}:{family.name}"
         if threshold is None:
             for cap in (5, INJECTION_CAP, None):
                 out.append(Config(record.label, family_key, variant, None, None, cap))
@@ -192,10 +200,19 @@ DEV = [query for query in QUERIES if query.id not in HOLDOUT]
 HOLD = [query for query in QUERIES if query.id in HOLDOUT]
 
 
+@dataclass(frozen=True, order=True)
+class _Selection:
+    """How a configuration ranks on dev: F0.5 first, then less pollution, then the higher threshold."""
+
+    f05: float
+    neg_pollution: float
+    threshold: float
+
+
 def _select(scorer: Scorer, configs: Sequence[Config]) -> Config:
-    def key(config: Config) -> tuple[float, float, float]:
+    def key(config: Config) -> _Selection:
         metrics = scorer.metrics(config, DEV)
-        return (metrics["f0.5"] or 0.0, -(metrics["context_pollution_rate"] or 0.0), config.threshold or 0.0)
+        return _Selection(metrics["f0.5"] or 0.0, -(metrics["context_pollution_rate"] or 0.0), config.threshold or 0.0)
 
     return max(configs, key=key)
 
@@ -239,8 +256,16 @@ def _family_label(family: str) -> str:
     return DISPLAY.get(family, family)
 
 
-def _family_sort(family: str) -> tuple[int, str]:
-    return (ORDER.index(family) if family in ORDER else len(ORDER), family)
+@dataclass(frozen=True, order=True)
+class _FamilyOrder:
+    """Report order: the arms in ``ORDER`` first, in that order, then any other by name."""
+
+    rank: int
+    family: str
+
+
+def _family_sort(family: str) -> _FamilyOrder:
+    return _FamilyOrder(ORDER.index(family) if family in ORDER else len(ORDER), family)
 
 
 def determinism(scorer: Scorer, run: str, first: str, second: str) -> dict[str, Any] | None:
@@ -368,7 +393,7 @@ NOT_RUN = (
     "D' decision-model reranker (`HINDSIGHT_API_DECISION_MODEL_PROVIDER=typesafe`): not run. It orders the pool by one "
     "Noul question per candidate and hands back positions (`engine/search/decision_reranker.py`); it never prunes, so it "
     "cannot abstain or shrink the injected set, and it would spend ~300 TypeSafe questions per recall.",
-    "Generative judge and the lifecycle/admission arms (A34 B-F): need the feature server; see the commands below.",
+    "Generative judge and the lifecycle/admission arms (B-F): need the feature server; see the commands below.",
 )
 
 
@@ -382,7 +407,7 @@ COMMANDS = [
     "    --api-dir $BASE --variants plain,tags",
     "uv run python -m hindsight_system_tests.context_bench run --label base-jev-repeat --profile jev --pg0 hindsight-ctxbench-jev:15531 \\",
     "    --api-dir $BASE --variants plain --queries <holdout ids> --reuse <out>/runs/base-jev.json",
-    "# a feature-server arm: A49 context + purpose in every request, the admission mode as server env",
+    "# a feature-server arm: request context + purpose in every request, the admission mode as server env",
     "uv run python -m hindsight_system_tests.context_bench run --label feat-observe --api-dir $FEAT --send-context \\",
     "    --variants plain,tags --server-env HINDSIGHT_API_CONTEXT_ADMISSION_MODE=observe",
     "uv run python -m hindsight_system_tests.context_bench run --label feat-filter --api-dir $FEAT --send-context \\",
@@ -512,7 +537,7 @@ def _markdown(
         lines.append(_row(f"top-{config.cap or 'all'}", scorer.metrics(config, QUERIES)))
     lines.append("")
 
-    lines += ["## Threshold sweeps (A33), dev split, cap 10", ""]
+    lines += ["## Threshold sweeps, dev split, cap 10", ""]
     for family in sorted(families, key=_family_sort):
         sweep = sorted((c for c in families[family] if c.threshold is not None), key=lambda c: c.threshold or 0)
         if not sweep:
@@ -546,7 +571,7 @@ def _markdown(
         lines.append("")
 
     target = [q for q in QUERIES if q.category == "all_candidates_irrelevant"]
-    lines += ["## all_candidates_irrelevant (A60), all splits", ""]
+    lines += ["## all_candidates_irrelevant, all splits", ""]
     lines += [
         "| arm | threshold | returned [] | mean admitted | tokens/q | most common top-1 |",
         "|---|---|---|---|---|---|",

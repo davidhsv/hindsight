@@ -1,6 +1,6 @@
 """Adaptive memory: per-memory retention, reinforcement and claim state.
 
-Three axes that never derive from one another (DESIGN.md §1): what enters a recall's context,
+Three axes that never derive from one another: what enters a recall's context,
 what is believed (claim state), and how readily a memory comes back without a strong cue
 (retention). This package holds the pure parts — models, settings, the retention math and the
 recall scoring hooks. Storage is the memories store's (``MemoriesExtension.load_adaptive_state``

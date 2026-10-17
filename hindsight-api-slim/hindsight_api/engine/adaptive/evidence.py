@@ -1,4 +1,4 @@
-"""Reinforcement evidence: who said it, and how independent that source is (DESIGN.md §4.3, R10).
+"""Reinforcement evidence: who said it, and how independent that source is.
 
 Pure. A producer turns a memory's provenance into an :class:`EvidenceKey` and builds a
 :class:`~.models.ReinforcementEvent` from it; the store's idempotency ledger

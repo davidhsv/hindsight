@@ -2,8 +2,8 @@
 
 The reader recall uses: one query per recall over the post-trim candidate ids (at most
 ``reranker_max_candidates``, 300 by default), a ``FULL OUTER JOIN`` of the two tables' rows for
-those ids. Measured on a 50k-memory bank with 25k retention and 1k claim rows, probing 300 ids
-(P1-NOTES.md): each side gets the plan it would get as a query of its own (an index scan on the
+those ids. Measured on a 50k-memory bank with 25k retention and 1k claim rows, probing 300 ids:
+each side gets the plan it would get as a query of its own (an index scan on the
 retention primary key; the claim side whatever its size warrants), and over a local socket the
 join's 0.53 ms median matches the 0.55 ms of two separate queries. It is one round trip instead of
 two, which is the cost that dominates against a networked database or read replica.
@@ -440,7 +440,7 @@ async def record_reinforcement(
                 rows=[_update_of(state, reasons[mid]) for mid, state in states.items() if state != base[mid]],
                 now=now,
             )
-            # Any applied reinforcement brings an archived memory back (R25): it was just useful.
+            # Any applied reinforcement brings an archived memory back: it was just useful.
             # Cooldowns and duplicates are not evidence of new use, so they leave it archived. On an
             # active row it restarts the archive grace period: the sweep may not run again before
             # R falls back below the threshold, and the mark must not span the use in between.
@@ -599,7 +599,7 @@ async def merge_retention(
     settings: AdaptiveSettings,
     now: datetime,
 ) -> RetentionState | None:
-    """A lifecycle MERGE: the survivor's stability becomes the larger of the pair's (DESIGN.md §5.2).
+    """A lifecycle MERGE: the survivor's stability becomes the larger of the pair's.
 
     Each side already counted its own evidence keys once, so the maximum, not a sum, avoids counting
     them twice. Both rows are locked in the reinforcement writers' order (default rows created where

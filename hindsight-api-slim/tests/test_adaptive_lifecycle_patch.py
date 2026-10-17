@@ -146,7 +146,7 @@ async def test_superseding_an_observation_retires_it_and_its_raw_source_and_reco
         new_obs,
     )
 
-    # The raw source inherits (DESIGN §5.3), so the stale fact stops answering current recall.
+    # The raw source inherits the retirement, so the stale fact stops answering current recall.
     source = (await _get(api_client, bank, old_fact)).json()["lifecycle"]["claim"]
     assert (source["truth_status"], source["retired_via"], source["inherited_from_id"]) == (
         "superseded",

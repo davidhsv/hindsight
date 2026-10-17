@@ -1,4 +1,4 @@
-"""Adaptive-memory state across a bank or document transfer (DESIGN.md §7).
+"""Adaptive-memory state across a bank or document transfer.
 
 The replay gives every memory a fresh id, so the rows keyed by memory id cannot travel verbatim.
 Export puts each memory's retention and claim on its ``TransferFact`` / ``TransferObservation``

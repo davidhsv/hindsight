@@ -85,7 +85,7 @@ def _bank() -> str:
 # --- Field inventory ---------------------------------------------------------------
 
 
-def test_field_split_matches_the_contract():
+def test_exactly_the_per_bank_fields_are_configurable():
     """Exactly the eight per-bank fields are configurable; the rest are server-level."""
     adaptive = {f.name for f in dataclasses.fields(HindsightConfig) if f.name.startswith("adaptive_memory_")}
     assert adaptive == set(_HIERARCHICAL) | set(_STATIC)

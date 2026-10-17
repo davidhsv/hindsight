@@ -1,4 +1,4 @@
-"""Claim-lifecycle value types shared by the memories store and its callers (DESIGN.md §5, §7).
+"""Claim-lifecycle value types shared by the memories store and its callers.
 
 The writers live on ``MemoriesExtension`` (``lock_claims``, ``cas_retire``, ``set_claim``, …);
 these are the values they exchange that are not a single stored row: the retired-status set the
@@ -15,13 +15,13 @@ from typing import Literal
 
 from .models import TruthStatus
 
-#: Statuses that take a memory out of the current view and out of consolidation (DESIGN.md §7: a
+#: Statuses that take a memory out of the current view and out of consolidation (a
 #: superseded or refuted raw fact is never requeued). ``uncertain`` is a live, contested claim.
 RETIRED_STATUSES: tuple[TruthStatus, ...] = (TruthStatus.SUPERSEDED, TruthStatus.REFUTED)
 #: The SQL literal list of :data:`RETIRED_STATUSES`, for ``truth_status IN (…)``.
 RETIRED_STATUSES_SQL = ", ".join(f"'{s.value}'" for s in RETIRED_STATUSES)
 
-#: The ``reason`` a claim reverted by the delete repair records (DESIGN.md §7).
+#: The ``reason`` a claim reverted by the delete repair records.
 REVERTED_EVIDENCE_DELETED = "reverted:evidence_deleted"
 
 
@@ -29,7 +29,7 @@ def reingest_text_key(text: str | None) -> str:
     """The carry-forward match key of a fact's text: sha256 of its whitespace-collapsed, casefolded form.
 
     A re-ingest re-extracts the document; a fact whose text comes back the same up to spacing and
-    case is the same claim and keeps its lifecycle state (DESIGN.md §7).
+    case is the same claim and keeps its lifecycle state.
     """
     normalized = " ".join((text or "").split()).casefold()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()

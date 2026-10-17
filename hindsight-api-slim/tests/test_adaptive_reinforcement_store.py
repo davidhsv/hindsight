@@ -10,8 +10,8 @@ row (with the edges other claims hold to the memory) and restore puts it back.
 
 Seeding uses raw SQL, so the module is ``memory_backend_incompatible``: memories go straight into
 ``memory_units`` because the tests need exact ``mentioned_at`` values, and claim / evidence /
-relation rows go straight into their tables because their writer (the truth lifecycle) arrives in
-a later phase.
+relation rows go straight into their tables so each case starts from an exact claim state, which
+the truth-lifecycle writers cannot pin.
 """
 
 import asyncio
@@ -615,7 +615,7 @@ async def test_invalidate_then_restore_keeps_stability_count_and_keys(memory, re
 @pytest.mark.asyncio
 async def test_an_archived_memory_restores_in_both_copies_of_a_cloned_bank(memory, request_context):
     """The archive carries the snapshot's learned state but not its ledger (events never leave the
-    deployment that recorded them, DESIGN.md §7): the clone restores S and the count, the source
+    deployment that recorded them): the clone restores S and the count, the source
     keeps its keys, and restoring one copy never blocks the other on a global primary key."""
     from hindsight_api.engine.transfer import export_bank
 

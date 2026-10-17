@@ -10736,7 +10736,7 @@ class MemoryEngine(MemoryEngineInterface):
                     if scored_results and served_provider != DECISION_MODEL_RERANKER:
                         adaptive.receive(await adaptive_load_task)
                         if adaptive.load_error is not None:
-                            # P1 has no fail-closed path: rank/observe continue with factor 1.
+                            # The retention read has no fail-closed path: ranking continues with factor 1.
                             logger.warning(
                                 "[RECALL %s] adaptive state load failed (%s: %s); continuing with factor 1",
                                 recall_id,
@@ -10816,7 +10816,7 @@ class MemoryEngine(MemoryEngineInterface):
                     from .search.recall_boost import apply_post_rerank_boost
 
                     stage2 = apply_post_rerank_boost(scored_results, strategy_boosts, passthrough=is_passthrough)
-                # Adaptive factor: after every boost, before the sort (DESIGN.md §4.2). Observe
+                # Adaptive factor: after every boost, before the sort. Observe
                 # computes it and the counterfactual without touching `weight`.
                 adaptive_scored = False
                 if adaptive is not None:
