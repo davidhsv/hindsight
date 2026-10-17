@@ -711,7 +711,7 @@
           "Memory"
         ],
         "summary": "Get memory unit",
-        "description": "Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead.",
+        "description": "Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead. When the bank's adaptive memory mode is not 'off', or adaptive state is stored for the memory, the payload also carries 'lifecycle': its retention (stability, retrievability now, importance, exemption), claim, lifecycle relations and most recent reinforcement events.",
         "operationId": "get_memory",
         "parameters": [
           {
@@ -895,6 +895,169 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/default/banks/{bank_id}/memories/{memory_id}/confirm": {
+      "post": {
+        "tags": [
+          "Memory"
+        ],
+        "summary": "Confirm memory",
+        "description": "Record explicit evidence that a memory (a fact or an observation) still holds. The confirmation reinforces the memory, so it stays readily recallable for longer. A source_key confirms a memory at most once; re-sending it changes nothing. Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle' with reinforcement enabled (409 otherwise; observe mode never changes state). 404 when the memory is missing or invalidated.",
+        "operationId": "confirm_memory",
+        "parameters": [
+          {
+            "name": "bank_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bank Id"
+            }
+          },
+          {
+            "name": "memory_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Memory Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ConfirmMemoryRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfirmMemoryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle": {
+      "patch": {
+        "tags": [
+          "Memory"
+        ],
+        "summary": "Update memory lifecycle",
+        "description": "Change how a memory (a fact or an observation) is retained: its importance and its exemption from retention decay. Returns the memory's lifecycle view, the same one GET /memories/{memory_id} shows under 'lifecycle'. Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle' (409 otherwise). 404 when the memory is missing or invalidated.",
+        "operationId": "update_memory_lifecycle",
+        "parameters": [
+          {
+            "name": "bank_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bank Id"
+            }
+          },
+          {
+            "name": "memory_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Memory Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemoryLifecycleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryLifecycle"
+                }
               }
             }
           },
@@ -9803,7 +9966,7 @@
               }
             ],
             "title": "Adaptive Memory Reinforcement Enabled",
-            "description": "Let reinforcement events raise a memory's stability (reserved; takes effect in a later release)"
+            "description": "Let reinforcement events raise a memory's stability (rank and lifecycle modes only)"
           },
           "adaptive_memory_base_stability_days": {
             "anyOf": [
@@ -10486,6 +10649,156 @@
           "document_id": "session_1"
         }
       },
+      "ClaimShadowView": {
+        "properties": {
+          "would_status": {
+            "type": "string",
+            "title": "Would Status"
+          },
+          "deciding_snapshot": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Deciding Snapshot"
+          },
+          "evidence_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Ids"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "would_status"
+        ],
+        "title": "ClaimShadowView",
+        "description": "What observe mode would have retired this memory as (diagnostic only)."
+      },
+      "ClaimView": {
+        "properties": {
+          "truth_status": {
+            "type": "string",
+            "title": "Truth Status"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid From"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid To"
+          },
+          "retired_via": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retired Via"
+          },
+          "superseded_by_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By Id"
+          },
+          "inherited_from_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inherited From Id"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "evidence_memory_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Memory Ids"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "truth_status"
+        ],
+        "title": "ClaimView",
+        "description": "The memory's claim row: what should be believed about it, and why."
+      },
       "ClearMemoryObservationsResponse": {
         "properties": {
           "deleted_count": {
@@ -10502,6 +10815,120 @@
         "example": {
           "deleted_count": 3
         }
+      },
+      "ConfirmMemoryRequest": {
+        "properties": {
+          "source_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Key",
+            "description": "Identifies this piece of evidence. A memory is confirmed at most once per key: re-sending the same key is reported as deduplicated and changes nothing, so a retry is safe. Omit it and every request counts as a separate confirmation."
+          },
+          "event_time": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Time",
+            "description": "When the confirmation happened (ISO 8601; a time without an offset is UTC). Defaults to now. It may be in the past, but not in the future."
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason",
+            "description": "Free-text note for the audit log, when audit logging is on. Not stored with the memory."
+          }
+        },
+        "type": "object",
+        "title": "ConfirmMemoryRequest",
+        "description": "Request model for explicitly confirming that a memory still holds.\n\nA confirmation is reinforcement evidence: it makes the memory more stable, so it stays\nreadily recallable for longer. Needs the bank's adaptive memory mode to be 'rank' or\n'lifecycle' with reinforcement enabled.",
+        "example": {
+          "event_time": "2026-10-17T09:00:00Z",
+          "reason": "verified against the deployment inventory",
+          "source_key": "review-2026-10-17"
+        }
+      },
+      "ConfirmMemoryResponse": {
+        "properties": {
+          "memory_id": {
+            "type": "string",
+            "title": "Memory Id"
+          },
+          "recorded": {
+            "type": "boolean",
+            "title": "Recorded",
+            "description": "True when the confirmation was recorded as evidence for the memory."
+          },
+          "deduplicated": {
+            "type": "boolean",
+            "title": "Deduplicated",
+            "description": "True when this source_key had already confirmed the memory; nothing changed."
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome",
+            "description": "'applied' (the memory was reinforced), 'cooldown' (recorded, but too soon after its last reinforcement to add stability) or 'deduplicated'."
+          },
+          "stability_days": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stability Days",
+            "description": "The memory's stability after the call: the days until, without reinforcement, its retrievability falls to about 37%."
+          },
+          "reinforcement_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reinforcement Count",
+            "description": "How many times the memory has been reinforced, after the call."
+          }
+        },
+        "type": "object",
+        "required": [
+          "memory_id",
+          "recorded",
+          "deduplicated"
+        ],
+        "title": "ConfirmMemoryResponse",
+        "description": "What an explicit confirmation did."
       },
       "ConsolidationRequest": {
         "properties": {
@@ -14728,6 +15155,32 @@
             ],
             "title": "Update Mode",
             "description": "How to handle an existing document with the same document_id. 'replace' (default) deletes old data and reprocesses from scratch. 'append' concatenates new content to the existing document text and reprocesses."
+          },
+          "importance": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Importance",
+            "description": "How much the memories extracted from this item matter, in [0, 1] (0.5 is neutral). Scales how long they stay readily recallable without being reinforced. Applied only when the bank's adaptive memory mode is 'rank' or 'lifecycle'; ignored in every other mode."
+          },
+          "forgetting_exempt": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Forgetting Exempt",
+            "description": "Exempt the memories extracted from this item from retention decay: they always rank as fully retrievable. Applied only when the bank's adaptive memory mode is 'rank' or 'lifecycle'; ignored in every other mode."
           }
         },
         "type": "object",
@@ -14759,6 +15212,75 @@
           ],
           "timestamp": "2024-01-15T10:30:00Z"
         }
+      },
+      "MemoryLifecycle": {
+        "properties": {
+          "memory_id": {
+            "type": "string",
+            "title": "Memory Id"
+          },
+          "archived": {
+            "type": "boolean",
+            "title": "Archived"
+          },
+          "stored": {
+            "type": "boolean",
+            "title": "Stored"
+          },
+          "retention": {
+            "$ref": "#/components/schemas/RetentionView"
+          },
+          "claim": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClaimView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "relations_out": {
+            "items": {
+              "$ref": "#/components/schemas/RelationView"
+            },
+            "type": "array",
+            "title": "Relations Out"
+          },
+          "relations_in": {
+            "items": {
+              "$ref": "#/components/schemas/RelationView"
+            },
+            "type": "array",
+            "title": "Relations In"
+          },
+          "recent_events": {
+            "items": {
+              "$ref": "#/components/schemas/ReinforcementEventView"
+            },
+            "type": "array",
+            "title": "Recent Events"
+          },
+          "shadow": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClaimShadowView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "memory_id",
+          "archived",
+          "stored",
+          "retention"
+        ],
+        "title": "MemoryLifecycle",
+        "description": "Everything the store holds about one memory's adaptive state.\n\n``archived`` memories (curation-invalidated) are read from the snapshot taken when they were\ninvalidated, which carries no shadow record. ``stored`` is False when nothing at all is stored\nfor the memory, so ``retention`` is all defaults and every list is empty: the GET view leaves\nthe key out for such a memory while the bank's mode is off."
       },
       "MemoryTimeseriesBucket": {
         "properties": {
@@ -18522,6 +19044,155 @@
         "title": "RefreshMentalModelRequest",
         "description": "Optional body of POST /mental-models/{id}/refresh."
       },
+      "ReinforcementEventView": {
+        "properties": {
+          "source_type": {
+            "type": "string",
+            "title": "Source Type"
+          },
+          "source_key": {
+            "type": "string",
+            "title": "Source Key"
+          },
+          "event_time": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Event Time"
+          },
+          "weight": {
+            "type": "number",
+            "title": "Weight"
+          },
+          "independence_weight": {
+            "type": "number",
+            "title": "Independence Weight"
+          },
+          "applied_gain": {
+            "type": "number",
+            "title": "Applied Gain"
+          },
+          "outcome": {
+            "type": "string",
+            "title": "Outcome"
+          },
+          "processed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Processed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_type",
+          "source_key",
+          "event_time",
+          "weight",
+          "independence_weight",
+          "applied_gain",
+          "outcome"
+        ],
+        "title": "ReinforcementEventView",
+        "description": "One ledger row."
+      },
+      "RelationView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "relation_type": {
+            "type": "string",
+            "title": "Relation Type"
+          },
+          "source_memory_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Memory Id"
+          },
+          "target_memory_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Memory Id"
+          },
+          "source_snapshot": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Source Snapshot"
+          },
+          "target_snapshot": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Target Snapshot"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "relation_type",
+          "source_memory_id",
+          "target_memory_id",
+          "origin"
+        ],
+        "title": "RelationView",
+        "description": "One lifecycle relation. A NULL endpoint is a tombstone: that memory is gone (its snapshot stays)."
+      },
       "ReprocessDocumentResponse": {
         "properties": {
           "success": {
@@ -18690,6 +19361,128 @@
             "total_tokens": 600
           }
         }
+      },
+      "RetentionView": {
+        "properties": {
+          "materialized": {
+            "type": "boolean",
+            "title": "Materialized",
+            "description": "True when a retention row exists; False when every value is a default."
+          },
+          "retrievability": {
+            "type": "number",
+            "title": "Retrievability"
+          },
+          "stability_days": {
+            "type": "number",
+            "title": "Stability Days"
+          },
+          "importance": {
+            "type": "number",
+            "title": "Importance"
+          },
+          "last_reinforced_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Reinforced At"
+          },
+          "reinforcement_count": {
+            "type": "integer",
+            "title": "Reinforcement Count"
+          },
+          "access_count": {
+            "type": "integer",
+            "title": "Access Count"
+          },
+          "last_recalled_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Recalled At"
+          },
+          "forgetting_exempt": {
+            "type": "boolean",
+            "title": "Forgetting Exempt"
+          },
+          "exemption_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exemption Reason"
+          },
+          "retention_state": {
+            "type": "string",
+            "title": "Retention State",
+            "default": "active"
+          },
+          "below_threshold_since": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Below Threshold Since"
+          },
+          "archived_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "materialized",
+          "retrievability",
+          "stability_days",
+          "importance",
+          "last_reinforced_at",
+          "reinforcement_count",
+          "access_count",
+          "forgetting_exempt"
+        ],
+        "title": "RetentionView",
+        "description": "A memory's retention, and its retrievability at the view's ``now``."
       },
       "RetryOperationResponse": {
         "properties": {
@@ -19381,6 +20174,58 @@
         "type": "object",
         "title": "UpdateDocumentResponse",
         "description": "Response model for update document endpoint."
+      },
+      "UpdateMemoryLifecycleRequest": {
+        "properties": {
+          "importance": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Importance",
+            "description": "How much the memory matters, in [0, 1] (0.5 is neutral). Rescales the stability the memory has learned by the ratio of the old and new importance, so earlier reinforcement is kept."
+          },
+          "forgetting_exempt": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Forgetting Exempt",
+            "description": "Exempt the memory from retention decay: it always ranks as fully retrievable. False lifts the exemption and clears its reason."
+          },
+          "exemption_reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exemption Reason",
+            "description": "Why the memory is exempt. Cannot be set while turning forgetting_exempt off."
+          }
+        },
+        "type": "object",
+        "title": "UpdateMemoryLifecycleRequest",
+        "description": "Request model for changing how a memory is retained.\n\nNeeds the bank's adaptive memory mode to be 'rank' or 'lifecycle'. Omitted fields stay as they\nare; at least one must be set.",
+        "example": {
+          "exemption_reason": "compliance requirement",
+          "forgetting_exempt": true,
+          "importance": 0.9
+        }
       },
       "UpdateMemoryRequest": {
         "properties": {

@@ -52,7 +52,11 @@ hindsight_client_api/models/chunk_attachment.py
 hindsight_client_api/models/chunk_data.py
 hindsight_client_api/models/chunk_include_options.py
 hindsight_client_api/models/chunk_response.py
+hindsight_client_api/models/claim_shadow_view.py
+hindsight_client_api/models/claim_view.py
 hindsight_client_api/models/clear_memory_observations_response.py
+hindsight_client_api/models/confirm_memory_request.py
+hindsight_client_api/models/confirm_memory_response.py
 hindsight_client_api/models/consolidation_request.py
 hindsight_client_api/models/consolidation_response.py
 hindsight_client_api/models/consolidation_scope_pattern.py
@@ -136,6 +140,7 @@ hindsight_client_api/models/memory_graph_node.py
 hindsight_client_api/models/memory_graph_node_data.py
 hindsight_client_api/models/memory_graph_table_row.py
 hindsight_client_api/models/memory_item.py
+hindsight_client_api/models/memory_lifecycle.py
 hindsight_client_api/models/memory_timeseries_bucket.py
 hindsight_client_api/models/memory_unit_list_item.py
 hindsight_client_api/models/mental_model_delta_operations.py
@@ -183,9 +188,12 @@ hindsight_client_api/models/reflect_tool_call.py
 hindsight_client_api/models/reflect_trace.py
 hindsight_client_api/models/refresh_mental_model_operation_details.py
 hindsight_client_api/models/refresh_mental_model_request.py
+hindsight_client_api/models/reinforcement_event_view.py
+hindsight_client_api/models/relation_view.py
 hindsight_client_api/models/reprocess_document_response.py
 hindsight_client_api/models/retain_request.py
 hindsight_client_api/models/retain_response.py
+hindsight_client_api/models/retention_view.py
 hindsight_client_api/models/retry_operation_response.py
 hindsight_client_api/models/run_setting_model.py
 hindsight_client_api/models/set_bank_alias_primary_request.py
@@ -211,6 +219,7 @@ hindsight_client_api/models/update_disposition_request.py
 hindsight_client_api/models/update_document_observation_scopes.py
 hindsight_client_api/models/update_document_request.py
 hindsight_client_api/models/update_document_response.py
+hindsight_client_api/models/update_memory_lifecycle_request.py
 hindsight_client_api/models/update_memory_request.py
 hindsight_client_api/models/update_mental_model_request.py
 hindsight_client_api/models/update_node_request.py

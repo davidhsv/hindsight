@@ -782,7 +782,7 @@
             }
           ],
           "default": null,
-          "description": "Let reinforcement events raise a memory's stability (reserved; takes effect in a later release)",
+          "description": "Let reinforcement events raise a memory's stability (rank and lifecycle modes only)",
           "title": "Adaptive Memory Reinforcement Enabled"
         },
         "adaptive_memory_base_stability_days": {

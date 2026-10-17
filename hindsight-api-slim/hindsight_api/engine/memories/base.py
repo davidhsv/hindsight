@@ -54,7 +54,15 @@ from ..search.tags import TagGroup, TagsMatch, tag_filter_active
 from ..search.types import RetrievalResult
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from ..adaptive.models import AdaptiveState
+    from ..adaptive.models import (
+        AdaptiveState,
+        ReinforcementEvent,
+        ReinforcementResult,
+        RetentionPolicy,
+        RetentionState,
+    )
+    from ..adaptive.settings import AdaptiveSettings
+    from ..adaptive.views import MemoryLifecycle
     from ..consolidation.consolidator import _TemporalBounds
     from ..embeddings import Embeddings
     from ..response_models import MemoryFact
@@ -1901,6 +1909,110 @@ class MemoriesExtension(Extension, ABC):
         beside the cross-encoder, outside its budgeted retrieval block).
         """
         return {}
+
+    async def record_reinforcement(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        events: Sequence[ReinforcementEvent],
+        settings: AdaptiveSettings,
+        now: datetime,
+        background: bool,
+        anchors: Mapping[str, datetime] | None = None,
+        initial_memory_ids: frozenset[str] = frozenset(),
+    ) -> ReinforcementResult:
+        """Record reinforcement events and apply them to the memories' retention, on ``conn``.
+
+        Runs as a savepoint inside ``conn``'s transaction when there is one; a failure rolls back
+        everything this call wrote, and nothing else. The caller decides what a failure means: the
+        producers catch it (consolidation in its nested savepoint, recall and reflect off the
+        response path), because reinforcement must never fail the operation that produced it.
+
+        Idempotent per ``(memory_id, source_type, source_key)``: an event whose key was ever
+        recorded for the memory is ``deduplicated`` and changes nothing, so a producer may re-send
+        freely. Nothing is written when ``settings`` says reinforcement is off for an event (mode
+        not rank/lifecycle, the bank's ``reinforcement_enabled``, the static recall/reflect source
+        switches): those come back ``disabled``. Memories with no retention row get one, with the
+        lazy defaults recall already scored them by (``anchors[memory_id]`` overrides the anchor,
+        e.g. an observation seeded from its pre-update mention time). A memory in
+        ``initial_memory_ids`` whose row this call creates applies its events as creating evidence
+        (the first anchors, the rest count once each).
+
+        ``background`` producers (recall, reflect) skip a memory another transaction is deleting
+        (``skipped_missing``) instead of waiting for it; request-path producers wait. Never writes
+        ``memory_units``, so it never moves ``updated_at``. ``now`` is the adaptive write clock,
+        stamped on every row written. Default: the no-op result, for a store without adaptive state.
+        """
+        from ..adaptive.models import ReinforcementResult
+
+        return ReinforcementResult()
+
+    async def set_retention_policy(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        importance: float | None = None,
+        forgetting_exempt: bool | None = None,
+        exemption_reason: str | None = None,
+        settings: AdaptiveSettings,
+        now: datetime,
+    ) -> RetentionState | None:
+        """Set a memory's importance and/or forgetting exemption; its retention row after, or None.
+
+        Creates the row if missing. A new importance rescales the stored stability by
+        ``(0.5 + new) / (0.5 + old)``, so what the memory learned is kept. Turning the exemption
+        off clears ``exemption_reason``; ``None`` leaves a field as it is. None when the memory is
+        not live in the bank. Waits for (never skips) a memory locked by another transaction.
+        Default None.
+        """
+        return None
+
+    async def set_retention_policies(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        policies: Sequence[RetentionPolicy],
+        settings: AdaptiveSettings,
+        now: datetime,
+    ) -> Mapping[str, RetentionState]:
+        """Bulk :meth:`set_retention_policy` (retain-time importance/exemption): the new rows by memory id.
+
+        Several policies for one memory merge in order. Memories not live in the bank are absent.
+        Default ``{}``.
+        """
+        return {}
+
+    async def minted_document_ids(self, conn, *, bank_id: str, document_ids: Sequence[str]) -> frozenset[str]:
+        """Which of ``document_ids`` the server minted (a retain that named no document).
+
+        Reinforcement keys a fact by its document, but a minted id groups only one anonymous retain
+        call, so it counts as weak evidence (``evidence_key``). Retain records the mint in the
+        document's ``retain_params`` (``document_id_minted``) while the bank's adaptive mode writes
+        state. Unknown ids are absent. Default: none, a store without that record keys every
+        document id as a client one.
+        """
+        return frozenset()
+
+    async def get_memory_lifecycle(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        now: datetime,
+        settings: AdaptiveSettings,
+    ) -> MemoryLifecycle | None:
+        """The adaptive view of one memory, live or archived (curation-invalidated); None if absent.
+
+        Retention is always present (the row, or the defaults recall scores the memory with) with
+        retrievability at ``now``; then the claim row, relations in and out, the newest reinforcement
+        events and the shadow record. ``stored`` says whether anything is stored at all. Default None.
+        """
+        return None
 
     # ------------------------------------------------------------------ addressed reads
     #

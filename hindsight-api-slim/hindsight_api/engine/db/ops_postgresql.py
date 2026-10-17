@@ -5,14 +5,21 @@ efficient batch operations.
 """
 
 import asyncio
+import uuid
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 from .base import DatabaseConnection
 from .ops import (
+    RETENTION_STATE_COLUMNS,
     ChunkIdOwnedByAnotherBank,
     ClaimedOperations,
     DataAccessOps,
     LinkExpansionRows,
+    ReinforcementEventRow,
+    ReinforcementKey,
+    RetentionLock,
+    RetentionStateUpdate,
     TagListingParts,
     UpdatedWindow,
     bank_serialization_sql,
@@ -1997,4 +2004,196 @@ class PostgreSQLOps(DataAccessOps):
             bank_id,
             serialization_key,
             limit,
+        )
+
+    # -- Adaptive memory ------------------------------------------------------
+
+    async def upsert_default_retention_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        retention_table: str,
+        units_table: str,
+        bank_id: str,
+        memory_ids: Sequence[uuid.UUID],
+        default_stability: Mapping[str, float],
+        fallback_stability: float,
+        anchors: Mapping[uuid.UUID, datetime],
+        now: datetime,
+        skip_locked: bool,
+    ) -> RetentionLock:
+        ids = sorted(set(memory_ids))
+        if not ids:
+            return RetentionLock(present=[], initialized=frozenset(), rows=[])
+        types = sorted(default_stability)
+        wanted = set(ids)
+        anchor_ids = sorted(a for a in anchors if a in wanted)
+        # One statement, the bulk_insert_links shape: the parents are locked FOR KEY SHARE in id
+        # order by the same statement that inserts the side rows, so a concurrent DELETE of a
+        # parent waits for our COMMIT and the deferred FK check cannot fail there (#1882). The
+        # defaults are looked up, not computed, here: the stability per fact type comes from
+        # retention.initial_stability in Python, and the anchor order mirrors default_anchor plus
+        # the created_at fallback the NOT NULL column needs.
+        flags = await conn.fetch(
+            f"""
+            WITH locked AS MATERIALIZED (
+                SELECT id, fact_type, mentioned_at, occurred_start, event_date, created_at
+                FROM {units_table}
+                WHERE bank_id = $1 AND id = ANY($2::uuid[])
+                ORDER BY id
+                FOR KEY SHARE{" SKIP LOCKED" if skip_locked else ""}
+            ),
+            inserted AS (
+                INSERT INTO {retention_table}
+                    (memory_id, bank_id, importance, stability_days, last_reinforced_at, reinforcement_count,
+                     access_count, forgetting_exempt, retention_state, model_version, created_at, updated_at)
+                SELECT l.id, $1, 0.5, COALESCE(d.stability, $5),
+                       COALESCE(a.anchor, l.mentioned_at, l.occurred_start, l.event_date, l.created_at),
+                       0, 0, FALSE, 'active', 1, $8, $8
+                FROM locked l
+                LEFT JOIN unnest($3::text[], $4::float8[]) AS d(fact_type, stability) ON d.fact_type = l.fact_type
+                LEFT JOIN unnest($6::uuid[], $7::timestamptz[]) AS a(memory_id, anchor) ON a.memory_id = l.id
+                ORDER BY l.id
+                ON CONFLICT (memory_id) DO NOTHING
+                RETURNING memory_id
+            )
+            SELECT l.id AS memory_id, (i.memory_id IS NOT NULL) AS initialized
+            FROM locked l
+            LEFT JOIN inserted i ON i.memory_id = l.id
+            ORDER BY l.id
+            """,
+            bank_id,
+            ids,
+            types,
+            [float(default_stability[t]) for t in types],
+            float(fallback_stability),
+            anchor_ids,
+            [anchors[a] for a in anchor_ids],
+            now,
+        )
+        present = [str(row["memory_id"]) for row in flags]
+        if not present:
+            return RetentionLock(present=[], initialized=frozenset(), rows=[])
+        # Per-memory serialization: every writer of a memory's adaptive state holds this row lock,
+        # taken in id order, before it reads or writes the ledger.
+        rows = await conn.fetch(
+            f"""
+            SELECT {RETENTION_STATE_COLUMNS}
+            FROM {retention_table}
+            WHERE bank_id = $1 AND memory_id = ANY($2::uuid[])
+            ORDER BY memory_id
+            FOR UPDATE
+            """,
+            bank_id,
+            [uuid.UUID(m) for m in present],
+        )
+        return RetentionLock(
+            present=present,
+            initialized=frozenset(str(row["memory_id"]) for row in flags if row["initialized"]),
+            rows=list(rows),
+        )
+
+    async def fetch_reinforcement_keys(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        keys: Sequence[ReinforcementKey],
+    ) -> frozenset[ReinforcementKey]:
+        if not keys:
+            return frozenset()
+        rows = await conn.fetch(
+            f"""
+            SELECT e.memory_id, e.source_type, e.source_key
+            FROM {table} e
+            JOIN unnest($2::uuid[], $3::text[], $4::text[]) AS k(memory_id, source_type, source_key)
+              ON e.memory_id = k.memory_id AND e.source_type = k.source_type AND e.source_key = k.source_key
+            WHERE e.bank_id = $1
+            """,
+            bank_id,
+            [uuid.UUID(k.memory_id) for k in keys],
+            [k.source_type for k in keys],
+            [k.source_key for k in keys],
+        )
+        return frozenset(
+            ReinforcementKey(memory_id=str(r["memory_id"]), source_type=r["source_type"], source_key=r["source_key"])
+            for r in rows
+        )
+
+    async def insert_reinforcement_events(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        rows: Sequence[ReinforcementEventRow],
+    ) -> frozenset[str]:
+        if not rows:
+            return frozenset()
+        inserted = await conn.fetch(
+            f"""
+            INSERT INTO {table}
+                (id, bank_id, memory_id, source_type, source_key, event_time, weight, independence_weight,
+                 applied_gain, outcome, processed_at, created_at)
+            SELECT u.id, $1, u.memory_id, u.source_type, u.source_key, u.event_time, u.weight,
+                   u.independence_weight, u.applied_gain, u.outcome, u.processed_at, u.created_at
+            FROM unnest($2::uuid[], $3::uuid[], $4::text[], $5::text[], $6::timestamptz[], $7::float8[],
+                        $8::float8[], $9::float8[], $10::text[], $11::timestamptz[], $12::timestamptz[])
+                AS u(id, memory_id, source_type, source_key, event_time, weight, independence_weight,
+                     applied_gain, outcome, processed_at, created_at)
+            ORDER BY u.memory_id, u.source_type, u.source_key
+            ON CONFLICT (memory_id, source_type, source_key) DO NOTHING
+            RETURNING id
+            """,
+            bank_id,
+            [r.id for r in rows],
+            [r.memory_id for r in rows],
+            [r.source_type for r in rows],
+            [r.source_key for r in rows],
+            [r.event_time for r in rows],
+            [float(r.weight) for r in rows],
+            [float(r.independence_weight) for r in rows],
+            [float(r.applied_gain) for r in rows],
+            [r.outcome for r in rows],
+            [r.processed_at for r in rows],
+            [r.created_at for r in rows],
+        )
+        return frozenset(str(r["id"]) for r in inserted)
+
+    async def update_retention_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        rows: Sequence[RetentionStateUpdate],
+        now: datetime,
+    ) -> None:
+        if not rows:
+            return
+        await conn.execute(
+            f"""
+            UPDATE {table} AS s
+            SET importance = u.importance, stability_days = u.stability_days,
+                last_reinforced_at = u.last_reinforced_at, reinforcement_count = u.reinforcement_count,
+                access_count = u.access_count, last_recalled_at = u.last_recalled_at,
+                forgetting_exempt = u.forgetting_exempt, exemption_reason = u.exemption_reason, updated_at = $11
+            FROM unnest($2::uuid[], $3::float8[], $4::float8[], $5::timestamptz[], $6::int[], $7::int[],
+                        $8::timestamptz[], $9::bool[], $10::text[])
+                AS u(memory_id, importance, stability_days, last_reinforced_at, reinforcement_count, access_count,
+                     last_recalled_at, forgetting_exempt, exemption_reason)
+            WHERE s.memory_id = u.memory_id AND s.bank_id = $1
+            """,
+            bank_id,
+            [r.memory_id for r in rows],
+            [float(r.importance) for r in rows],
+            [float(r.stability_days) for r in rows],
+            [r.last_reinforced_at for r in rows],
+            [int(r.reinforcement_count) for r in rows],
+            [int(r.access_count) for r in rows],
+            [r.last_recalled_at for r in rows],
+            [bool(r.forgetting_exempt) for r in rows],
+            [r.exemption_reason for r in rows],
+            now,
         )

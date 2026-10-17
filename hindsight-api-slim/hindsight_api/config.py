@@ -1132,6 +1132,7 @@ ENV_ADAPTIVE_MEMORY_MAX_STABILITY_DAYS = "HINDSIGHT_API_ADAPTIVE_MEMORY_MAX_STAB
 ENV_ADAPTIVE_MEMORY_DEFAULT_VIEW = "HINDSIGHT_API_ADAPTIVE_MEMORY_DEFAULT_VIEW"
 ENV_ADAPTIVE_MEMORY_HISTORICAL_CUES = "HINDSIGHT_API_ADAPTIVE_MEMORY_HISTORICAL_CUES"
 ENV_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED = "HINDSIGHT_API_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED"
+ENV_ADAPTIVE_MEMORY_REFLECT_REINFORCEMENT_ENABLED = "HINDSIGHT_API_ADAPTIVE_MEMORY_REFLECT_REINFORCEMENT_ENABLED"
 ENV_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS = "HINDSIGHT_API_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS"
 ENV_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN = "HINDSIGHT_API_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN"
 ENV_ADAPTIVE_MEMORY_SOURCE_WEIGHTS = "HINDSIGHT_API_ADAPTIVE_MEMORY_SOURCE_WEIGHTS"
@@ -1464,6 +1465,10 @@ DEFAULT_ADAPTIVE_MEMORY_HISTORICAL_CUES = False
 # Recall inclusion is selection, not evidence of usefulness, and it makes benchmark
 # probes path-dependent, so recall never reinforces unless this is switched on.
 DEFAULT_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED = False
+# A successful reflect that cited a memory is evidence of use, so it reinforces by default.
+# Server-level so an evaluation arm can switch it off: reflect has no query timestamp and
+# stamps its events with the wall clock, which a historical-timestamp benchmark cannot replay.
+DEFAULT_ADAPTIVE_MEMORY_REFLECT_REINFORCEMENT_ENABLED = True
 DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS = 6.0
 DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN = 1.0
 # Per-source reinforcement weight. The keys are the complete set of reinforcement
@@ -3642,6 +3647,7 @@ class HindsightConfig:
     adaptive_memory_default_view: str
     adaptive_memory_historical_cues: bool
     adaptive_memory_recall_reinforcement_enabled: bool
+    adaptive_memory_reflect_reinforcement_enabled: bool
     adaptive_memory_reinforcement_cooldown_hours: float
     adaptive_memory_reinforcement_gain: float
     adaptive_memory_source_weights: dict[str, float]
@@ -5280,6 +5286,9 @@ class HindsightConfig:
             ),
             adaptive_memory_recall_reinforcement_enabled=_parse_boolean_env(
                 ENV_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED, DEFAULT_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED
+            ),
+            adaptive_memory_reflect_reinforcement_enabled=_parse_boolean_env(
+                ENV_ADAPTIVE_MEMORY_REFLECT_REINFORCEMENT_ENABLED, DEFAULT_ADAPTIVE_MEMORY_REFLECT_REINFORCEMENT_ENABLED
             ),
             adaptive_memory_reinforcement_cooldown_hours=_parse_non_negative_float(
                 ENV_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS,

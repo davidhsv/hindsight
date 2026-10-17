@@ -689,6 +689,8 @@ Mental models and knowledge pages count as **data**, not configuration. A mental
 
 Embeddings and database ids are never carried: facts are re-embedded with the *target* bank's model and entities are re-resolved against it, so an archive moves cleanly to an instance configured with a different embedding model, vector extension, or text-search backend.
 
+**Adaptive-memory state is not carried yet.** What a bank has learned about each memory under [adaptive memory](/developer/configuration#adaptive-memory) — its retention (stability, reinforcement count, importance, forgetting exemption) and its claim state — stays with the source bank, so every imported memory starts from the defaults, as if it had never been reinforced. An invalidated fact in the curation archive travels with the snapshot taken when it was invalidated; restoring it on the target brings back its own retention and claim, but not its links to other memories.
+
 Webhooks travel with `include_bank_config`. When copying a bank whose webhooks point at a per-bank consumer, export with `include_bank_config=false`, or delete them on the copy.
 
 ### Export

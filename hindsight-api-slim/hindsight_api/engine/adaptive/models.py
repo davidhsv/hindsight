@@ -5,7 +5,8 @@ the engine sees them. They are frozen: a state change is a new value (``dataclas
 computed by the pure functions in :mod:`.retention` and persisted by the store.
 """
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Literal
@@ -135,3 +136,61 @@ class EventOutcome:
     event: ReinforcementEvent
     outcome: EventOutcomeKind
     applied_gain: float
+
+
+#: What the store did with one event handed to ``MemoriesExtension.record_reinforcement``: the
+#: three :data:`EventOutcomeKind` values of an event that was decided, plus the three ways an event
+#: is never decided — its key is already in the ledger (``deduplicated``), its memory is not live in
+#: the bank or is being deleted (``skipped_missing``), or reinforcement is off for it
+#: (``disabled``: mode not rank/lifecycle, the bank's reinforcement switch, or the static recall or
+#: reflect switch).
+RecordedOutcomeKind = Literal["applied", "cooldown", "initial", "deduplicated", "skipped_missing", "disabled"]
+
+
+@dataclass(frozen=True)
+class RecordedEvent:
+    """One input event's fate. ``source_key`` is the key as stored (long keys are hashed)."""
+
+    memory_id: str
+    source_type: ReinforcementSource
+    source_key: str
+    outcome: RecordedOutcomeKind
+    applied_gain: float
+    persisted: bool
+    """True when the event now has a ledger row (recall/reflect cooldowns never get one)."""
+
+
+@dataclass(frozen=True)
+class ReinforcementResult:
+    """What one ``record_reinforcement`` call did. The default is the no-op result.
+
+    The counts are per event, except ``initialized`` (retention rows this call created).
+    ``events`` follows the input order. ``states`` holds the retention row of every memory the
+    call locked, after the call (unchanged when all its events were deduplicated or cooled down),
+    keyed by memory id.
+    """
+
+    applied: int = 0
+    cooldown: int = 0
+    initial: int = 0
+    deduplicated: int = 0
+    initialized: int = 0
+    skipped_missing: int = 0
+    disabled: int = 0
+    events: tuple[RecordedEvent, ...] = ()
+    states: Mapping[str, RetentionState] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RetentionPolicy:
+    """An explicit retention setting for one memory; ``None`` leaves that field as it is.
+
+    ``importance`` in [0, 1] rescales the memory's stability by the ratio of the importance
+    multipliers ``(0.5 + new) / (0.5 + old)``. Turning ``forgetting_exempt`` off also clears
+    ``exemption_reason``.
+    """
+
+    memory_id: str
+    importance: float | None = None
+    forgetting_exempt: bool | None = None
+    exemption_reason: str | None = None

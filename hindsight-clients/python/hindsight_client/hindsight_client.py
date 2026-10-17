@@ -68,8 +68,10 @@ from hindsight_client_api.models import (
     retain_request,
 )
 from hindsight_client_api.models.bank_profile_response import BankProfileResponse
+from hindsight_client_api.models.confirm_memory_response import ConfirmMemoryResponse
 from hindsight_client_api.models.file_retain_response import FileRetainResponse
 from hindsight_client_api.models.list_memory_units_response import ListMemoryUnitsResponse
+from hindsight_client_api.models.memory_lifecycle import MemoryLifecycle
 from hindsight_client_api.models.recall_response import RecallResponse
 from hindsight_client_api.models.reflect_include_options import ReflectIncludeOptions
 from hindsight_client_api.models.reflect_response import ReflectResponse
@@ -479,6 +481,8 @@ class Hindsight:
         | list[list[str]]
         | None = None,
         strategy: str | None = None,
+        importance: float | None = None,
+        forgetting_exempt: bool | None = None,
     ) -> RetainResponse:
         """
         Store a single memory (sync wrapper — prefer :meth:`aretain` in async code).
@@ -502,6 +506,10 @@ class Hindsight:
             operation_id: Optional caller-supplied UUID for idempotent async retries; ignored by sync retain
             observation_scopes: Observation grouping mode or explicit tag scopes, as in retain_batch items
             strategy: Named extraction strategy configured on the bank
+            importance: How much the extracted memories matter, in [0, 1] (0.5 is neutral). Applied
+                only when the bank's adaptive memory mode is 'rank' or 'lifecycle'.
+            forgetting_exempt: Exempt the extracted memories from retention decay. Applied only when
+                the bank's adaptive memory mode is 'rank' or 'lifecycle'.
 
         Returns:
             RetainResponse with success status
@@ -522,6 +530,10 @@ class Hindsight:
             item["observation_scopes"] = observation_scopes
         if strategy is not None:
             item["strategy"] = strategy
+        if importance is not None:
+            item["importance"] = importance
+        if forgetting_exempt is not None:
+            item["forgetting_exempt"] = forgetting_exempt
         batch_kwargs: dict[str, Any] = {
             "bank_id": bank_id,
             "items": [item],
@@ -550,7 +562,9 @@ class Hindsight:
             items: List of memory items, each a dict with 'content' (required) and optional keys:
                 'timestamp', 'context', 'metadata', 'document_id', 'entities',
                 'resolve_entities' (bool, default True), 'tags',
-                'observation_scopes' (str or list[list[str]]), 'strategy'.
+                'observation_scopes' (str or list[list[str]]), 'strategy',
+                'importance' (float in [0, 1]), 'forgetting_exempt' (bool). The last two apply
+                only when the bank's adaptive memory mode is 'rank' or 'lifecycle'.
             document_id: Optional document ID for grouping memories (applied to items that don't have their own)
             document_tags: Optional list of tags applied to all items in this batch (merged with per-item tags)
             retain_async: If True, process asynchronously in background (default: False)
@@ -900,6 +914,141 @@ class Hindsight:
             _request_timeout=self._timeout,
         )
 
+    def confirm_memory(
+        self,
+        bank_id: str,
+        memory_id: str,
+        source_key: str | None = None,
+        event_time: datetime | None = None,
+        reason: str | None = None,
+    ) -> ConfirmMemoryResponse:
+        """
+        Explicitly confirm that a memory still holds (sync wrapper — prefer :meth:`aconfirm_memory` in async code).
+
+        See :meth:`aconfirm_memory` for the full argument and return documentation.
+        """
+        return _run_async(
+            self.aconfirm_memory(
+                bank_id=bank_id,
+                memory_id=memory_id,
+                source_key=source_key,
+                event_time=event_time,
+                reason=reason,
+            )
+        )
+
+    async def aconfirm_memory(
+        self,
+        bank_id: str,
+        memory_id: str,
+        source_key: str | None = None,
+        event_time: datetime | None = None,
+        reason: str | None = None,
+    ) -> ConfirmMemoryResponse:
+        """
+        Explicitly confirm that a memory still holds (async — preferred over :meth:`confirm_memory`).
+
+        The confirmation reinforces the memory (a fact or an observation), so it stays readily
+        recallable for longer. Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle'
+        with reinforcement enabled; the server answers 409 otherwise, and 404 for a memory that is
+        missing or invalidated.
+
+        Args:
+            bank_id: The memory bank ID
+            memory_id: The memory to confirm
+            source_key: Identifies this piece of evidence. A memory is confirmed at most once per key,
+                so re-sending it (a retry) is reported as deduplicated and changes nothing. Omitted,
+                every call counts as a separate confirmation.
+            event_time: When the confirmation happened (default now; naive means UTC). May be in
+                the past, not in the future.
+            reason: Free-text note for the server's audit log; not stored with the memory.
+
+        Returns:
+            ConfirmMemoryResponse: ``recorded``, ``deduplicated``, ``outcome`` ('applied',
+            'cooldown' or 'deduplicated') and the memory's ``stability_days`` /
+            ``reinforcement_count`` after the call.
+        """
+        from hindsight_client_api.models.confirm_memory_request import ConfirmMemoryRequest
+
+        request_obj = ConfirmMemoryRequest(
+            **{
+                name: value
+                for name, value in {"source_key": source_key, "event_time": event_time, "reason": reason}.items()
+                if value is not None
+            }
+        )
+        return await self._memory_api.confirm_memory(
+            bank_id, memory_id, confirm_memory_request=request_obj, _request_timeout=self._timeout
+        )
+
+    def update_memory_lifecycle(
+        self,
+        bank_id: str,
+        memory_id: str,
+        importance: float | None = None,
+        forgetting_exempt: bool | None = None,
+        exemption_reason: str | None = None,
+    ) -> MemoryLifecycle:
+        """
+        Change how a memory is retained (sync wrapper — prefer :meth:`aupdate_memory_lifecycle` in async code).
+
+        See :meth:`aupdate_memory_lifecycle` for the full argument and return documentation.
+        """
+        return _run_async(
+            self.aupdate_memory_lifecycle(
+                bank_id=bank_id,
+                memory_id=memory_id,
+                importance=importance,
+                forgetting_exempt=forgetting_exempt,
+                exemption_reason=exemption_reason,
+            )
+        )
+
+    async def aupdate_memory_lifecycle(
+        self,
+        bank_id: str,
+        memory_id: str,
+        importance: float | None = None,
+        forgetting_exempt: bool | None = None,
+        exemption_reason: str | None = None,
+    ) -> MemoryLifecycle:
+        """
+        Change how a memory is retained (async — preferred over :meth:`update_memory_lifecycle`).
+
+        Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle'; the server answers 409
+        otherwise, and 404 for a memory that is missing or invalidated. Omitted arguments leave
+        that setting as it is; at least one must be given.
+
+        Args:
+            bank_id: The memory bank ID
+            memory_id: The memory to change
+            importance: How much the memory matters, in [0, 1] (0.5 is neutral). Rescales the
+                stability it has learned, so earlier reinforcement is kept.
+            forgetting_exempt: True exempts the memory from retention decay; False lifts the
+                exemption and clears its reason.
+            exemption_reason: Why the memory is exempt.
+
+        Returns:
+            MemoryLifecycle: the memory's lifecycle view after the change (the same view
+            ``GET /memories/{memory_id}`` shows under ``lifecycle``).
+        """
+        from hindsight_client_api.models.update_memory_lifecycle_request import UpdateMemoryLifecycleRequest
+
+        request_obj = UpdateMemoryLifecycleRequest(
+            **{
+                name: value
+                for name, value in {
+                    "importance": importance,
+                    "forgetting_exempt": forgetting_exempt,
+                    "exemption_reason": exemption_reason,
+                }.items()
+                if value is not None
+            }
+        )
+        return await self._memory_api.update_memory_lifecycle(
+            bank_id, memory_id, request_obj, _request_timeout=self._timeout
+        )
+
     def create_bank(
         self,
         bank_id: str,
@@ -1179,7 +1328,9 @@ class Hindsight:
             items: List of memory items, each a dict with 'content' (required) and optional keys:
                 'timestamp', 'context', 'metadata', 'document_id', 'entities',
                 'resolve_entities' (bool, default True), 'tags',
-                'observation_scopes' (str or list[list[str]]), 'strategy'.
+                'observation_scopes' (str or list[list[str]]), 'strategy',
+                'importance' (float in [0, 1]), 'forgetting_exempt' (bool). The last two apply
+                only when the bank's adaptive memory mode is 'rank' or 'lifecycle'.
             document_id: Optional document ID for grouping memories (applied to items that don't have their own)
             document_tags: Optional list of tags applied to all items in this batch (merged with per-item tags)
             retain_async: If True, process asynchronously in background (default: False)
@@ -1224,6 +1375,8 @@ class Hindsight:
                     observation_scopes=obs_scopes,
                     strategy=item.get("strategy"),
                     update_mode=item.get("update_mode"),
+                    importance=item.get("importance"),
+                    forgetting_exempt=item.get("forgetting_exempt"),
                 )
             )
 
@@ -1257,6 +1410,8 @@ class Hindsight:
         | list[list[str]]
         | None = None,
         strategy: str | None = None,
+        importance: float | None = None,
+        forgetting_exempt: bool | None = None,
     ) -> RetainResponse:
         """
         Store a single memory (async — preferred over :meth:`retain`).
@@ -1280,6 +1435,10 @@ class Hindsight:
             operation_id: Optional caller-supplied UUID for idempotent async retries; ignored by sync retain
             observation_scopes: Observation grouping mode or explicit tag scopes, as in retain_batch items
             strategy: Named extraction strategy configured on the bank
+            importance: How much the extracted memories matter, in [0, 1] (0.5 is neutral). Applied
+                only when the bank's adaptive memory mode is 'rank' or 'lifecycle'.
+            forgetting_exempt: Exempt the extracted memories from retention decay. Applied only when
+                the bank's adaptive memory mode is 'rank' or 'lifecycle'.
 
         Returns:
             RetainResponse with success status
@@ -1300,6 +1459,10 @@ class Hindsight:
             item["observation_scopes"] = observation_scopes
         if strategy is not None:
             item["strategy"] = strategy
+        if importance is not None:
+            item["importance"] = importance
+        if forgetting_exempt is not None:
+            item["forgetting_exempt"] = forgetting_exempt
         batch_kwargs: dict[str, Any] = {
             "bank_id": bank_id,
             "items": [item],
@@ -2943,6 +3106,15 @@ class Hindsight:
         # Security / audit
         memory_defense: dict[str, Any] | None = None,
         audit_log_enabled: bool | None = None,
+        # Adaptive memory settings
+        adaptive_memory_mode: str | None = None,
+        adaptive_memory_score_alpha: float | None = None,
+        adaptive_memory_score_floor: float | None = None,
+        adaptive_memory_reinforcement_enabled: bool | None = None,
+        adaptive_memory_base_stability_days: float | None = None,
+        adaptive_memory_max_stability_days: float | None = None,
+        adaptive_memory_default_view: str | None = None,
+        adaptive_memory_historical_cues: bool | None = None,
     ) -> dict[str, Any]:
         """
         Update configuration overrides for a bank (sync wrapper — prefer :meth:`aupdate_bank_config` in async code).
@@ -3007,6 +3179,14 @@ class Hindsight:
                 llm_gemini_safety_settings=llm_gemini_safety_settings,
                 memory_defense=memory_defense,
                 audit_log_enabled=audit_log_enabled,
+                adaptive_memory_mode=adaptive_memory_mode,
+                adaptive_memory_score_alpha=adaptive_memory_score_alpha,
+                adaptive_memory_score_floor=adaptive_memory_score_floor,
+                adaptive_memory_reinforcement_enabled=adaptive_memory_reinforcement_enabled,
+                adaptive_memory_base_stability_days=adaptive_memory_base_stability_days,
+                adaptive_memory_max_stability_days=adaptive_memory_max_stability_days,
+                adaptive_memory_default_view=adaptive_memory_default_view,
+                adaptive_memory_historical_cues=adaptive_memory_historical_cues,
             )
         )
 
@@ -3078,6 +3258,15 @@ class Hindsight:
         # Security / audit
         memory_defense: dict[str, Any] | None = None,
         audit_log_enabled: bool | None = None,
+        # Adaptive memory settings
+        adaptive_memory_mode: str | None = None,
+        adaptive_memory_score_alpha: float | None = None,
+        adaptive_memory_score_floor: float | None = None,
+        adaptive_memory_reinforcement_enabled: bool | None = None,
+        adaptive_memory_base_stability_days: float | None = None,
+        adaptive_memory_max_stability_days: float | None = None,
+        adaptive_memory_default_view: str | None = None,
+        adaptive_memory_historical_cues: bool | None = None,
     ) -> dict[str, Any]:
         """
         Update configuration overrides for a bank (async — preferred over :meth:`update_bank_config`).
@@ -3161,6 +3350,24 @@ class Hindsight:
                 ``{"category": ..., "threshold": ...}`` dicts (the shape the provider takes).
             memory_defense: Memory-defense (prompt-injection / secret redaction) settings.
             audit_log_enabled: Write an audit log entry for each operation on this bank.
+            adaptive_memory_mode: Adaptive memory mode: 'off' (default; recall is unchanged),
+                'observe' (compute retention and report it in traces and metrics only), 'rank'
+                (retention down-weights rarely reinforced memories) or 'lifecycle' (rank plus claim
+                lifecycle; the claim part is reserved for a later release).
+            adaptive_memory_score_alpha: Weight of the retention factor in the final recall score,
+                in [0, 1] (0 = no decay).
+            adaptive_memory_score_floor: Lowest retention factor a fully-forgotten memory can
+                reach, in [0, 1].
+            adaptive_memory_reinforcement_enabled: Let reinforcement events raise a memory's
+                stability (rank and lifecycle modes only).
+            adaptive_memory_base_stability_days: Days before an unreinforced world fact's
+                retrievability falls to e^-1.
+            adaptive_memory_max_stability_days: Cap on a memory's stability in days (must be >=
+                adaptive_memory_base_stability_days).
+            adaptive_memory_default_view: Lifecycle recall view when the request names none:
+                'current' (default) or 'historical' (reserved; takes effect in a later release).
+            adaptive_memory_historical_cues: Detect historical phrasing in external recall queries
+                and switch them to a historical view (reserved; takes effect in a later release).
 
         Returns:
             dict with ``bank_id``, ``config`` (fully resolved), and ``overrides`` (bank-level only)
@@ -3223,6 +3430,14 @@ class Hindsight:
                 "llm_gemini_safety_settings": llm_gemini_safety_settings,
                 "memory_defense": memory_defense,
                 "audit_log_enabled": audit_log_enabled,
+                "adaptive_memory_mode": adaptive_memory_mode,
+                "adaptive_memory_score_alpha": adaptive_memory_score_alpha,
+                "adaptive_memory_score_floor": adaptive_memory_score_floor,
+                "adaptive_memory_reinforcement_enabled": adaptive_memory_reinforcement_enabled,
+                "adaptive_memory_base_stability_days": adaptive_memory_base_stability_days,
+                "adaptive_memory_max_stability_days": adaptive_memory_max_stability_days,
+                "adaptive_memory_default_view": adaptive_memory_default_view,
+                "adaptive_memory_historical_cues": adaptive_memory_historical_cues,
             }.items()
             if v is not None
         }

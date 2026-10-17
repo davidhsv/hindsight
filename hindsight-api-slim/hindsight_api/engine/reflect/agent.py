@@ -2583,6 +2583,7 @@ async def _process_done_tool(
         used_mental_model_ids=used_mental_model_ids,
         used_observation_ids=used_observation_ids,
         directives_applied=directives_applied,
+        answer_found=_answer_found(args),
     )
 
 

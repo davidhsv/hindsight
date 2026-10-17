@@ -37,6 +37,14 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 from ...config import get_config
 from ...metrics import get_metrics_collector
 from ...worker.stage import set_stage
+from ..adaptive import clock as adaptive_clock
+from ..adaptive.producers import (
+    FactEvidence,
+    ObservationEvidence,
+    fact_evidence,
+    reinforcement_allowed,
+    write_settings,
+)
 from ..db import DatabaseBackend
 from ..db_utils import acquire_with_retry
 from ..llm_interface import OutputTooLongError, PromptCachePrefix, ProviderRateLimitResetError
@@ -62,6 +70,7 @@ if TYPE_CHECKING:
     # The engine's connection abstraction, which is what every caller passes; the annotations
     # below named asyncpg's concrete type, which predates it.
     from ...api.http import RequestContext
+    from ..adaptive.settings import AdaptiveSettings
     from ..db.base import DatabaseConnection
     from ..memories.base import StoredMemory
     from ..memory_engine import MemoryEngine
@@ -851,6 +860,8 @@ class _PreparedCreate:
     agg: "_SourceAggregation"
     embedding_str: str | None
     dedup: _DedupOutcome | None = None
+    #: The inserted observation's id, set by the write (None until then, or when it was skipped).
+    observation_id: str | None = None
 
 
 @dataclass
@@ -1383,6 +1394,7 @@ async def _fetch_unconsolidated_rows(
     limit: int,
     observation_scopes: list[list[str]] | None,
     llm_parallelism: int,
+    with_provenance: bool = False,
 ) -> list[dict[str, Any]]:
     """Unconsolidated candidate facts, read through the memories store.
 
@@ -1401,6 +1413,10 @@ async def _fetch_unconsolidated_rows(
     per group, leaving enough distinct groups in the round to fill the parallel slots. Facts
     are still consumed oldest-first *within* a group, which is the ordering consolidation
     actually depends on.
+
+    ``with_provenance`` (adaptive memory in rank/lifecycle) adds what reinforcement keys a fact by:
+    ``document_id``, ``metadata`` and ``document_id_minted``. The first two come with the read; the
+    minted marks are one batched read of the round's documents. Nothing reaches the prompt.
     """
     store = get_memories()
     scopes: list[list[str] | None] = list(observation_scopes) if observation_scopes else [None]
@@ -1416,7 +1432,7 @@ async def _fetch_unconsolidated_rows(
     ordered = (
         _fair_group_slice(oldest_first, limit, math.ceil(limit / llm_parallelism)) if fair else oldest_first[:limit]
     )
-    return [
+    rows = [
         {
             "id": uuid.UUID(m.unit_id),
             "text": m.text,
@@ -1432,6 +1448,15 @@ async def _fetch_unconsolidated_rows(
         }
         for m in ordered
     ]
+    if with_provenance and rows:
+        minted = await store.minted_document_ids(
+            conn, bank_id=bank_id, document_ids=[m.document_id for m in ordered if m.document_id]
+        )
+        for row, m in zip(rows, ordered):
+            row["document_id"] = m.document_id
+            row["metadata"] = m.metadata or {}
+            row["document_id_minted"] = m.document_id is not None and str(m.document_id) in minted
+    return rows
 
 
 #: Cap on the store-side count of unconsolidated facts. Used only for the "is there work?"
@@ -1592,6 +1617,12 @@ async def _run_consolidation_job(
 
     pool = memory_engine._backend
 
+    # Adaptive memory: reinforcement settings while the bank's mode writes state (rank/lifecycle)
+    # and its reinforcement switch is on; None otherwise, and the batches run exactly as before.
+    adaptive_settings = write_settings(config, bank_id=bank_id)
+    if adaptive_settings is not None and not reinforcement_allowed(adaptive_settings):
+        adaptive_settings = None
+
     # Get bank profile
     async with acquire_with_retry(pool) as conn:
         t0 = time.perf_counter()
@@ -1703,6 +1734,7 @@ async def _run_consolidation_job(
                 fetch_limit,
                 observation_scopes,
                 max(1, config.consolidation_llm_parallelism),
+                with_provenance=adaptive_settings is not None,
             )
             perf.record_timing("fetch_memories", time.perf_counter() - t0)
 
@@ -1825,6 +1857,7 @@ async def _run_consolidation_job(
                             config=config,
                             obs_tags_override=obs_tags,
                             mark_consolidated_ids=sub_ids if is_final_pass else None,
+                            adaptive_settings=adaptive_settings,
                         )
                         sub_deleted += pass_deleted
                         if pass_failed:
@@ -1868,6 +1901,7 @@ async def _run_consolidation_job(
                         perf=batch_perf,
                         config=config,
                         mark_consolidated_ids=sub_ids,
+                        adaptive_settings=adaptive_settings,
                     )
 
                 all_deleted += sub_deleted
@@ -2397,6 +2431,7 @@ async def _process_memory_batch(
     config: Any = None,
     obs_tags_override: list[str] | None = None,
     mark_consolidated_ids: list[Any] | None = None,
+    adaptive_settings: "AdaptiveSettings | None" = None,
 ) -> tuple[list[dict[str, Any]], int, bool]:
     """
     Process a batch of memories in a single LLM call.
@@ -2421,6 +2456,10 @@ async def _process_memory_batch(
             batch's write transaction, so the stamps share the fate of the observations
             derived from the same LLM response (#3876). None on a pass that is not the
             final one for these memories — the caller stamps once, on the last pass.
+        adaptive_settings: Set when the bank reinforces (rank/lifecycle, reinforcement on):
+            the observations this batch creates, updates and folds into are reinforced by
+            their new evidence, in a savepoint of the batch's transaction. The facts then
+            carry their provenance (``_fetch_unconsolidated_rows(with_provenance=True)``).
     """
     # Map the source memories this batch consumes onto the consolidation trace.
     record_source_memory_ids([str(m["id"]) for m in memories])
@@ -2744,6 +2783,15 @@ async def _process_memory_batch(
         p for p in await _gather_or_cancel([_bounded(_prepare_create(c)) for c in llm_result.creates]) if p is not None
     ]
 
+    # --- Prepare: reinforcement evidence --------------------------------------
+    # The survivors' existing sources and their provenance, read before the transaction like the
+    # liveness preflight above, so the write holds its locks no longer than it did.
+    evidence: ObservationEvidence | None = None
+    if adaptive_settings is not None and (prepared_updates or prepared_creates or prepared_deletes):
+        evidence = await _prepare_observation_evidence(
+            pool, bank_id, adaptive_settings, memories, prepared_updates, prepared_creates, prepared_deletes
+        )
+
     # --- Apply: one transaction for everything this LLM response decided ------
     deleted_count = 0
     # A failed LLM call yields no actions, and its memories must NOT be stamped: the caller
@@ -2811,8 +2859,9 @@ async def _process_memory_batch(
                             continue
                         for m in prepared.source_mems:
                             per_memory_updated.add(str(m["id"]))
+                        folded_into_twin = False
                         if prepared.dedup is not None:
-                            await _apply_dedup_update_fold(
+                            folded_into_twin = await _apply_dedup_update_fold(
                                 conn,
                                 memory_engine,
                                 bank_id,
@@ -2821,6 +2870,21 @@ async def _process_memory_batch(
                                 prepared.update.observation_id,
                                 prepared.update.text,
                             )
+                        if evidence is not None:
+                            if folded_into_twin and prepared.dedup is not None and prepared.dedup.best_id:
+                                # The rewritten observation is gone; its twin now carries every source.
+                                evidence.folded(
+                                    prepared.dedup.best_id,
+                                    [*(prepared.model.source_fact_ids or []), *prepared.source_memory_ids],
+                                )
+                            else:
+                                evidence.attached(
+                                    prepared.update.observation_id,
+                                    prepared.source_memory_ids,
+                                    unchanged_text=_norm_obs_text(prepared.update.text)
+                                    == _norm_obs_text(prepared.model.text),
+                                    previous_mentioned_at=prepared.model.mentioned_at,
+                                )
 
                     for prepared_create in prepared_creates:
                         if prepared_create.dedup is not None:
@@ -2840,6 +2904,8 @@ async def _process_memory_batch(
                                 )
                                 for m in prepared_create.source_mems:
                                     per_memory_created.add(str(m["id"]))
+                                if evidence is not None:
+                                    evidence.folded(merged_into, prepared_create.source_memory_ids)
                                 continue
 
                         action = await _apply_create_action(
@@ -2854,10 +2920,21 @@ async def _process_memory_batch(
                         if action == "created":
                             for m in prepared_create.source_mems:
                                 per_memory_created.add(str(m["id"]))
+                            if evidence is not None and prepared_create.observation_id is not None:
+                                evidence.created(prepared_create.observation_id, prepared_create.source_memory_ids)
 
                     # After the response's own updates, so the survivor is extended as rewritten.
                     for merged in merged_away:
-                        await _fold_deleted_evidence(conn, memory_engine, bank_id, merged.gone, merged.target_id)
+                        folded = await _fold_deleted_evidence(
+                            conn, memory_engine, bank_id, merged.gone, merged.target_id
+                        )
+                        if folded and evidence is not None and merged.target_id is not None:
+                            evidence.folded(merged.target_id, merged.gone.source_memory_ids)
+
+                    # After every write it accounts for, before the stamps: a failure rolls back its
+                    # own savepoint and nothing else.
+                    if evidence is not None:
+                        await _record_observation_reinforcement(conn, bank_id, evidence)
 
                     # The facts this response consumed are marked consolidated in the SAME transaction
                     # as the observations that now carry them. Stamping them separately is what let a
@@ -3139,6 +3216,7 @@ async def _apply_create_action(
     # Map the new observation onto the consolidation trace as a produced memory.
     new_id = created.get("observation_id")
     if new_id:
+        prepared.observation_id = str(new_id)
         record_created_memory_ids([new_id])
     logger.debug(f"Created observation from {len(prepared.source_memory_ids)} source memories")
     return created["action"]
@@ -3235,7 +3313,7 @@ async def _fold_deleted_evidence(
     bank_id: str,
     gone: StoredMemory,
     target_id: str | None,
-) -> None:
+) -> bool:
     """Move a merged-away observation's evidence onto the observation that absorbed it.
 
     Small models merge observations by rewriting one and deleting the others. An UPDATE can
@@ -3246,10 +3324,12 @@ async def _fold_deleted_evidence(
     delete the model marks as a merge (``merged_into``) moves its evidence. Without a usable
     target (the model merged into an observation it creates in the same response, which has no
     id yet) or with the survivor gone, the evidence is re-queued and the next pass attaches it.
+
+    Returns True when the evidence was folded into ``target_id``.
     """
     live = await _filter_live_source_memories(conn, bank_id, [uuid.UUID(str(sid)) for sid in gone.source_memory_ids])
     if not live:
-        return
+        return False
     store = get_memories()
     if target_id is not None:
         target = await store.get_memories(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[target_id])
@@ -3266,10 +3346,123 @@ async def _fold_deleted_evidence(
                 embeddings=memory_engine.embeddings,
             )
             if folded:
-                return
+                return True
     await store.mark_consolidated(
         conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[str(sid) for sid in live], when=None
     )
+    return False
+
+
+async def _prepare_observation_evidence(
+    pool: DatabaseBackend,
+    bank_id: str,
+    settings: "AdaptiveSettings",
+    memories: list[dict[str, Any]],
+    prepared_updates: list[_PreparedUpdate],
+    prepared_creates: list[_PreparedCreate],
+    prepared_deletes: list[_PreparedDelete],
+) -> ObservationEvidence | None:
+    """The evidence a batch's writes may reinforce its observations with, read before they run.
+
+    The batch's own facts carry their provenance (``with_provenance``). An observation the batch
+    may add sources to — an UPDATE target, a dedup twin, a ``merged_into`` survivor — also needs the
+    evidence keys of the sources it already has, so a re-statement from a session it has already
+    heard counts nothing: one read of those observations, one of their sources, one of the sources'
+    documents. None (logged, counted) when that read fails: the batch then simply reinforces nothing.
+    """
+    now = adaptive_clock.utcnow()
+    facts: dict[str, FactEvidence] = {
+        str(m["id"]): fact_evidence(
+            memory_id=str(m["id"]),
+            document_id=m.get("document_id"),
+            document_id_minted=bool(m.get("document_id_minted")),
+            metadata=m.get("metadata"),
+            mentioned_at=m.get("mentioned_at"),
+            occurred_start=m.get("occurred_start"),
+            event_date=m.get("event_date"),
+            now=now,
+        )
+        for m in memories
+    }
+    observation_ids = list(
+        dict.fromkeys(
+            [p.update.observation_id for p in prepared_updates]
+            + [
+                p.dedup.best_id
+                for p in [*prepared_updates, *prepared_creates]
+                if p.dedup is not None and p.dedup.should_merge and p.dedup.best_id
+            ]
+            + [d.merged_into for d in prepared_deletes if d.is_merge and d.merged_into]
+            # A merged-away observation's sources move to its survivor, so they need keys too.
+            + [d.observation_id for d in prepared_deletes if d.is_merge and d.merged_into]
+        )
+    )
+    prior_sources: dict[str, list[str]] = {}
+    prior_mentioned_at: dict[str, datetime | None] = {}
+    if observation_ids:
+        store = get_memories()
+        try:
+            async with acquire_with_retry(pool) as conn:
+                for obs in await store.get_memories(
+                    conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=observation_ids
+                ):
+                    prior_sources[obs.unit_id] = [str(s) for s in obs.source_memory_ids]
+                    prior_mentioned_at[obs.unit_id] = obs.mentioned_at
+                others = list(dict.fromkeys(s for srcs in prior_sources.values() for s in srcs if s not in facts))
+                if others:
+                    sources = await store.get_memories(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=others)
+                    minted = await store.minted_document_ids(
+                        conn, bank_id=bank_id, document_ids=[f.document_id for f in sources if f.document_id]
+                    )
+                    for f in sources:
+                        facts[f.unit_id] = fact_evidence(
+                            memory_id=f.unit_id,
+                            document_id=f.document_id,
+                            document_id_minted=f.document_id is not None and str(f.document_id) in minted,
+                            metadata=f.metadata,
+                            mentioned_at=f.mentioned_at,
+                            occurred_start=f.occurred_start,
+                            event_date=f.event_date,
+                            now=now,
+                        )
+        except Exception as exc:
+            logger.warning(f"[CONSOLIDATION] bank={bank_id} reinforcement evidence read failed, skipping it: {exc!r}")
+            get_metrics_collector().record_adaptive_reinforcement_dropped(
+                producer="consolidation", reason="error", bank_id=bank_id
+            )
+            return None
+    return ObservationEvidence(
+        settings, facts=facts, prior_sources=prior_sources, prior_mentioned_at=prior_mentioned_at
+    )
+
+
+async def _record_observation_reinforcement(conn, bank_id: str, evidence: ObservationEvidence) -> None:
+    """Write a batch's observation reinforcement in a savepoint of the batch's transaction.
+
+    A failure rolls back the savepoint (and nothing the batch wrote), is logged and counted, and
+    never fails the batch: reinforcement must not cost a valid consolidation. ``background``: a
+    memory another transaction holds (being deleted) is skipped rather than waited for.
+    """
+    call = evidence.call()
+    if call is None:
+        return
+    try:
+        async with conn.transaction():
+            await get_memories().record_reinforcement(
+                conn,
+                bank_id=bank_id,
+                events=call.events,
+                settings=evidence.settings,
+                now=adaptive_clock.utcnow(),
+                background=True,
+                anchors=call.anchors,
+                initial_memory_ids=call.initial_memory_ids,
+            )
+    except Exception as exc:
+        logger.warning(f"[CONSOLIDATION] bank={bank_id} reinforcement failed, batch kept: {exc!r}")
+        get_metrics_collector().record_adaptive_reinforcement_dropped(
+            producer="consolidation", reason="error", bank_id=bank_id
+        )
 
 
 async def _embed_observation_text(

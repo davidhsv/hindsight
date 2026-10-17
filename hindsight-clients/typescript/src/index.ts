@@ -227,6 +227,10 @@ export interface MemoryItemInput {
   observation_scopes?: "per_tag" | "combined" | "all_combinations" | "shared" | string[][];
   strategy?: string;
   update_mode?: "replace" | "append";
+  /** How much the extracted memories matter, in [0, 1] (0.5 is neutral); applied only in adaptive memory mode rank/lifecycle */
+  importance?: number;
+  /** Exempt the extracted memories from retention decay; applied only in adaptive memory mode rank/lifecycle */
+  forgetting_exempt?: boolean;
 }
 
 /**
@@ -428,6 +432,10 @@ export class HindsightClient {
       observationScopes?: "per_tag" | "combined" | "all_combinations" | "shared" | string[][];
       /** Extraction strategy override */
       strategy?: string;
+      /** How much the extracted memories matter, in [0, 1] (0.5 is neutral); applied only in adaptive memory mode rank/lifecycle */
+      importance?: number;
+      /** Exempt the extracted memories from retention decay; applied only in adaptive memory mode rank/lifecycle */
+      forgettingExempt?: boolean;
       signal?: AbortSignal;
     }
   ): Promise<RetainResponse> {
@@ -447,6 +455,8 @@ export class HindsightClient {
           update_mode: options?.updateMode,
           observation_scopes: options?.observationScopes,
           strategy: options?.strategy,
+          importance: options?.importance,
+          forgetting_exempt: options?.forgettingExempt,
         },
       ],
       {
@@ -486,6 +496,8 @@ export class HindsightClient {
       observation_scopes: item.observation_scopes,
       strategy: item.strategy,
       update_mode: item.update_mode,
+      importance: item.importance,
+      forgetting_exempt: item.forgetting_exempt,
       timestamp: item.timestamp instanceof Date ? item.timestamp.toISOString() : item.timestamp,
     }));
 
@@ -1019,6 +1031,22 @@ export class HindsightClient {
       memoryDefense?: Record<string, unknown>;
       /** Write an audit log entry for each operation on this bank. */
       auditLogEnabled?: boolean;
+      /** Adaptive memory mode: 'off' (default), 'observe', 'rank' or 'lifecycle' (its claim part is reserved for a later release). */
+      adaptiveMemoryMode?: string;
+      /** Weight of the retention factor in the final recall score, in [0, 1] (0 = no decay). */
+      adaptiveMemoryScoreAlpha?: number;
+      /** Lowest retention factor a fully-forgotten memory can reach, in [0, 1]. */
+      adaptiveMemoryScoreFloor?: number;
+      /** Let reinforcement events raise a memory's stability (rank and lifecycle modes only). */
+      adaptiveMemoryReinforcementEnabled?: boolean;
+      /** Days before an unreinforced world fact's retrievability falls to e^-1. */
+      adaptiveMemoryBaseStabilityDays?: number;
+      /** Cap on a memory's stability in days (must be >= adaptiveMemoryBaseStabilityDays). */
+      adaptiveMemoryMaxStabilityDays?: number;
+      /** Lifecycle recall view when the request names none: 'current' (default) or 'historical' (reserved). */
+      adaptiveMemoryDefaultView?: string;
+      /** Detect historical phrasing in external recall queries (reserved; takes effect in a later release). */
+      adaptiveMemoryHistoricalCues?: boolean;
       signal?: AbortSignal;
     }
   ): Promise<BankConfigResponse> {
@@ -1124,6 +1152,22 @@ export class HindsightClient {
       updates.llm_gemini_safety_settings = options.llmGeminiSafetySettings;
     if (options.memoryDefense !== undefined) updates.memory_defense = options.memoryDefense;
     if (options.auditLogEnabled !== undefined) updates.audit_log_enabled = options.auditLogEnabled;
+    if (options.adaptiveMemoryMode !== undefined)
+      updates.adaptive_memory_mode = options.adaptiveMemoryMode;
+    if (options.adaptiveMemoryScoreAlpha !== undefined)
+      updates.adaptive_memory_score_alpha = options.adaptiveMemoryScoreAlpha;
+    if (options.adaptiveMemoryScoreFloor !== undefined)
+      updates.adaptive_memory_score_floor = options.adaptiveMemoryScoreFloor;
+    if (options.adaptiveMemoryReinforcementEnabled !== undefined)
+      updates.adaptive_memory_reinforcement_enabled = options.adaptiveMemoryReinforcementEnabled;
+    if (options.adaptiveMemoryBaseStabilityDays !== undefined)
+      updates.adaptive_memory_base_stability_days = options.adaptiveMemoryBaseStabilityDays;
+    if (options.adaptiveMemoryMaxStabilityDays !== undefined)
+      updates.adaptive_memory_max_stability_days = options.adaptiveMemoryMaxStabilityDays;
+    if (options.adaptiveMemoryDefaultView !== undefined)
+      updates.adaptive_memory_default_view = options.adaptiveMemoryDefaultView;
+    if (options.adaptiveMemoryHistoricalCues !== undefined)
+      updates.adaptive_memory_historical_cues = options.adaptiveMemoryHistoricalCues;
 
     const response = await sdk.updateBankConfig({
       client: this.client,

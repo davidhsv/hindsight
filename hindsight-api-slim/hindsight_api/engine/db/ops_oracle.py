@@ -7,14 +7,20 @@ columns can't appear in GROUP BY).
 
 import json
 import uuid as uuid_mod
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import cast
 
 from .base import DatabaseConnection
 from .ops import (
+    RETENTION_STATE_COLUMNS,
     ClaimedOperations,
     DataAccessOps,
     LinkExpansionRows,
+    ReinforcementEventRow,
+    ReinforcementKey,
+    RetentionLock,
+    RetentionStateUpdate,
     TagListingParts,
     UpdatedWindow,
     bank_serialization_sql,
@@ -1672,4 +1678,207 @@ class OracleOps(DataAccessOps):
             bank_id,
             serialization_key,
             limit,
+        )
+
+    # -- Adaptive memory ------------------------------------------------------
+    #
+    # Oracle has no FOR KEY SHARE (the rewriter does not translate it), no ON CONFLICT and no
+    # RETURNING from a dup-suppressed insert, so the PG single statements become: per-row parent
+    # locks in id order, IGNORE_ROW_ON_DUPKEY_INDEX inserts via executemany, and re-selects.
+
+    async def upsert_default_retention_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        retention_table: str,
+        units_table: str,
+        bank_id: str,
+        memory_ids: Sequence[uuid_mod.UUID],
+        default_stability: Mapping[str, float],
+        fallback_stability: float,
+        anchors: Mapping[uuid_mod.UUID, datetime],
+        now: datetime,
+        skip_locked: bool,
+    ) -> RetentionLock:
+        from ..db_utils import retry_with_backoff
+
+        ids = sorted(set(memory_ids))
+        if not ids:
+            return RetentionLock(present=[], initialized=frozenset(), rows=[])
+
+        async def _lock() -> RetentionLock:
+            # One savepoint per attempt. ORA-00060 rolls back only the statement that hit it, so
+            # without the savepoint a retry would still hold every lock this phase already took
+            # and walk straight back into the same cycle; rolling back to it releases them first.
+            async with conn.transaction():
+                # Sorted per-row parent locks (DESIGN.md §3). Background producers skip a row
+                # another transaction holds (a memory being deleted) rather than wait on it.
+                parents = []
+                for memory_id in ids:
+                    row = await conn.fetchrow(
+                        f"SELECT id, fact_type, mentioned_at, occurred_start, event_date, created_at "
+                        f"FROM {units_table} WHERE id = $1 AND bank_id = $2 "
+                        f"FOR UPDATE{' SKIP LOCKED' if skip_locked else ''}",
+                        memory_id,
+                        bank_id,
+                    )
+                    if row is not None:
+                        parents.append(row)
+                if not parents:
+                    return RetentionLock(present=[], initialized=frozenset(), rows=[])
+                present = [uuid_mod.UUID(str(row["id"])) for row in parents]
+                existing: set[str] = set()
+                for start in range(0, len(present), ORACLE_IN_LIST_LIMIT):
+                    for row in await conn.fetch(
+                        f"SELECT memory_id FROM {retention_table} WHERE memory_id = ANY($1::uuid[])",
+                        present[start : start + ORACLE_IN_LIST_LIMIT],
+                    ):
+                        existing.add(str(row["memory_id"]))
+                new_rows = []
+                for row in parents:
+                    memory_id = uuid_mod.UUID(str(row["id"]))
+                    if str(memory_id) in existing:
+                        continue
+                    anchor = (
+                        anchors.get(memory_id)
+                        or row["mentioned_at"]
+                        or row["occurred_start"]
+                        or row["event_date"]
+                        or row["created_at"]
+                    )
+                    stability = float(default_stability.get(row["fact_type"], fallback_stability))
+                    new_rows.append((memory_id, bank_id, 0.5, stability, anchor, 0, 0, 0, "active", 1, now, now))
+                if new_rows:
+                    await conn.executemany(
+                        f"INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX({retention_table}, pk_memory_retention_state) */ "
+                        f"INTO {retention_table} (memory_id, bank_id, importance, stability_days, "
+                        f"last_reinforced_at, reinforcement_count, access_count, forgetting_exempt, "
+                        f"retention_state, model_version, created_at, updated_at) "
+                        f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                        new_rows,
+                    )
+                rows = []
+                for memory_id in present:
+                    row = await conn.fetchrow(
+                        f"SELECT {RETENTION_STATE_COLUMNS} FROM {retention_table} "
+                        f"WHERE memory_id = $1 AND bank_id = $2 FOR UPDATE",
+                        memory_id,
+                        bank_id,
+                    )
+                    if row is not None:
+                        rows.append(row)
+                return RetentionLock(
+                    present=[str(m) for m in present],
+                    # A row a concurrent writer inserted between the existence read and the insert
+                    # is counted here although the hint skipped ours; only the metric can be off.
+                    initialized=frozenset(str(r[0]) for r in new_rows),
+                    rows=rows,
+                )
+
+        return await retry_with_backoff(_lock)
+
+    async def fetch_reinforcement_keys(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        keys: Sequence[ReinforcementKey],
+    ) -> frozenset[ReinforcementKey]:
+        if not keys:
+            return frozenset()
+        wanted = set(keys)
+        memory_ids = sorted({uuid_mod.UUID(k.memory_id) for k in keys})
+        found: set[ReinforcementKey] = set()
+        # By memory id only (an IN list per chunk) and filtered here: a three-column tuple IN list
+        # is not something the rewriter expands, and a memory's ledger is small.
+        for start in range(0, len(memory_ids), ORACLE_IN_LIST_LIMIT):
+            for row in await conn.fetch(
+                f"SELECT memory_id, source_type, source_key FROM {table} "
+                f"WHERE bank_id = $1 AND memory_id = ANY($2::uuid[])",
+                bank_id,
+                memory_ids[start : start + ORACLE_IN_LIST_LIMIT],
+            ):
+                key = ReinforcementKey(
+                    memory_id=str(row["memory_id"]), source_type=row["source_type"], source_key=row["source_key"]
+                )
+                if key in wanted:
+                    found.add(key)
+        return frozenset(found)
+
+    async def insert_reinforcement_events(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        rows: Sequence[ReinforcementEventRow],
+    ) -> frozenset[str]:
+        if not rows:
+            return frozenset()
+        ordered = sorted(rows, key=lambda r: (str(r.memory_id), r.source_type, r.source_key))
+        await conn.executemany(
+            f"INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX({table}, uq_mre_key) */ INTO {table} "
+            f"(id, bank_id, memory_id, source_type, source_key, event_time, weight, independence_weight, "
+            f"applied_gain, outcome, processed_at, created_at) "
+            f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            [
+                (
+                    r.id,
+                    bank_id,
+                    r.memory_id,
+                    r.source_type,
+                    r.source_key,
+                    r.event_time,
+                    float(r.weight),
+                    float(r.independence_weight),
+                    float(r.applied_gain),
+                    r.outcome,
+                    r.processed_at,
+                    r.created_at,
+                )
+                for r in ordered
+            ],
+        )
+        # No RETURNING from a dup-suppressed insert: re-select the ids this call minted.
+        ids = [r.id for r in ordered]
+        inserted: set[str] = set()
+        for start in range(0, len(ids), ORACLE_IN_LIST_LIMIT):
+            for row in await conn.fetch(
+                f"SELECT id FROM {table} WHERE id = ANY($1::uuid[])", ids[start : start + ORACLE_IN_LIST_LIMIT]
+            ):
+                inserted.add(str(row["id"]))
+        return frozenset(inserted)
+
+    async def update_retention_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        rows: Sequence[RetentionStateUpdate],
+        now: datetime,
+    ) -> None:
+        if not rows:
+            return
+        await conn.executemany(
+            f"UPDATE {table} SET importance = $1, stability_days = $2, last_reinforced_at = $3, "
+            f"reinforcement_count = $4, access_count = $5, last_recalled_at = $6, forgetting_exempt = $7, "
+            f"exemption_reason = $8, updated_at = $9 WHERE memory_id = $10 AND bank_id = $11",
+            [
+                (
+                    float(r.importance),
+                    float(r.stability_days),
+                    r.last_reinforced_at,
+                    int(r.reinforcement_count),
+                    int(r.access_count),
+                    r.last_recalled_at,
+                    1 if r.forgetting_exempt else 0,
+                    r.exemption_reason,
+                    now,
+                    r.memory_id,
+                    bank_id,
+                )
+                for r in sorted(rows, key=lambda r: str(r.memory_id))
+            ],
         )

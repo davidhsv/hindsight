@@ -869,7 +869,7 @@ export type BankTemplateConfig = {
   /**
    * Adaptive Memory Reinforcement Enabled
    *
-   * Let reinforcement events raise a memory's stability (reserved; takes effect in a later release)
+   * Let reinforcement events raise a memory's stability (rank and lifecycle modes only)
    */
   adaptive_memory_reinforcement_enabled?: boolean | null;
   /**
@@ -1359,6 +1359,80 @@ export type ChunkResponse = {
 };
 
 /**
+ * ClaimShadowView
+ *
+ * What observe mode would have retired this memory as (diagnostic only).
+ */
+export type ClaimShadowView = {
+  /**
+   * Would Status
+   */
+  would_status: string;
+  /**
+   * Deciding Snapshot
+   */
+  deciding_snapshot?: {
+    [key: string]: unknown;
+  };
+  /**
+   * Evidence Ids
+   */
+  evidence_ids?: Array<string>;
+  /**
+   * Created At
+   */
+  created_at?: string | null;
+};
+
+/**
+ * ClaimView
+ *
+ * The memory's claim row: what should be believed about it, and why.
+ */
+export type ClaimView = {
+  /**
+   * Truth Status
+   */
+  truth_status: string;
+  /**
+   * Confidence
+   */
+  confidence?: number | null;
+  /**
+   * Valid From
+   */
+  valid_from?: string | null;
+  /**
+   * Valid To
+   */
+  valid_to?: string | null;
+  /**
+   * Retired Via
+   */
+  retired_via?: string | null;
+  /**
+   * Superseded By Id
+   */
+  superseded_by_id?: string | null;
+  /**
+   * Inherited From Id
+   */
+  inherited_from_id?: string | null;
+  /**
+   * Reason
+   */
+  reason?: string | null;
+  /**
+   * Evidence Memory Ids
+   */
+  evidence_memory_ids?: Array<string>;
+  /**
+   * Updated At
+   */
+  updated_at?: string | null;
+};
+
+/**
  * ClearMemoryObservationsResponse
  *
  * Response model for clearing observations for a specific memory.
@@ -1368,6 +1442,78 @@ export type ClearMemoryObservationsResponse = {
    * Deleted Count
    */
   deleted_count: number;
+};
+
+/**
+ * ConfirmMemoryRequest
+ *
+ * Request model for explicitly confirming that a memory still holds.
+ *
+ * A confirmation is reinforcement evidence: it makes the memory more stable, so it stays
+ * readily recallable for longer. Needs the bank's adaptive memory mode to be 'rank' or
+ * 'lifecycle' with reinforcement enabled.
+ */
+export type ConfirmMemoryRequest = {
+  /**
+   * Source Key
+   *
+   * Identifies this piece of evidence. A memory is confirmed at most once per key: re-sending the same key is reported as deduplicated and changes nothing, so a retry is safe. Omit it and every request counts as a separate confirmation.
+   */
+  source_key?: string | null;
+  /**
+   * Event Time
+   *
+   * When the confirmation happened (ISO 8601; a time without an offset is UTC). Defaults to now. It may be in the past, but not in the future.
+   */
+  event_time?: string | null;
+  /**
+   * Reason
+   *
+   * Free-text note for the audit log, when audit logging is on. Not stored with the memory.
+   */
+  reason?: string | null;
+};
+
+/**
+ * ConfirmMemoryResponse
+ *
+ * What an explicit confirmation did.
+ */
+export type ConfirmMemoryResponse = {
+  /**
+   * Memory Id
+   */
+  memory_id: string;
+  /**
+   * Recorded
+   *
+   * True when the confirmation was recorded as evidence for the memory.
+   */
+  recorded: boolean;
+  /**
+   * Deduplicated
+   *
+   * True when this source_key had already confirmed the memory; nothing changed.
+   */
+  deduplicated: boolean;
+  /**
+   * Outcome
+   *
+   * 'applied' (the memory was reinforced), 'cooldown' (recorded, but too soon after its last reinforcement to add stability) or 'deduplicated'.
+   */
+  outcome?: string | null;
+  /**
+   * Stability Days
+   *
+   * The memory's stability after the call: the days until, without reinforcement, its retrievability falls to about 37%.
+   */
+  stability_days?: number | null;
+  /**
+   * Reinforcement Count
+   *
+   * How many times the memory has been reinforced, after the call.
+   */
+  reinforcement_count?: number | null;
 };
 
 /**
@@ -4052,6 +4198,58 @@ export type MemoryItem = {
    * How to handle an existing document with the same document_id. 'replace' (default) deletes old data and reprocesses from scratch. 'append' concatenates new content to the existing document text and reprocesses.
    */
   update_mode?: "replace" | "append" | null;
+  /**
+   * Importance
+   *
+   * How much the memories extracted from this item matter, in [0, 1] (0.5 is neutral). Scales how long they stay readily recallable without being reinforced. Applied only when the bank's adaptive memory mode is 'rank' or 'lifecycle'; ignored in every other mode.
+   */
+  importance?: number | null;
+  /**
+   * Forgetting Exempt
+   *
+   * Exempt the memories extracted from this item from retention decay: they always rank as fully retrievable. Applied only when the bank's adaptive memory mode is 'rank' or 'lifecycle'; ignored in every other mode.
+   */
+  forgetting_exempt?: boolean | null;
+};
+
+/**
+ * MemoryLifecycle
+ *
+ * Everything the store holds about one memory's adaptive state.
+ *
+ * ``archived`` memories (curation-invalidated) are read from the snapshot taken when they were
+ * invalidated, which carries no shadow record. ``stored`` is False when nothing at all is stored
+ * for the memory, so ``retention`` is all defaults and every list is empty: the GET view leaves
+ * the key out for such a memory while the bank's mode is off.
+ */
+export type MemoryLifecycle = {
+  /**
+   * Memory Id
+   */
+  memory_id: string;
+  /**
+   * Archived
+   */
+  archived: boolean;
+  /**
+   * Stored
+   */
+  stored: boolean;
+  retention: RetentionView;
+  claim?: ClaimView | null;
+  /**
+   * Relations Out
+   */
+  relations_out?: Array<RelationView>;
+  /**
+   * Relations In
+   */
+  relations_in?: Array<RelationView>;
+  /**
+   * Recent Events
+   */
+  recent_events?: Array<ReinforcementEventView>;
+  shadow?: ClaimShadowView | null;
 };
 
 /**
@@ -6262,6 +6460,98 @@ export type RefreshMentalModelRequest = {
 };
 
 /**
+ * ReinforcementEventView
+ *
+ * One ledger row.
+ */
+export type ReinforcementEventView = {
+  /**
+   * Source Type
+   */
+  source_type: string;
+  /**
+   * Source Key
+   */
+  source_key: string;
+  /**
+   * Event Time
+   */
+  event_time: string;
+  /**
+   * Weight
+   */
+  weight: number;
+  /**
+   * Independence Weight
+   */
+  independence_weight: number;
+  /**
+   * Applied Gain
+   */
+  applied_gain: number;
+  /**
+   * Outcome
+   */
+  outcome: string;
+  /**
+   * Processed At
+   */
+  processed_at?: string | null;
+};
+
+/**
+ * RelationView
+ *
+ * One lifecycle relation. A NULL endpoint is a tombstone: that memory is gone (its snapshot stays).
+ */
+export type RelationView = {
+  /**
+   * Id
+   */
+  id: string;
+  /**
+   * Relation Type
+   */
+  relation_type: string;
+  /**
+   * Source Memory Id
+   */
+  source_memory_id: string | null;
+  /**
+   * Target Memory Id
+   */
+  target_memory_id: string | null;
+  /**
+   * Source Snapshot
+   */
+  source_snapshot?: {
+    [key: string]: unknown;
+  };
+  /**
+   * Target Snapshot
+   */
+  target_snapshot?: {
+    [key: string]: unknown;
+  };
+  /**
+   * Origin
+   */
+  origin: string;
+  /**
+   * Reason
+   */
+  reason?: string | null;
+  /**
+   * Confidence
+   */
+  confidence?: number | null;
+  /**
+   * Created At
+   */
+  created_at?: string | null;
+};
+
+/**
  * ReprocessDocumentResponse
  *
  * Response model for reprocess document endpoint.
@@ -6353,6 +6643,72 @@ export type RetainResponse = {
    * Token usage metrics for LLM calls during fact extraction (only present for synchronous operations)
    */
   usage?: TokenUsage | null;
+};
+
+/**
+ * RetentionView
+ *
+ * A memory's retention, and its retrievability at the view's ``now``.
+ */
+export type RetentionView = {
+  /**
+   * Materialized
+   *
+   * True when a retention row exists; False when every value is a default.
+   */
+  materialized: boolean;
+  /**
+   * Retrievability
+   */
+  retrievability: number;
+  /**
+   * Stability Days
+   */
+  stability_days: number;
+  /**
+   * Importance
+   */
+  importance: number;
+  /**
+   * Last Reinforced At
+   */
+  last_reinforced_at: string | null;
+  /**
+   * Reinforcement Count
+   */
+  reinforcement_count: number;
+  /**
+   * Access Count
+   */
+  access_count: number;
+  /**
+   * Last Recalled At
+   */
+  last_recalled_at?: string | null;
+  /**
+   * Forgetting Exempt
+   */
+  forgetting_exempt: boolean;
+  /**
+   * Exemption Reason
+   */
+  exemption_reason?: string | null;
+  /**
+   * Retention State
+   */
+  retention_state?: string;
+  /**
+   * Below Threshold Since
+   */
+  below_threshold_since?: string | null;
+  /**
+   * Archived At
+   */
+  archived_at?: string | null;
+  /**
+   * Updated At
+   */
+  updated_at?: string | null;
 };
 
 /**
@@ -6827,6 +7183,35 @@ export type UpdateDocumentResponse = {
    * Success
    */
   success?: boolean;
+};
+
+/**
+ * UpdateMemoryLifecycleRequest
+ *
+ * Request model for changing how a memory is retained.
+ *
+ * Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle'. Omitted fields stay as they
+ * are; at least one must be set.
+ */
+export type UpdateMemoryLifecycleRequest = {
+  /**
+   * Importance
+   *
+   * How much the memory matters, in [0, 1] (0.5 is neutral). Rescales the stability the memory has learned by the ratio of the old and new importance, so earlier reinforcement is kept.
+   */
+  importance?: number | null;
+  /**
+   * Forgetting Exempt
+   *
+   * Exempt the memory from retention decay: it always ranks as fully retrievable. False lifts the exemption and clears its reason.
+   */
+  forgetting_exempt?: boolean | null;
+  /**
+   * Exemption Reason
+   *
+   * Why the memory is exempt. Cannot be set while turning forgetting_exempt off.
+   */
+  exemption_reason?: string | null;
 };
 
 /**
@@ -7674,6 +8059,91 @@ export type GetObservationHistoryResponses = {
    */
   200: unknown;
 };
+
+export type ConfirmMemoryData = {
+  /**
+   * Request
+   */
+  body?: ConfirmMemoryRequest | null;
+  headers?: {
+    /**
+     * Authorization
+     */
+    authorization?: string | null;
+  };
+  path: {
+    /**
+     * Bank Id
+     */
+    bank_id: string;
+    /**
+     * Memory Id
+     */
+    memory_id: string;
+  };
+  query?: never;
+  url: "/v1/default/banks/{bank_id}/memories/{memory_id}/confirm";
+};
+
+export type ConfirmMemoryErrors = {
+  /**
+   * Validation Error
+   */
+  422: HttpValidationError;
+};
+
+export type ConfirmMemoryError = ConfirmMemoryErrors[keyof ConfirmMemoryErrors];
+
+export type ConfirmMemoryResponses = {
+  /**
+   * Successful Response
+   */
+  200: ConfirmMemoryResponse;
+};
+
+export type ConfirmMemoryResponse2 = ConfirmMemoryResponses[keyof ConfirmMemoryResponses];
+
+export type UpdateMemoryLifecycleData = {
+  body: UpdateMemoryLifecycleRequest;
+  headers?: {
+    /**
+     * Authorization
+     */
+    authorization?: string | null;
+  };
+  path: {
+    /**
+     * Bank Id
+     */
+    bank_id: string;
+    /**
+     * Memory Id
+     */
+    memory_id: string;
+  };
+  query?: never;
+  url: "/v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle";
+};
+
+export type UpdateMemoryLifecycleErrors = {
+  /**
+   * Validation Error
+   */
+  422: HttpValidationError;
+};
+
+export type UpdateMemoryLifecycleError =
+  UpdateMemoryLifecycleErrors[keyof UpdateMemoryLifecycleErrors];
+
+export type UpdateMemoryLifecycleResponses = {
+  /**
+   * Successful Response
+   */
+  200: MemoryLifecycle;
+};
+
+export type UpdateMemoryLifecycleResponse =
+  UpdateMemoryLifecycleResponses[keyof UpdateMemoryLifecycleResponses];
 
 export type RecallMemoriesData = {
   body: RecallRequest;

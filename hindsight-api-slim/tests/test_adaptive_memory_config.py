@@ -40,6 +40,7 @@ _HIERARCHICAL = {
 }
 _STATIC = {
     "adaptive_memory_recall_reinforcement_enabled": False,
+    "adaptive_memory_reflect_reinforcement_enabled": True,
     "adaptive_memory_reinforcement_cooldown_hours": 6.0,
     "adaptive_memory_reinforcement_gain": 1.0,
     "adaptive_memory_source_weights": {
@@ -149,6 +150,7 @@ def test_scalar_values_read_from_env(clean_env):
         "adaptive_memory_default_view": (" Historical ", "historical"),
         "adaptive_memory_historical_cues": ("1", True),
         "adaptive_memory_recall_reinforcement_enabled": ("true", True),
+        "adaptive_memory_reflect_reinforcement_enabled": ("false", False),
         "adaptive_memory_reinforcement_cooldown_hours": ("0", 0.0),
         "adaptive_memory_reinforcement_gain": ("2.5", 2.5),
         "adaptive_memory_conflict_policy": ("latest", "latest"),

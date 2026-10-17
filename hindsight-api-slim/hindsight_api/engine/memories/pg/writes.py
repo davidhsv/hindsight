@@ -448,6 +448,12 @@ async def invalidate_memory(*, conn, fq_table, bank_id: str, unit_id: str, reaso
     from .graph import _ops_for
 
     await _ops_for(conn).delete_unit_links(conn, fq_table("memory_links"), bank_id, [str(unit_id)])
+    # Adaptive-memory state goes with the row too (FK cascade), so park it on the archive row first:
+    # this takes the row's FOR UPDATE lock here, where the DELETE below would take it anyway, and
+    # snapshots under it (see park_adaptive_state). A memory with no adaptive state writes nothing.
+    from .adaptive_archive import park_adaptive_state
+
+    await park_adaptive_state(conn, fq_table=fq_table, bank_id=bank_id, unit_id=str(unit_id))
     # The cascade prunes `unit_entities` with the row.
     await conn.execute(f"DELETE FROM {mu} WHERE id = $1 AND bank_id = $2", str(unit_id), bank_id)
     return True
@@ -531,6 +537,12 @@ async def restore_memory(*, conn, fq_table, bank_id: str, unit_id: str) -> Store
     await _ops_for(conn).enqueue_graph_maintenance(
         conn, fq_table("graph_maintenance_queue"), bank_id, [uuid.UUID(str(unit_id))]
     )
+    # Put back the adaptive state parked at invalidation (retention, ledger keys, claim, evidence,
+    # relation endpoints), before the archive row that holds it goes. A retired claim also re-stamps
+    # consolidated_at, which the reset above cleared.
+    from .adaptive_archive import unpark_adaptive_state
+
+    await unpark_adaptive_state(conn, ops=_ops_for(conn), fq_table=fq_table, bank_id=bank_id, unit_id=str(unit_id))
     await conn.execute(f"DELETE FROM {arch} WHERE id = $1 AND bank_id = $2", str(unit_id), bank_id)
     return _archived_stored(arch_row)
 

@@ -31,6 +31,7 @@ from hindsight_api.api.observability import HttpObservabilityMiddleware
 from hindsight_api.api.passthrough_headers import collect_passthrough_headers
 from hindsight_api.api.unknown_params import UnknownParamsRoute, use_unknown_params_routes
 from hindsight_api.cancellation import OperationCancelledError
+from hindsight_api.engine.adaptive.views import MemoryLifecycle
 from hindsight_api.engine.audit import (
     AuditEntry,
     AuditLogger,
@@ -1276,6 +1277,20 @@ class MemoryItem(BaseModel):
         description="How to handle an existing document with the same document_id. "
         "'replace' (default) deletes old data and reprocesses from scratch. "
         "'append' concatenates new content to the existing document text and reprocesses.",
+    )
+    importance: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="How much the memories extracted from this item matter, in [0, 1] (0.5 is neutral). "
+        "Scales how long they stay readily recallable without being reinforced. Applied only when the "
+        "bank's adaptive memory mode is 'rank' or 'lifecycle'; ignored in every other mode.",
+    )
+    forgetting_exempt: bool | None = Field(
+        default=None,
+        description="Exempt the memories extracted from this item from retention decay: they always "
+        "rank as fully retrievable. Applied only when the bank's adaptive memory mode is 'rank' or "
+        "'lifecycle'; ignored in every other mode.",
     )
 
     @field_validator("timestamp", mode="before")
@@ -2915,6 +2930,115 @@ class UpdateMemoryRequest(BaseModel):
         return self
 
 
+class ConfirmMemoryRequest(BaseModel):
+    """Request model for explicitly confirming that a memory still holds.
+
+    A confirmation is reinforcement evidence: it makes the memory more stable, so it stays
+    readily recallable for longer. Needs the bank's adaptive memory mode to be 'rank' or
+    'lifecycle' with reinforcement enabled.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "source_key": "review-2026-10-17",
+                "event_time": "2026-10-17T09:00:00Z",
+                "reason": "verified against the deployment inventory",
+            }
+        }
+    )
+
+    source_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="Identifies this piece of evidence. A memory is confirmed at most once per key: "
+        "re-sending the same key is reported as deduplicated and changes nothing, so a retry is safe. "
+        "Omit it and every request counts as a separate confirmation.",
+    )
+    event_time: datetime | None = Field(
+        default=None,
+        description="When the confirmation happened (ISO 8601; a time without an offset is UTC). "
+        "Defaults to now. It may be in the past, but not in the future.",
+    )
+    reason: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Free-text note for the audit log, when audit logging is on. Not stored with the memory.",
+    )
+
+    @field_validator("event_time")
+    @classmethod
+    def _event_time_utc(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+
+class ConfirmMemoryResponse(BaseModel):
+    """What an explicit confirmation did."""
+
+    memory_id: str
+    recorded: bool = Field(description="True when the confirmation was recorded as evidence for the memory.")
+    deduplicated: bool = Field(
+        description="True when this source_key had already confirmed the memory; nothing changed."
+    )
+    outcome: str | None = Field(
+        default=None,
+        description="'applied' (the memory was reinforced), 'cooldown' (recorded, but too soon after its last "
+        "reinforcement to add stability) or 'deduplicated'.",
+    )
+    stability_days: float | None = Field(
+        default=None,
+        description="The memory's stability after the call: the days until, without reinforcement, its "
+        "retrievability falls to about 37%.",
+    )
+    reinforcement_count: int | None = Field(
+        default=None, description="How many times the memory has been reinforced, after the call."
+    )
+
+
+class UpdateMemoryLifecycleRequest(BaseModel):
+    """Request model for changing how a memory is retained.
+
+    Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle'. Omitted fields stay as they
+    are; at least one must be set.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {"importance": 0.9, "forgetting_exempt": True, "exemption_reason": "compliance requirement"}
+        }
+    )
+
+    importance: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="How much the memory matters, in [0, 1] (0.5 is neutral). Rescales the stability the "
+        "memory has learned by the ratio of the old and new importance, so earlier reinforcement is kept.",
+    )
+    forgetting_exempt: bool | None = Field(
+        default=None,
+        description="Exempt the memory from retention decay: it always ranks as fully retrievable. "
+        "False lifts the exemption and clears its reason.",
+    )
+    exemption_reason: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description="Why the memory is exempt. Cannot be set while turning forgetting_exempt off.",
+    )
+
+    @model_validator(mode="after")
+    def _require_a_change(self) -> "UpdateMemoryLifecycleRequest":
+        if self.importance is None and self.forgetting_exempt is None and self.exemption_reason is None:
+            raise ValueError("Provide at least one field to update.")
+        if self.exemption_reason is not None and self.forgetting_exempt is False:
+            raise ValueError("exemption_reason cannot be set while turning forgetting_exempt off.")
+        return self
+
+
 class DeleteDocumentResponse(BaseModel):
     """Response model for delete document endpoint."""
 
@@ -4128,7 +4252,7 @@ class BankTemplateConfig(BaseModel):
     )
     adaptive_memory_reinforcement_enabled: bool | None = Field(
         default=None,
-        description="Let reinforcement events raise a memory's stability (reserved; takes effect in a later release)",
+        description="Let reinforcement events raise a memory's stability (rank and lifecycle modes only)",
     )
     adaptive_memory_base_stability_days: float | None = Field(
         default=None,
@@ -6207,7 +6331,10 @@ def _register_routes(app: FastAPI):
     @app.get(
         "/v1/default/banks/{bank_id}/memories/{memory_id}",
         summary="Get memory unit",
-        description="Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead.",
+        description="Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead. "
+        "When the bank's adaptive memory mode is not 'off', or adaptive state is stored for the memory, the "
+        "payload also carries 'lifecycle': its retention (stability, retrievability now, importance, exemption), "
+        "claim, lifecycle relations and most recent reinforcement events.",
         operation_id="get_memory",
         tags=["Memory"],
     )
@@ -6324,6 +6451,94 @@ def _register_routes(app: FastAPI):
             raise _internal_error(e, f"/v1/default/banks/{bank_id}/memories/{memory_id}/history")
 
     @app.post(
+        "/v1/default/banks/{bank_id}/memories/{memory_id}/confirm",
+        response_model=ConfirmMemoryResponse,
+        summary="Confirm memory",
+        description="Record explicit evidence that a memory (a fact or an observation) still holds. "
+        "The confirmation reinforces the memory, so it stays readily recallable for longer. A source_key "
+        "confirms a memory at most once; re-sending it changes nothing. Needs the bank's adaptive memory "
+        "mode to be 'rank' or 'lifecycle' with reinforcement enabled (409 otherwise; observe mode never "
+        "changes state). 404 when the memory is missing or invalidated.",
+        operation_id="confirm_memory",
+        tags=["Memory"],
+    )
+    @audited("confirm_memory")
+    async def api_confirm_memory(
+        bank_id: str,
+        memory_id: str,
+        request: ConfirmMemoryRequest | None = None,
+        request_context: RequestContext = Depends(get_request_context),
+    ):
+        """Explicitly confirm a memory (an explicit_confirmation reinforcement event)."""
+        body = request or ConfirmMemoryRequest()
+        try:
+            confirmation = await app.state.memory.confirm_memory(
+                bank_id,
+                memory_id,
+                source_key=body.source_key,
+                event_time=body.event_time,
+                request_context=request_context,
+            )
+            if confirmation is None:
+                raise HTTPException(status_code=404, detail=f"Memory unit '{memory_id}' not found")
+            return ConfirmMemoryResponse(
+                memory_id=confirmation.memory_id,
+                recorded=confirmation.recorded,
+                deduplicated=confirmation.deduplicated,
+                outcome=confirmation.outcome,
+                stability_days=confirmation.stability_days,
+                reinforcement_count=confirmation.reinforcement_count,
+            )
+        except OperationValidationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.reason)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            raise _internal_error(e, f"POST /v1/default/banks/{bank_id}/memories/{memory_id}/confirm")
+
+    @app.patch(
+        "/v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle",
+        response_model=MemoryLifecycle,
+        summary="Update memory lifecycle",
+        description="Change how a memory (a fact or an observation) is retained: its importance and its "
+        "exemption from retention decay. Returns the memory's lifecycle view, the same one GET "
+        "/memories/{memory_id} shows under 'lifecycle'. Needs the bank's adaptive memory mode to be "
+        "'rank' or 'lifecycle' (409 otherwise). 404 when the memory is missing or invalidated.",
+        operation_id="update_memory_lifecycle",
+        tags=["Memory"],
+    )
+    @audited("update_memory_lifecycle")
+    async def api_update_memory_lifecycle(
+        bank_id: str,
+        memory_id: str,
+        request: UpdateMemoryLifecycleRequest,
+        request_context: RequestContext = Depends(get_request_context),
+    ):
+        """Set a memory's importance and/or forgetting exemption."""
+        try:
+            view = await app.state.memory.update_memory_lifecycle(
+                bank_id,
+                memory_id,
+                importance=request.importance,
+                forgetting_exempt=request.forgetting_exempt,
+                exemption_reason=request.exemption_reason,
+                request_context=request_context,
+            )
+            if view is None:
+                raise HTTPException(status_code=404, detail=f"Memory unit '{memory_id}' not found")
+            return view
+        except OperationValidationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.reason)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            raise _internal_error(e, f"PATCH /v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle")
+
+    @app.post(
         "/v1/default/banks/{bank_id}/memories/recall",
         response_model=RecallResponse,
         summary="Recall memory",
@@ -6433,6 +6648,8 @@ def _register_routes(app: FastAPI):
                         tag_groups=request.tag_groups,
                         min_scores=request.min_scores,
                         temporal_window=request.temporal_window,
+                        # A final, external recall: the one kind that may reinforce what it returns.
+                        _reinforce_results=True,
                     ),
                     operation="recall",
                     bank_id=bank_id,
@@ -10321,6 +10538,13 @@ def _register_routes(app: FastAPI):
                 item.document_id or (f"retain_{uuid.uuid4()}" if canonical.attachments else None)
                 for item, canonical in zip(request.items, canonical_contents, strict=True)
             ]
+            # An id minted here is the server's, not the caller's: reinforcement must count it as
+            # weak evidence, as it does the ids retain_batch mints. Asked only when one was minted,
+            # and marked only where the bank's adaptive mode writes state, like retain_batch does.
+            mark_minted = any(
+                document_id and not item.document_id
+                for item, document_id in zip(request.items, item_document_ids, strict=True)
+            ) and await app.state.memory.records_minted_document_ids(bank_id, request_context=request_context)
             attachments_by_document: dict[str, list] = {}
             for item_document_id, canonical in zip(item_document_ids, canonical_contents, strict=True):
                 if item_document_id and canonical.attachments:
@@ -10368,6 +10592,8 @@ def _register_routes(app: FastAPI):
                     content_dict["metadata"] = item.metadata
                 if item_document_id:
                     content_dict["document_id"] = item_document_id
+                    if mark_minted and not item.document_id:
+                        content_dict["document_id_minted"] = True
                 if item.entities:
                     content_dict["entities"] = [{"text": e.text, "type": e.type or "CONCEPT"} for e in item.entities]
                     content_dict["resolve_entities"] = item.resolve_entities
@@ -10377,6 +10603,10 @@ def _register_routes(app: FastAPI):
                     content_dict["observation_scopes"] = item.observation_scopes
                 if item.update_mode is not None:
                     content_dict["update_mode"] = item.update_mode
+                if item.importance is not None:
+                    content_dict["importance"] = item.importance
+                if item.forgetting_exempt is not None:
+                    content_dict["forgetting_exempt"] = item.forgetting_exempt
                 # Carried on the item, not just used as the grouping key: reprocess
                 # rebuilds its retain call from retain_params, so a strategy that
                 # never reaches the content dict never reaches retain_params either
@@ -10639,6 +10869,9 @@ def _register_routes(app: FastAPI):
 
             file_items = []
             total_batch_size = 0
+            # Whether this bank records a server-minted document id as such (see api_retain); asked
+            # once, and only if a file arrives without a document_id.
+            mark_minted: bool | None = None
 
             for i, file in enumerate(files):
                 # Read file content to check size
@@ -10660,6 +10893,10 @@ def _register_routes(app: FastAPI):
                 # Get per-file metadata
                 file_meta = request_data.files_metadata[i] if request_data.files_metadata else FileRetainMetadata()
                 doc_id = file_meta.document_id or f"file_{uuid.uuid4()}"
+                if not file_meta.document_id and mark_minted is None:
+                    mark_minted = await app.state.memory.records_minted_document_ids(
+                        bank_id, request_context=request_context
+                    )
 
                 # Resolve and validate per-file parser chain
                 # Priority: per-file > request-level > server default
@@ -10677,6 +10914,8 @@ def _register_routes(app: FastAPI):
                     "parser": parser_chain,
                     "strategy": file_meta.strategy,
                 }
+                if mark_minted and not file_meta.document_id:
+                    item["document_id_minted"] = True
                 file_items.append(item)
 
             # Check total batch size after processing all files

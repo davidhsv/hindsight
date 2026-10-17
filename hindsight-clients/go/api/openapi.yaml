@@ -467,7 +467,11 @@ paths:
     get:
       description: "Get a single memory unit by ID with all its metadata including\
         \ entities and tags. Note: the 'history' field is deprecated and always returns\
-        \ an empty list - use GET /memories/{memory_id}/history instead."
+        \ an empty list - use GET /memories/{memory_id}/history instead. When the\
+        \ bank's adaptive memory mode is not 'off', or adaptive state is stored for\
+        \ the memory, the payload also carries 'lifecycle': its retention (stability,\
+        \ retrievability now, importance, exemption), claim, lifecycle relations and\
+        \ most recent reinforcement events."
       operationId: get_memory
       parameters:
       - explode: false
@@ -604,6 +608,116 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
       summary: Get observation history
+      tags:
+      - Memory
+  /v1/default/banks/{bank_id}/memories/{memory_id}/confirm:
+    post:
+      description: "Record explicit evidence that a memory (a fact or an observation)\
+        \ still holds. The confirmation reinforces the memory, so it stays readily\
+        \ recallable for longer. A source_key confirms a memory at most once; re-sending\
+        \ it changes nothing. Needs the bank's adaptive memory mode to be 'rank' or\
+        \ 'lifecycle' with reinforcement enabled (409 otherwise; observe mode never\
+        \ changes state). 404 when the memory is missing or invalidated."
+      operationId: confirm_memory
+      parameters:
+      - explode: false
+        in: path
+        name: bank_id
+        required: true
+        schema:
+          title: Bank Id
+          type: string
+        style: simple
+      - explode: false
+        in: path
+        name: memory_id
+        required: true
+        schema:
+          title: Memory Id
+          type: string
+        style: simple
+      - explode: false
+        in: header
+        name: authorization
+        required: false
+        schema:
+          nullable: true
+          type: string
+        style: simple
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmMemoryRequest'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmMemoryResponse'
+          description: Successful Response
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Confirm memory
+      tags:
+      - Memory
+  /v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle:
+    patch:
+      description: "Change how a memory (a fact or an observation) is retained: its\
+        \ importance and its exemption from retention decay. Returns the memory's\
+        \ lifecycle view, the same one GET /memories/{memory_id} shows under 'lifecycle'.\
+        \ Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle' (409 otherwise).\
+        \ 404 when the memory is missing or invalidated."
+      operationId: update_memory_lifecycle
+      parameters:
+      - explode: false
+        in: path
+        name: bank_id
+        required: true
+        schema:
+          title: Bank Id
+          type: string
+        style: simple
+      - explode: false
+        in: path
+        name: memory_id
+        required: true
+        schema:
+          title: Memory Id
+          type: string
+        style: simple
+      - explode: false
+        in: header
+        name: authorization
+        required: false
+        schema:
+          nullable: true
+          type: string
+        style: simple
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMemoryLifecycleRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryLifecycle'
+          description: Successful Response
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Update memory lifecycle
       tags:
       - Memory
   /v1/default/banks/{bank_id}/memories/recall:
@@ -6989,6 +7103,89 @@ components:
       - created_at
       - document_id
       title: ChunkResponse
+    ClaimShadowView:
+      description: What observe mode would have retired this memory as (diagnostic
+        only).
+      example:
+        created_at: 2000-01-23T04:56:07.000+00:00
+        deciding_snapshot:
+          key: ""
+        evidence_ids:
+        - evidence_ids
+        - evidence_ids
+        would_status: would_status
+      properties:
+        would_status:
+          title: Would Status
+          type: string
+        deciding_snapshot:
+          additionalProperties: {}
+          title: Deciding Snapshot
+        evidence_ids:
+          items:
+            type: string
+          type: array
+        created_at:
+          format: date-time
+          nullable: true
+          type: string
+      required:
+      - would_status
+      title: ClaimShadowView
+    ClaimView:
+      description: "The memory's claim row: what should be believed about it, and\
+        \ why."
+      example:
+        inherited_from_id: inherited_from_id
+        evidence_memory_ids:
+        - evidence_memory_ids
+        - evidence_memory_ids
+        reason: reason
+        retired_via: retired_via
+        updated_at: 2000-01-23T04:56:07.000+00:00
+        truth_status: truth_status
+        confidence: 2.3021358869347655
+        valid_to: 2000-01-23T04:56:07.000+00:00
+        valid_from: 2000-01-23T04:56:07.000+00:00
+        superseded_by_id: superseded_by_id
+      properties:
+        truth_status:
+          title: Truth Status
+          type: string
+        confidence:
+          nullable: true
+          type: number
+        valid_from:
+          format: date-time
+          nullable: true
+          type: string
+        valid_to:
+          format: date-time
+          nullable: true
+          type: string
+        retired_via:
+          nullable: true
+          type: string
+        superseded_by_id:
+          nullable: true
+          type: string
+        inherited_from_id:
+          nullable: true
+          type: string
+        reason:
+          nullable: true
+          type: string
+        evidence_memory_ids:
+          items:
+            type: string
+          type: array
+        updated_at:
+          format: date-time
+          nullable: true
+          type: string
+      required:
+      - truth_status
+      title: ClaimView
     ClearMemoryObservationsResponse:
       description: Response model for clearing observations for a specific memory.
       example:
@@ -7000,6 +7197,69 @@ components:
       required:
       - deleted_count
       title: ClearMemoryObservationsResponse
+    ConfirmMemoryRequest:
+      description: |-
+        Request model for explicitly confirming that a memory still holds.
+
+        A confirmation is reinforcement evidence: it makes the memory more stable, so it stays
+        readily recallable for longer. Needs the bank's adaptive memory mode to be 'rank' or
+        'lifecycle' with reinforcement enabled.
+      example:
+        event_time: 2026-10-17T09:00:00Z
+        reason: verified against the deployment inventory
+        source_key: review-2026-10-17
+      properties:
+        source_key:
+          maxLength: 256
+          minLength: 1
+          nullable: true
+          type: string
+        event_time:
+          format: date-time
+          nullable: true
+          type: string
+        reason:
+          maxLength: 500
+          nullable: true
+          type: string
+      title: ConfirmMemoryRequest
+    ConfirmMemoryResponse:
+      description: What an explicit confirmation did.
+      example:
+        stability_days: 0.8008281904610115
+        reinforcement_count: 6
+        deduplicated: true
+        memory_id: memory_id
+        recorded: true
+        outcome: outcome
+      properties:
+        memory_id:
+          title: Memory Id
+          type: string
+        recorded:
+          description: True when the confirmation was recorded as evidence for the
+            memory.
+          title: Recorded
+          type: boolean
+        deduplicated:
+          description: True when this source_key had already confirmed the memory;
+            nothing changed.
+          title: Deduplicated
+          type: boolean
+        outcome:
+          nullable: true
+          type: string
+        stability_days:
+          nullable: true
+          type: number
+        reinforcement_count:
+          nullable: true
+          type: integer
+      required:
+      - deduplicated
+      - memory_id
+      - recorded
+      title: ConfirmMemoryResponse
     ConsolidationRequest:
       description: Request model for consolidation trigger endpoint.
       example:
@@ -10181,9 +10441,166 @@ components:
           - append
           nullable: true
           type: string
+        importance:
+          maximum: 1.0
+          minimum: 0.0
+          nullable: true
+          type: number
+        forgetting_exempt:
+          nullable: true
+          type: boolean
       required:
       - content
       title: MemoryItem
+    MemoryLifecycle:
+      description: |-
+        Everything the store holds about one memory's adaptive state.
+
+        ``archived`` memories (curation-invalidated) are read from the snapshot taken when they were
+        invalidated, which carries no shadow record. ``stored`` is False when nothing at all is stored
+        for the memory, so ``retention`` is all defaults and every list is empty: the GET view leaves
+        the key out for such a memory while the bank's mode is off.
+      example:
+        relations_out:
+        - reason: reason
+          target_memory_id: target_memory_id
+          origin: origin
+          confidence: 7.061401241503109
+          created_at: 2000-01-23T04:56:07.000+00:00
+          id: id
+          relation_type: relation_type
+          source_snapshot:
+            key: ""
+          target_snapshot:
+            key: ""
+          source_memory_id: source_memory_id
+        - reason: reason
+          target_memory_id: target_memory_id
+          origin: origin
+          confidence: 7.061401241503109
+          created_at: 2000-01-23T04:56:07.000+00:00
+          id: id
+          relation_type: relation_type
+          source_snapshot:
+            key: ""
+          target_snapshot:
+            key: ""
+          source_memory_id: source_memory_id
+        archived: true
+        memory_id: memory_id
+        shadow:
+          created_at: 2000-01-23T04:56:07.000+00:00
+          deciding_snapshot:
+            key: ""
+          evidence_ids:
+          - evidence_ids
+          - evidence_ids
+          would_status: would_status
+        stored: true
+        claim:
+          inherited_from_id: inherited_from_id
+          evidence_memory_ids:
+          - evidence_memory_ids
+          - evidence_memory_ids
+          reason: reason
+          retired_via: retired_via
+          updated_at: 2000-01-23T04:56:07.000+00:00
+          truth_status: truth_status
+          confidence: 2.3021358869347655
+          valid_to: 2000-01-23T04:56:07.000+00:00
+          valid_from: 2000-01-23T04:56:07.000+00:00
+          superseded_by_id: superseded_by_id
+        relations_in:
+        - reason: reason
+          target_memory_id: target_memory_id
+          origin: origin
+          confidence: 7.061401241503109
+          created_at: 2000-01-23T04:56:07.000+00:00
+          id: id
+          relation_type: relation_type
+          source_snapshot:
+            key: ""
+          target_snapshot:
+            key: ""
+          source_memory_id: source_memory_id
+        - reason: reason
+          target_memory_id: target_memory_id
+          origin: origin
+          confidence: 7.061401241503109
+          created_at: 2000-01-23T04:56:07.000+00:00
+          id: id
+          relation_type: relation_type
+          source_snapshot:
+            key: ""
+          target_snapshot:
+            key: ""
+          source_memory_id: source_memory_id
+        recent_events:
+        - weight: 9.301444243932576
+          processed_at: 2000-01-23T04:56:07.000+00:00
+          source_type: source_type
+          independence_weight: 3.616076749251911
+          source_key: source_key
+          event_time: 2000-01-23T04:56:07.000+00:00
+          outcome: outcome
+          applied_gain: 2.027123023002322
+        - weight: 9.301444243932576
+          processed_at: 2000-01-23T04:56:07.000+00:00
+          source_type: source_type
+          independence_weight: 3.616076749251911
+          source_key: source_key
+          event_time: 2000-01-23T04:56:07.000+00:00
+          outcome: outcome
+          applied_gain: 2.027123023002322
+        retention:
+          stability_days: 6.027456183070403
+          reinforcement_count: 5
+          archived_at: 2000-01-23T04:56:07.000+00:00
+          retrievability: 0.8008281904610115
+          importance: 1.4658129805029452
+          materialized: true
+          last_recalled_at: 2000-01-23T04:56:07.000+00:00
+          forgetting_exempt: true
+          access_count: 5
+          retention_state: active
+          updated_at: 2000-01-23T04:56:07.000+00:00
+          exemption_reason: exemption_reason
+          last_reinforced_at: 2000-01-23T04:56:07.000+00:00
+          below_threshold_since: 2000-01-23T04:56:07.000+00:00
+      properties:
+        memory_id:
+          title: Memory Id
+          type: string
+        archived:
+          title: Archived
+          type: boolean
+        stored:
+          title: Stored
+          type: boolean
+        retention:
+          $ref: '#/components/schemas/RetentionView'
+        claim:
+          $ref: '#/components/schemas/ClaimView'
+        relations_out:
+          items:
+            $ref: '#/components/schemas/RelationView'
+          type: array
+        relations_in:
+          items:
+            $ref: '#/components/schemas/RelationView'
+          type: array
+        recent_events:
+          items:
+            $ref: '#/components/schemas/ReinforcementEventView'
+          type: array
+        shadow:
+          $ref: '#/components/schemas/ClaimShadowView'
+      required:
+      - archived
+      - memory_id
+      - retention
+      - stored
+      title: MemoryLifecycle
     MemoryTimeseriesBucket:
       description: One bucket in the memory ingestion time-series.
       example:
@@ -12468,6 +12885,108 @@ components:
           nullable: true
           type: string
       title: RefreshMentalModelRequest
+    ReinforcementEventView:
+      description: One ledger row.
+      example:
+        weight: 9.301444243932576
+        processed_at: 2000-01-23T04:56:07.000+00:00
+        source_type: source_type
+        independence_weight: 3.616076749251911
+        source_key: source_key
+        event_time: 2000-01-23T04:56:07.000+00:00
+        outcome: outcome
+        applied_gain: 2.027123023002322
+      properties:
+        source_type:
+          title: Source Type
+          type: string
+        source_key:
+          title: Source Key
+          type: string
+        event_time:
+          format: date-time
+          title: Event Time
+          type: string
+        weight:
+          title: Weight
+          type: number
+        independence_weight:
+          title: Independence Weight
+          type: number
+        applied_gain:
+          title: Applied Gain
+          type: number
+        outcome:
+          title: Outcome
+          type: string
+        processed_at:
+          format: date-time
+          nullable: true
+          type: string
+      required:
+      - applied_gain
+      - event_time
+      - independence_weight
+      - outcome
+      - source_key
+      - source_type
+      - weight
+      title: ReinforcementEventView
+    RelationView:
+      description: "One lifecycle relation. A NULL endpoint is a tombstone: that memory\
+        \ is gone (its snapshot stays)."
+      example:
+        reason: reason
+        target_memory_id: target_memory_id
+        origin: origin
+        confidence: 7.061401241503109
+        created_at: 2000-01-23T04:56:07.000+00:00
+        id: id
+        relation_type: relation_type
+        source_snapshot:
+          key: ""
+        target_snapshot:
+          key: ""
+        source_memory_id: source_memory_id
+      properties:
+        id:
+          title: Id
+          type: string
+        relation_type:
+          title: Relation Type
+          type: string
+        source_memory_id:
+          nullable: true
+          type: string
+        target_memory_id:
+          nullable: true
+          type: string
+        source_snapshot:
+          additionalProperties: {}
+          title: Source Snapshot
+        target_snapshot:
+          additionalProperties: {}
+          title: Target Snapshot
+        origin:
+          title: Origin
+          type: string
+        reason:
+          nullable: true
+          type: string
+        confidence:
+          nullable: true
+          type: number
+        created_at:
+          format: date-time
+          nullable: true
+          type: string
+      required:
+      - id
+      - origin
+      - relation_type
+      - source_memory_id
+      - target_memory_id
+      title: RelationView
     ReprocessDocumentResponse:
       description: Response model for reprocess document endpoint.
       example:
@@ -12563,6 +13082,84 @@ components:
       - items_count
       - success
       title: RetainResponse
+    RetentionView:
+      description: "A memory's retention, and its retrievability at the view's ``now``."
+      example:
+        stability_days: 6.027456183070403
+        reinforcement_count: 5
+        archived_at: 2000-01-23T04:56:07.000+00:00
+        retrievability: 0.8008281904610115
+        importance: 1.4658129805029452
+        materialized: true
+        last_recalled_at: 2000-01-23T04:56:07.000+00:00
+        forgetting_exempt: true
+        access_count: 5
+        retention_state: active
+        updated_at: 2000-01-23T04:56:07.000+00:00
+        exemption_reason: exemption_reason
+        last_reinforced_at: 2000-01-23T04:56:07.000+00:00
+        below_threshold_since: 2000-01-23T04:56:07.000+00:00
+      properties:
+        materialized:
+          description: True when a retention row exists; False when every value is
+            a default.
+          title: Materialized
+          type: boolean
+        retrievability:
+          title: Retrievability
+          type: number
+        stability_days:
+          title: Stability Days
+          type: number
+        importance:
+          title: Importance
+          type: number
+        last_reinforced_at:
+          format: date-time
+          nullable: true
+          type: string
+        reinforcement_count:
+          title: Reinforcement Count
+          type: integer
+        access_count:
+          title: Access Count
+          type: integer
+        last_recalled_at:
+          format: date-time
+          nullable: true
+          type: string
+        forgetting_exempt:
+          title: Forgetting Exempt
+          type: boolean
+        exemption_reason:
+          nullable: true
+          type: string
+        retention_state:
+          default: active
+          title: Retention State
+          type: string
+        below_threshold_since:
+          format: date-time
+          nullable: true
+          type: string
+        archived_at:
+          format: date-time
+          nullable: true
+          type: string
+        updated_at:
+          format: date-time
+          nullable: true
+          type: string
+      required:
+      - access_count
+      - forgetting_exempt
+      - importance
+      - last_reinforced_at
+      - materialized
+      - reinforcement_count
+      - retrievability
+      - stability_days
+      title: RetentionView
     RetryOperationResponse:
       description: Response model for retry operation endpoint.
       example:
@@ -13043,6 +13640,31 @@ components:
           title: Success
           type: boolean
       title: UpdateDocumentResponse
+    UpdateMemoryLifecycleRequest:
+      description: |-
+        Request model for changing how a memory is retained.
+
+        Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle'. Omitted fields stay as they
+        are; at least one must be set.
+      example:
+        exemption_reason: compliance requirement
+        forgetting_exempt: true
+        importance: 0.9
+      properties:
+        importance:
+          maximum: 1.0
+          minimum: 0.0
+          nullable: true
+          type: number
+        forgetting_exempt:
+          nullable: true
+          type: boolean
+        exemption_reason:
+          maxLength: 500
+          minLength: 1
+          nullable: true
+          type: string
+      title: UpdateMemoryLifecycleRequest
     UpdateMemoryRequest:
       description: |-
         Request model for curating a single memory unit (edit / invalidate / revert).

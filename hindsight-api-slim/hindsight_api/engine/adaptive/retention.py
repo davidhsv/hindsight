@@ -79,6 +79,22 @@ def initial_stability(fact_type: str, importance: float, settings: AdaptiveSetti
     return _clamp(stability, MIN_STABILITY_DAYS, max(MIN_STABILITY_DAYS, settings.max_stability_days))
 
 
+def rescale_for_importance(
+    stability_days: float, old_importance: float, new_importance: float, settings: AdaptiveSettings
+) -> float:
+    """Stability after an explicit importance change: ``S × (0.5 + new) / (0.5 + old)``.
+
+    The same multiplier :func:`initial_stability` applies, as a ratio, so a memory keeps what it
+    learned and only its importance factor changes: a fresh row (neutral importance, ``S0``) set to
+    importance ``i`` ends at ``initial_stability(fact_type, i)``. Clamped to
+    ``[MIN_STABILITY_DAYS, max_stability_days]``.
+    """
+    upper = max(MIN_STABILITY_DAYS, settings.max_stability_days)
+    base = stability_days if math.isfinite(stability_days) else upper
+    ratio = (0.5 + _clamp(new_importance, 0.0, 1.0)) / (0.5 + _clamp(old_importance, 0.0, 1.0))
+    return _clamp(base * ratio, MIN_STABILITY_DAYS, upper)
+
+
 def memory_floor(floor: float, importance: float) -> float:
     """The per-memory retention floor: ``floor + (1 − floor)·max(0, importance − 0.5)``.
 

@@ -38,6 +38,7 @@ NOW = datetime(2026, 6, 1, tzinfo=UTC)
 
 _STATIC_FIELDS = (
     "adaptive_memory_recall_reinforcement_enabled",
+    "adaptive_memory_reflect_reinforcement_enabled",
     "adaptive_memory_reinforcement_cooldown_hours",
     "adaptive_memory_reinforcement_gain",
     "adaptive_memory_source_weights",

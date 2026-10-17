@@ -68,7 +68,15 @@ from .pg import retain as pg_retain
 from .pg import transfer as pg_transfer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from ..adaptive.models import AdaptiveState
+    from ..adaptive.models import (
+        AdaptiveState,
+        ReinforcementEvent,
+        ReinforcementResult,
+        RetentionPolicy,
+        RetentionState,
+    )
+    from ..adaptive.settings import AdaptiveSettings
+    from ..adaptive.views import MemoryLifecycle
     from ..consolidation.consolidator import _TemporalBounds
     from ..embeddings import Embeddings
     from ..response_models import MemoryFact
@@ -534,6 +542,98 @@ class PostgresMemories(MemoriesExtension):
     async def load_adaptive_state(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, AdaptiveState]:
         return await pg_adaptive.load_adaptive_state(
             conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids
+        )
+
+    async def record_reinforcement(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        events: Sequence[ReinforcementEvent],
+        settings: AdaptiveSettings,
+        now: datetime,
+        background: bool,
+        anchors: Mapping[str, datetime] | None = None,
+        initial_memory_ids: frozenset[str] = frozenset(),
+    ) -> ReinforcementResult:
+        return await pg_adaptive.record_reinforcement(
+            conn,
+            ops=graph._ops_for(conn),
+            fq_table=fq_store_table,
+            bank_id=bank_id,
+            events=events,
+            settings=settings,
+            now=now,
+            background=background,
+            anchors=anchors,
+            initial_memory_ids=initial_memory_ids,
+        )
+
+    async def set_retention_policy(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        importance: float | None = None,
+        forgetting_exempt: bool | None = None,
+        exemption_reason: str | None = None,
+        settings: AdaptiveSettings,
+        now: datetime,
+    ) -> RetentionState | None:
+        from ..adaptive.models import RetentionPolicy
+
+        states = await self.set_retention_policies(
+            conn,
+            bank_id=bank_id,
+            policies=[
+                RetentionPolicy(
+                    memory_id=memory_id,
+                    importance=importance,
+                    forgetting_exempt=forgetting_exempt,
+                    exemption_reason=exemption_reason,
+                )
+            ],
+            settings=settings,
+            now=now,
+        )
+        return next(iter(states.values()), None)
+
+    async def set_retention_policies(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        policies: Sequence[RetentionPolicy],
+        settings: AdaptiveSettings,
+        now: datetime,
+    ) -> Mapping[str, RetentionState]:
+        return await pg_adaptive.set_retention_policies(
+            conn,
+            ops=graph._ops_for(conn),
+            fq_table=fq_store_table,
+            bank_id=bank_id,
+            policies=policies,
+            settings=settings,
+            now=now,
+        )
+
+    async def minted_document_ids(self, conn, *, bank_id: str, document_ids: Sequence[str]) -> frozenset[str]:
+        return await pg_adaptive.minted_document_ids(
+            conn, fq_table=fq_store_table, bank_id=bank_id, document_ids=document_ids
+        )
+
+    async def get_memory_lifecycle(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        now: datetime,
+        settings: AdaptiveSettings,
+    ) -> MemoryLifecycle | None:
+        return await pg_adaptive.get_memory_lifecycle(
+            conn, fq_table=fq_store_table, bank_id=bank_id, memory_id=memory_id, now=now, settings=settings
         )
 
     # -- count surfaces --

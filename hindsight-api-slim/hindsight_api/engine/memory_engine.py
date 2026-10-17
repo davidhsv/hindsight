@@ -633,6 +633,7 @@ if TYPE_CHECKING:
 
     from ..webhooks.url_guard import GuardedWebhookClient
     from . import bank_aliases as bank_aliases_mod
+    from .adaptive.views import MemoryLifecycle
     from .audit import AuditLogListResponse, AuditLogStatsResponse
     from .memories import MemoriesExtension, MemoryScopeWatermark
     from .memories.base import AttachmentRef, EntityResolverHandle, StoredMemory
@@ -648,6 +649,15 @@ if TYPE_CHECKING:
 from enum import Enum
 
 from ..pg0 import EmbeddedPostgres, parse_pg0_url
+from .adaptive import clock as adaptive_clock
+from .adaptive.producers import (
+    BackgroundReinforcement,
+    recall_reinforcement_allowed,
+    reflect_reinforcement_allowed,
+    usage_events,
+    write_settings,
+    write_settings_from_bank_config,
+)
 from .adaptive.scoring import (
     AdaptiveRecall,
     AdaptiveStateLoad,
@@ -693,7 +703,7 @@ from .reflect import (
     ReflectToolTokenLimits,
     run_reflect_agent,
 )
-from .reflect.models import StructuredOutputResult
+from .reflect.models import ReflectAgentResult, StructuredOutputResult
 from .reflect.retractions import (
     RetractedGrounding,
     based_on_fact_ids,
@@ -2385,6 +2395,44 @@ class _MemoryRevertPlan:
     embedding: str | None = None
 
 
+#: How far past the server's clock a confirmation's ``event_time`` may lie and still count as now.
+#: Client and server clocks drift; a client stamping its own wall time must not be refused for a
+#: few seconds of skew. Anything later is a future event and is refused.
+_CONFIRM_CLOCK_SKEW = timedelta(minutes=5)
+_CONFIRM_SOURCE_KEY_MAX_LENGTH = 256
+_EXEMPTION_REASON_MAX_LENGTH = 500
+
+
+def _confirmation_time(event_time: datetime | None, now: datetime) -> datetime:
+    """When a confirmation happened: ``event_time`` in UTC (naive means UTC), capped at ``now``."""
+    if event_time is None:
+        return now
+    if event_time.tzinfo is None or event_time.utcoffset() is None:
+        event_time = event_time.replace(tzinfo=UTC)
+    if event_time > now + _CONFIRM_CLOCK_SKEW:
+        raise ValueError(f"event_time {event_time.isoformat()} is in the future.")
+    return min(event_time, now)
+
+
+@dataclass(frozen=True)
+class MemoryConfirmation:
+    """What :meth:`MemoryEngine.confirm_memory` did with one explicit confirmation.
+
+    ``outcome`` is the store's verdict on the event: ``applied`` (it reinforced the memory),
+    ``cooldown`` (recorded, but within the cooldown of the last reinforcement, so no gain) or
+    ``deduplicated`` (this ``source_key`` already confirmed the memory; nothing changed).
+    ``recorded`` is True when the event now has a ledger row. ``stability_days`` and
+    ``reinforcement_count`` are the memory's retention after the call.
+    """
+
+    memory_id: str
+    recorded: bool
+    deduplicated: bool
+    outcome: str
+    stability_days: float | None
+    reinforcement_count: int | None
+
+
 @dataclass
 class KnowledgeBaseExportPage:
     """A single page's rendered inputs for a knowledge-base export bundle."""
@@ -3049,6 +3097,10 @@ class MemoryEngine(MemoryEngineInterface):
                 pool_getter=lambda: self._backend,
                 schema_getter=get_current_schema,
             )
+
+        # Recall and reflect reinforcement (adaptive memory), written off the response path on
+        # the primary backend and drained at close.
+        self._adaptive_reinforcement = BackgroundReinforcement(self._get_backend)
 
         # Audit logger for feature usage tracking
         config = get_config()
@@ -4249,6 +4301,8 @@ class MemoryEngine(MemoryEngineInterface):
             retain_content["event_date"] = None
         elif file_timestamp:
             retain_content["event_date"] = file_timestamp
+        if task_dict.get("document_id_minted"):
+            retain_content["document_id_minted"] = True
         # Same jsonb constraint as `submit_async_retain`: this row's task_payload
         # carries the item verbatim, and the caller-supplied metadata/tags on a
         # file upload never passed through that scrub.
@@ -6345,6 +6399,8 @@ class MemoryEngine(MemoryEngineInterface):
         # The work that just finished schedules its audit rows as background
         # tasks; let them land before the pool they write through is closed below.
         await self._audit_logger.drain()
+        # Same for recall/reflect reinforcement writes (bounded, like the audit drain).
+        await self._adaptive_reinforcement.drain_all()
 
         # Release the memories store's own resources (client/pool). No-op for the
         # default Postgres store; symmetric with init_memories() at startup.
@@ -8951,6 +9007,7 @@ class MemoryEngine(MemoryEngineInterface):
         _connection_budget: int | None = None,
         _quiet: bool = False,
         reranking: RecallReranking = "cross_encoder",
+        _reinforce_results: bool = False,
     ) -> RecallResultModel:
         """
         Recall memories using N*4-way parallel retrieval (N fact types × 4 retrieval methods).
@@ -8998,6 +9055,11 @@ class MemoryEngine(MemoryEngineInterface):
                   extracting dates from ``query``. It ranks memories dated inside it
                   higher; it does not exclude memories dated outside it, and it does
                   nothing when the bank has ``enable_temporal_retrieval`` off.
+            _reinforce_results: This is a final, external recall (the HTTP and MCP recall
+                  endpoints pass True; nothing else may): its returned memories may be
+                  reinforced as ``final_external_recall`` evidence, in the background, when
+                  the bank reinforces and the static recall-reinforcement switch is on.
+                  Internal recalls (reflect tools, consolidation, extensions) never set it.
 
         Returns:
             RecallResultModel containing:
@@ -9353,6 +9415,10 @@ class MemoryEngine(MemoryEngineInterface):
                 if not get_memories().store_owned_for(bank_id):
                     await self._raise_if_bank_deleted(bank_id)
 
+            # Once, after the retry loop, for what the caller actually receives.
+            if _reinforce_results and adaptive_settings is not None and result is not None and result.results:
+                self._submit_recall_reinforcement(bank_id, result.results, adaptive_settings, question_date)
+
             # Call post-operation hook for success
             if self._operation_validator and result is not None:
                 from hindsight_api.extensions.operation_validator import RecallResult
@@ -9384,6 +9450,73 @@ class MemoryEngine(MemoryEngineInterface):
             return result
         finally:
             recall_span_context.__exit__(None, None, None)
+
+    def _submit_recall_reinforcement(
+        self,
+        bank_id: str,
+        results: list[MemoryFact],
+        settings: AdaptiveSettings,
+        question_date: datetime | None,
+    ) -> None:
+        """Schedule ``final_external_recall`` events for a final recall's results; never raises.
+
+        Timed at the recall's scoring clock, capped at the wall clock: a historical
+        ``query_timestamp`` dates the evidence when the question was asked, and a future one cannot
+        reinforce a memory ahead of now.
+        """
+        try:
+            if not recall_reinforcement_allowed(settings):
+                return
+            event_time = min(_recall_scoring_now(question_date), adaptive_clock.utcnow())
+            events = usage_events(
+                [fact.id for fact in results],
+                source_type="final_external_recall",
+                event_time=event_time,
+                settings=settings,
+            )
+            self._adaptive_reinforcement.submit(producer="recall", bank_id=bank_id, events=events, settings=settings)
+        except Exception as exc:
+            logger.warning(f"[RECALL {bank_id[:8]}] could not schedule recall reinforcement: {exc!r}")
+            get_metrics_collector().record_adaptive_reinforcement_dropped(
+                producer="recall", reason="error", bank_id=bank_id
+            )
+
+    def _submit_reflect_reinforcement(
+        self,
+        bank_id: str,
+        agent_result: ReflectAgentResult,
+        bank_config: dict[str, Any],
+        *,
+        is_refresh: bool,
+        answer_as_document: bool,
+    ) -> None:
+        """Schedule ``successful_reflect_use`` events for what a successful answer cited; never raises.
+
+        Only the memories and observations the agent declared it used (never ``based_on``, which
+        holds everything retrieved when it declared nothing), and never for a mental-model refresh,
+        a document answer or an answer the agent itself reported as not found.
+        """
+        try:
+            if is_refresh or answer_as_document or agent_result.answer_found is False:
+                return
+            memory_ids = [*agent_result.used_memory_ids, *agent_result.used_observation_ids]
+            if not memory_ids:
+                return
+            settings = write_settings_from_bank_config(bank_config, bank_id=bank_id)
+            if settings is None or not reflect_reinforcement_allowed(settings):
+                return
+            events = usage_events(
+                memory_ids,
+                source_type="successful_reflect_use",
+                event_time=adaptive_clock.utcnow(),
+                settings=settings,
+            )
+            self._adaptive_reinforcement.submit(producer="reflect", bank_id=bank_id, events=events, settings=settings)
+        except Exception as exc:
+            logger.warning(f"[REFLECT {bank_id[:8]}] could not schedule reflect reinforcement: {exc!r}")
+            get_metrics_collector().record_adaptive_reinforcement_dropped(
+                producer="reflect", reason="error", bank_id=bank_id
+            )
 
     async def _load_adaptive_state(self, backend, bank_id: str, memory_ids: list[str]) -> AdaptiveStateLoad:
         """Read the adaptive state of a recall's candidates; a failure is returned, never raised.
@@ -12867,6 +13000,200 @@ class MemoryEngine(MemoryEngineInterface):
 
         return await self.get_memory_unit(bank_id=bank_id, memory_id=memory_id, request_context=request_context)
 
+    async def _adaptive_settings_for_bank(self, bank_id: str, request_context: "RequestContext") -> AdaptiveSettings:
+        """The bank's adaptive-memory settings, from its resolved config and the static config."""
+        from .memories import get_memories
+
+        bank_config = await self._config_resolver.get_bank_config(bank_id, request_context)
+        return AdaptiveSettings.resolve(
+            bank_config, get_config(), store_supports=get_memories().supports_adaptive_state_for(bank_id)
+        )
+
+    async def records_minted_document_ids(self, bank_id: str, *, request_context: "RequestContext") -> bool:
+        """Whether a retain into this bank records a server-minted document id as such.
+
+        ``retain_batch`` marks the ids it mints itself (``document_id_minted``), but the HTTP layer
+        mints some before the engine sees the item: ``retain_<uuid>`` for an item with attachments
+        and ``file_<uuid>`` for an uploaded file, because the bytes are stored under the document's
+        key first. It asks this before setting the same mark on the item, so the rule is the one
+        ``retain_batch`` applies: only while the bank's adaptive mode writes state (rank/lifecycle).
+        An off or observe bank's items, operation payloads and ``retain_params`` stay unchanged.
+        """
+        await self._authenticate_tenant(request_context)
+        config = await self._config_resolver.resolve_full_config(bank_id, request_context)
+        return write_settings(config, bank_id=bank_id) is not None
+
+    async def _authorize_lifecycle_write(
+        self, bank_id: str, memory_id: str, operation: "BankWriteOperation", request_context: "RequestContext"
+    ) -> None:
+        """The access checks of a by-id adaptive-memory write, the same ones curation runs."""
+        await self._authenticate_tenant(request_context)
+        if self._operation_validator:
+            from hindsight_api.extensions import BankWriteContext
+
+            ctx = BankWriteContext(bank_id=bank_id, operation=operation, request_context=request_context)
+            await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
+        await self._require_writable(bank_id, request_context, memory_id=memory_id)
+
+    async def confirm_memory(
+        self,
+        bank_id: str,
+        memory_id: str,
+        *,
+        source_key: str | None = None,
+        event_time: datetime | None = None,
+        request_context: "RequestContext",
+    ) -> MemoryConfirmation | None:
+        """Record an explicit confirmation that a memory still holds (an ``explicit_confirmation`` event).
+
+        The event goes through the reinforcement ledger, so a ``source_key`` confirms a memory at
+        most once: re-sending it is ``deduplicated`` and changes nothing, which makes a retried
+        request safe. Without a key every call is its own piece of evidence. ``event_time`` (naive
+        means UTC) dates the confirmation, default now; it may lie in the past (an evaluation
+        replaying history) but not in the future, beyond :data:`_CONFIRM_CLOCK_SKEW` of clock skew,
+        which counts as now. Observations can be confirmed too.
+
+        Returns None when the memory is not live in the bank (missing, or curation-invalidated).
+        Raises ``OperationValidationError`` (409) when the bank's adaptive-memory mode is not
+        ``rank``/``lifecycle`` or its reinforcement is switched off: observe mode must not change
+        state, so nothing is recorded. ``ValueError`` for a malformed id, key or time.
+        """
+        try:
+            memory_uuid = uuid.UUID(memory_id)
+        except ValueError:
+            raise ValueError(f"Invalid memory_id: '{memory_id}' is not a valid UUID")
+        if source_key is not None:
+            source_key = source_key.strip()
+            if not source_key:
+                raise ValueError("source_key must not be blank.")
+            if len(source_key) > _CONFIRM_SOURCE_KEY_MAX_LENGTH:
+                raise ValueError(f"source_key must be at most {_CONFIRM_SOURCE_KEY_MAX_LENGTH} characters.")
+        unit_id = str(memory_uuid)
+
+        from hindsight_api.extensions import BankWriteOperation, OperationValidationError
+
+        await self._authorize_lifecycle_write(bank_id, unit_id, BankWriteOperation.CONFIRM_MEMORY, request_context)
+        settings = await self._adaptive_settings_for_bank(bank_id, request_context)
+        if not (settings.effective_mode.applies_factor and settings.reinforcement_enabled):
+            raise OperationValidationError(
+                f"Bank '{bank_id}' does not record reinforcement (adaptive memory mode "
+                f"'{settings.effective_mode.value}', reinforcement "
+                f"{'on' if settings.reinforcement_enabled else 'off'}); confirming a memory needs mode "
+                "'rank' or 'lifecycle' with reinforcement enabled.",
+                status_code=409,
+            )
+
+        from .adaptive import clock
+        from .adaptive.evidence import reinforcement_event
+        from .memories import get_memories
+
+        now = clock.utcnow()
+        event = reinforcement_event(
+            memory_id=unit_id,
+            source_type="explicit_confirmation",
+            source_key=source_key if source_key is not None else f"explicit:{uuid.uuid4()}",
+            event_time=_confirmation_time(event_time, now),
+            settings=settings,
+        )
+        async with acquire_with_retry(await self._get_backend()) as conn:
+            result = await get_memories().record_reinforcement(
+                conn, bank_id=bank_id, events=[event], settings=settings, now=now, background=False
+            )
+        if len(result.events) != 1:
+            raise RuntimeError(f"The memories store reported {len(result.events)} outcomes for one confirmation event")
+        recorded = result.events[0]
+        if recorded.outcome == "skipped_missing":
+            return None
+        if recorded.outcome == "disabled":
+            raise OperationValidationError(f"Bank '{bank_id}' does not record reinforcement.", status_code=409)
+        state = result.states.get(unit_id)
+        return MemoryConfirmation(
+            memory_id=unit_id,
+            recorded=recorded.persisted,
+            deduplicated=recorded.outcome == "deduplicated",
+            outcome=recorded.outcome,
+            stability_days=state.stability_days if state is not None else None,
+            reinforcement_count=state.reinforcement_count if state is not None else None,
+        )
+
+    async def update_memory_lifecycle(
+        self,
+        bank_id: str,
+        memory_id: str,
+        *,
+        importance: float | None = None,
+        forgetting_exempt: bool | None = None,
+        exemption_reason: str | None = None,
+        request_context: "RequestContext",
+    ) -> "MemoryLifecycle | None":
+        """Set a memory's importance and/or forgetting exemption; returns its lifecycle view after.
+
+        ``importance`` in [0, 1] (0.5 is neutral) rescales the stability the memory has learned by
+        the ratio of the importance multipliers, so earlier reinforcement is kept. An exempt
+        memory always reads as fully retrievable. Turning the exemption off clears its reason;
+        ``None`` leaves a field as it is, and at least one must be set.
+
+        Returns None when the memory is not live in the bank. Raises ``OperationValidationError``
+        (409) unless the bank's adaptive-memory mode is ``rank`` or ``lifecycle`` — the same modes
+        in which retain applies an item's importance — so off and observe banks stay unchanged.
+        ``ValueError`` for a malformed id or value.
+        """
+        try:
+            memory_uuid = uuid.UUID(memory_id)
+        except ValueError:
+            raise ValueError(f"Invalid memory_id: '{memory_id}' is not a valid UUID")
+        if importance is None and forgetting_exempt is None and exemption_reason is None:
+            raise ValueError("Set at least one of importance, forgetting_exempt or exemption_reason.")
+        if importance is not None and (
+            isinstance(importance, bool)
+            or not isinstance(importance, (int, float))
+            or not 0.0 <= importance <= 1.0  # also rejects NaN
+        ):
+            raise ValueError(f"importance must be a number in [0, 1], got {importance!r}")
+        if exemption_reason is not None:
+            if forgetting_exempt is False:
+                raise ValueError("exemption_reason cannot be set while turning forgetting_exempt off.")
+            if not exemption_reason.strip():
+                raise ValueError("exemption_reason must not be blank.")
+            if len(exemption_reason) > _EXEMPTION_REASON_MAX_LENGTH:
+                raise ValueError(f"exemption_reason must be at most {_EXEMPTION_REASON_MAX_LENGTH} characters.")
+        unit_id = str(memory_uuid)
+
+        from hindsight_api.extensions import BankWriteOperation, OperationValidationError
+
+        await self._authorize_lifecycle_write(
+            bank_id, unit_id, BankWriteOperation.UPDATE_MEMORY_LIFECYCLE, request_context
+        )
+        settings = await self._adaptive_settings_for_bank(bank_id, request_context)
+        if not settings.effective_mode.applies_factor:
+            raise OperationValidationError(
+                f"Bank '{bank_id}' does not keep retention policy (adaptive memory mode "
+                f"'{settings.effective_mode.value}'); it needs mode 'rank' or 'lifecycle'.",
+                status_code=409,
+            )
+
+        from .adaptive import clock
+        from .memories import get_memories
+
+        store = get_memories()
+        now = clock.utcnow()
+        async with acquire_with_retry(await self._get_backend()) as conn:
+            state = await store.set_retention_policy(
+                conn,
+                bank_id=bank_id,
+                memory_id=unit_id,
+                importance=None if importance is None else float(importance),
+                forgetting_exempt=forgetting_exempt,
+                exemption_reason=exemption_reason,
+                settings=settings,
+                now=now,
+            )
+            if state is None:
+                return None
+            return await store.get_memory_lifecycle(
+                conn, bank_id=bank_id, memory_id=unit_id, now=now, settings=settings
+            )
+
     async def run_consolidation(
         self,
         bank_id: str,
@@ -13667,22 +13994,64 @@ class MemoryEngine(MemoryEngineInterface):
         tag_scope = await self._authorize_bank_read(bank_id, BankReadOperation.GET_MEMORY_UNIT, request_context)
         from .memories import get_memories
 
+        store = get_memories()
+        # Resolved before the connection is taken, so the config read never holds a second one.
+        adaptive_settings = (
+            await self._adaptive_settings_for_bank(bank_id, request_context)
+            if store.supports_adaptive_state_for(bank_id)
+            else None
+        )
         backend = await self._get_backend()
         async with acquire_with_retry(backend) as conn:
             # The store renders the detail view — including the observation
             # history and source facts it folds in — for a normalized id.
-            unit = await get_memories().get_memory_unit(
+            unit = await store.get_memory_unit(
                 conn=conn,
                 ops=self._backend.ops,
                 fq_table=fq_table,
                 bank_id=bank_id,
                 unit_id=str(memory_uuid),
             )
-        # Outside the caller's tag scope reads exactly like a missing memory (404), so the
-        # answer does not confirm that the id exists.
-        if tag_scope and unit is not None and not tags_satisfy_groups(unit.get("tags"), tag_scope):
-            return None
+            # Outside the caller's tag scope reads exactly like a missing memory (404), so the
+            # answer does not confirm that the id exists.
+            if tag_scope and unit is not None and not tags_satisfy_groups(unit.get("tags"), tag_scope):
+                return None
+            if unit is not None and adaptive_settings is not None:
+                await self._attach_memory_lifecycle(conn, store, bank_id, str(memory_uuid), unit, adaptive_settings)
         return unit
+
+    @staticmethod
+    async def _attach_memory_lifecycle(
+        conn: Any,
+        store: "MemoriesExtension",
+        bank_id: str,
+        unit_id: str,
+        unit: dict[str, Any],
+        settings: AdaptiveSettings,
+    ) -> None:
+        """Add the memory's adaptive-memory view to its detail dict under ``lifecycle``.
+
+        Only while the bank's effective mode is not off, or when something is stored for the
+        memory (a bank switched back to off still shows what it learned). An off-mode bank's
+        memories with nothing stored keep exactly the payload they always had.
+        """
+        from .adaptive import clock
+        from .adaptive.models import AdaptiveMode
+
+        if settings.effective_mode is AdaptiveMode.OFF and unit.get("state") != "invalidated":
+            # An off-mode bank shows the view only for a memory that has state stored, so probe
+            # first with the one-statement recall loader (retention and claim rows; every
+            # reinforcement writes the former) rather than paying the view's seven reads on
+            # every GET. Measured on pg0, median of 300 off-mode GETs: 1.3 ms without the view,
+            # 3.5 ms with it, 1.75 ms with this probe. An archived memory's state lives in its
+            # invalidation snapshot, which the probe cannot see, so it always gets the view.
+            if not await store.load_adaptive_state(conn, bank_id=bank_id, memory_ids=[unit_id]):
+                return
+        view = await store.get_memory_lifecycle(
+            conn, bank_id=bank_id, memory_id=unit_id, now=clock.utcnow(), settings=settings
+        )
+        if view is not None and (settings.effective_mode is not AdaptiveMode.OFF or view.stored):
+            unit["lifecycle"] = view.model_dump(mode="json")
 
     async def list_documents(
         self,
@@ -15669,7 +16038,9 @@ class MemoryEngine(MemoryEngineInterface):
         4. expand: Get chunk/document context for memories
 
         Reflect is read-only: it synthesizes an answer from the bank's stored
-        memories and persists nothing.
+        memories and persists nothing of its own. The one exception is adaptive
+        memory: in a rank/lifecycle bank the memories a successful answer cited are
+        reinforced afterwards, in the background (``successful_reflect_use``).
 
         The agent starts with empty context and must call tools to gather
         information. On the last iteration, tools are removed to force a
@@ -16281,6 +16652,14 @@ class MemoryEngine(MemoryEngineInterface):
                     await self._operation_validator.on_reflect_complete(result_ctx)
                 except Exception as e:
                     logger.warning(f"Post-reflect hook error (non-fatal): {e}")
+
+            self._submit_reflect_reinforcement(
+                bank_id,
+                agent_result,
+                config_dict,
+                is_refresh=is_refresh,
+                answer_as_document=answer_as_document,
+            )
 
             _mark("post")
             # The one closing line per reflect: the agent's outcome plus where the wall clock
@@ -23279,6 +23658,9 @@ class MemoryEngine(MemoryEngineInterface):
             }
             if item.get("strategy"):
                 task_payload["strategy"] = item["strategy"]
+            # Set by the HTTP layer only when it minted the id and the bank records the mark.
+            if item.get("document_id_minted"):
+                task_payload["document_id_minted"] = True
 
             # Pass tenant_id and api_key_id through task payload
             if request_context.tenant_id:

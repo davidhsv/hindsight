@@ -22,6 +22,7 @@ from ...config import (
     DEFAULT_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS,
     DEFAULT_ADAPTIVE_MEMORY_PRUNE_ENABLED,
     DEFAULT_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED,
+    DEFAULT_ADAPTIVE_MEMORY_REFLECT_REINFORCEMENT_ENABLED,
     DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS,
     DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_ENABLED,
     DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN,
@@ -125,6 +126,7 @@ class AdaptiveSettings:
     historical_cues: bool
     # Server level (static).
     recall_reinforcement_enabled: bool
+    reflect_reinforcement_enabled: bool
     reinforcement_cooldown_hours: float
     reinforcement_gain: float
     source_weights: Mapping[str, float]
@@ -188,6 +190,10 @@ class AdaptiveSettings:
             recall_reinforcement_enabled=_flag(
                 static.adaptive_memory_recall_reinforcement_enabled,
                 DEFAULT_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED,
+            ),
+            reflect_reinforcement_enabled=_flag(
+                static.adaptive_memory_reflect_reinforcement_enabled,
+                DEFAULT_ADAPTIVE_MEMORY_REFLECT_REINFORCEMENT_ENABLED,
             ),
             reinforcement_cooldown_hours=_non_negative(
                 static.adaptive_memory_reinforcement_cooldown_hours,

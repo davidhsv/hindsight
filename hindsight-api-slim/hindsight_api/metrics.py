@@ -34,6 +34,8 @@ from opentelemetry.sdk.resources import Resource
 if TYPE_CHECKING:
     import asyncpg
 
+    from .engine.adaptive.models import RecordedEvent
+
 
 def _get_tenant() -> str:
     """Get current tenant (schema) from context for metrics labeling."""
@@ -384,6 +386,21 @@ class MetricsCollectorBase:
         """
         raise NotImplementedError
 
+    def record_adaptive_reinforcement(self, *, bank_id: str, initialized: int, events: Sequence["RecordedEvent"]):
+        """Record one ``record_reinforcement`` call: the retention rows it created and each event's fate.
+
+        An applied, initial or cooled-down event counts in ``reinforcement_events{source_type,outcome}``;
+        one whose key was already in the ledger in ``reinforcement_events_deduplicated{source_type}``.
+        Disabled and skipped events count nowhere. A no-op here rather than abstract, so a collector
+        that predates adaptive memory keeps working.
+        """
+
+    def record_adaptive_reinforcement_dropped(self, *, producer: str, reason: str, bank_id: str):
+        """Record a reinforcement a producer gave up on: ``reason`` "error" (the write failed) or
+        "overflow" (too many background writes in flight). ``producer`` is consolidation, recall or
+        reflect. The operation that produced it was not affected. A no-op here, like the above.
+        """
+
     def set_db_pool(self, pool: "asyncpg.Pool"):
         """Set the database pool for metrics collection."""
         pass
@@ -482,6 +499,14 @@ class NoOpMetricsCollector(MetricsCollectorBase):
         top_k_changed: bool | None,
     ):
         """No-op adaptive recall recording."""
+        pass
+
+    def record_adaptive_reinforcement(self, *, bank_id: str, initialized: int, events: Sequence["RecordedEvent"]):
+        """No-op adaptive reinforcement recording."""
+        pass
+
+    def record_adaptive_reinforcement_dropped(self, *, producer: str, reason: str, bank_id: str):
+        """No-op dropped-reinforcement recording."""
         pass
 
 
@@ -716,6 +741,26 @@ class MetricsCollector(MetricsCollectorBase):
             description="Stability, in days, of the memories a recall returned (adaptive memory)",
             unit="d",
             explicit_bucket_boundaries_advisory=list(ADAPTIVE_STABILITY_DAYS_BUCKETS),
+        )
+        self.adaptive_state_initialized = self.meter.create_counter(
+            name="hindsight.adaptive_memory.state_initialized",
+            description="Retention rows created by reinforcement or an explicit retention setting (adaptive memory)",
+            unit="1",
+        )
+        self.adaptive_reinforcement_events = self.meter.create_counter(
+            name="hindsight.adaptive_memory.reinforcement_events",
+            description="Reinforcement events decided, by source type and outcome (applied, initial, cooldown)",
+            unit="1",
+        )
+        self.adaptive_reinforcement_events_deduplicated = self.meter.create_counter(
+            name="hindsight.adaptive_memory.reinforcement_events_deduplicated",
+            description="Reinforcement events whose key was already recorded for the memory, by source type",
+            unit="1",
+        )
+        self.adaptive_reinforcement_dropped = self.meter.create_counter(
+            name="hindsight.adaptive_memory.reinforcement_dropped",
+            description="Reinforcements a producer gave up on, by producer and reason (error, overflow)",
+            unit="1",
         )
 
         # Process metrics (observable gauges - collected on scrape)
@@ -1064,6 +1109,28 @@ class MetricsCollector(MetricsCollectorBase):
             self.adaptive_rerank_changes.add(1, attrs)
         if top_k_changed:
             self.adaptive_top_k_changed.add(1, attrs)
+
+    def record_adaptive_reinforcement(self, *, bank_id: str, initialized: int, events: Sequence["RecordedEvent"]):
+        """Record one reinforcement write; see the base class."""
+        attrs: dict[str, str] = dict(self._tenant_attrs())
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        if initialized:
+            self.adaptive_state_initialized.add(initialized, attrs)
+        for event in events:
+            if event.outcome in ("applied", "initial", "cooldown"):
+                self.adaptive_reinforcement_events.add(
+                    1, {**attrs, "source_type": event.source_type, "outcome": event.outcome}
+                )
+            elif event.outcome == "deduplicated":
+                self.adaptive_reinforcement_events_deduplicated.add(1, {**attrs, "source_type": event.source_type})
+
+    def record_adaptive_reinforcement_dropped(self, *, producer: str, reason: str, bank_id: str):
+        """Record a reinforcement a producer gave up on; see the base class."""
+        attrs: dict[str, str] = {"producer": producer, "reason": reason, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.adaptive_reinforcement_dropped.add(1, attrs)
 
     def _setup_process_metrics(self):
         """Set up observable gauges for process metrics."""

@@ -32,6 +32,9 @@ import type {
   CloneBankData,
   CloneBankErrors,
   CloneBankResponses,
+  ConfirmMemoryData,
+  ConfirmMemoryErrors,
+  ConfirmMemoryResponses,
   CreateBankAliasData,
   CreateBankAliasErrors,
   CreateBankAliasResponses,
@@ -292,6 +295,9 @@ import type {
   UpdateKnowledgeNodeResponses,
   UpdateMemoryData,
   UpdateMemoryErrors,
+  UpdateMemoryLifecycleData,
+  UpdateMemoryLifecycleErrors,
+  UpdateMemoryLifecycleResponses,
   UpdateMemoryResponses,
   UpdateMentalModelData,
   UpdateMentalModelErrors,
@@ -451,7 +457,7 @@ export const previewPrompt = <ThrowOnError extends boolean = false>(
 /**
  * Get memory unit
  *
- * Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead.
+ * Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead. When the bank's adaptive memory mode is not 'off', or adaptive state is stored for the memory, the payload also carries 'lifecycle': its retention (stability, retrievability now, importance, exemption), claim, lifecycle relations and most recent reinforcement events.
  */
 export const getMemory = <ThrowOnError extends boolean = false>(
   options: Options<GetMemoryData, ThrowOnError>
@@ -491,6 +497,44 @@ export const getObservationHistory = <ThrowOnError extends boolean = false>(
     GetObservationHistoryErrors,
     ThrowOnError
   >({ url: "/v1/default/banks/{bank_id}/memories/{memory_id}/history", ...options });
+
+/**
+ * Confirm memory
+ *
+ * Record explicit evidence that a memory (a fact or an observation) still holds. The confirmation reinforces the memory, so it stays readily recallable for longer. A source_key confirms a memory at most once; re-sending it changes nothing. Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle' with reinforcement enabled (409 otherwise; observe mode never changes state). 404 when the memory is missing or invalidated.
+ */
+export const confirmMemory = <ThrowOnError extends boolean = false>(
+  options: Options<ConfirmMemoryData, ThrowOnError>
+) =>
+  (options.client ?? client).post<ConfirmMemoryResponses, ConfirmMemoryErrors, ThrowOnError>({
+    url: "/v1/default/banks/{bank_id}/memories/{memory_id}/confirm",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+
+/**
+ * Update memory lifecycle
+ *
+ * Change how a memory (a fact or an observation) is retained: its importance and its exemption from retention decay. Returns the memory's lifecycle view, the same one GET /memories/{memory_id} shows under 'lifecycle'. Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle' (409 otherwise). 404 when the memory is missing or invalidated.
+ */
+export const updateMemoryLifecycle = <ThrowOnError extends boolean = false>(
+  options: Options<UpdateMemoryLifecycleData, ThrowOnError>
+) =>
+  (options.client ?? client).patch<
+    UpdateMemoryLifecycleResponses,
+    UpdateMemoryLifecycleErrors,
+    ThrowOnError
+  >({
+    url: "/v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
 
 /**
  * Recall memory

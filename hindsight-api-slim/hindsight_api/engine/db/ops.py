@@ -16,7 +16,9 @@ Follows the Strategy pattern (Fowler's "Replace Conditional with Polymorphism")
 and mirrors Django's ``DatabaseOperations`` architecture.
 """
 
+import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -333,6 +335,72 @@ class LinkExpansionRows:
     entity: list[ResultRow]
     semantic: list[ResultRow]
     causal: list[ResultRow]
+
+
+#: The ``memory_retention_state`` columns :meth:`DataAccessOps.upsert_default_retention_state`
+#: returns for every locked row (the store maps them onto ``RetentionState``).
+RETENTION_STATE_COLUMNS = (
+    "memory_id, importance, stability_days, last_reinforced_at, reinforcement_count, access_count, "
+    "forgetting_exempt, exemption_reason, retention_state, last_recalled_at, below_threshold_since, "
+    "archived_at, updated_at"
+)
+
+
+@dataclass(frozen=True)
+class RetentionLock:
+    """The adaptive writers' lock on a set of memories (see ``upsert_default_retention_state``)."""
+
+    present: list[str]
+    """The requested memories that are live in the bank and now locked, sorted by id. A memory
+    that is missing, in another bank or (``skip_locked``) being deleted is absent."""
+
+    initialized: frozenset[str]
+    """The ``present`` memories whose default retention row this call inserted."""
+
+    rows: list[ResultRow]
+    """The ``present`` memories' retention rows (:data:`RETENTION_STATE_COLUMNS`), locked
+    ``FOR UPDATE``, sorted by memory id."""
+
+
+@dataclass(frozen=True)
+class ReinforcementKey:
+    """The reinforcement ledger's unique key, ``(memory_id, source_type, source_key)``."""
+
+    memory_id: str
+    source_type: str
+    source_key: str
+
+
+@dataclass(frozen=True)
+class ReinforcementEventRow:
+    """One ``memory_reinforcement_events`` row to insert, already decided (outcome and gain)."""
+
+    id: uuid.UUID
+    memory_id: uuid.UUID
+    source_type: str
+    source_key: str
+    event_time: datetime
+    weight: float
+    independence_weight: float
+    applied_gain: float
+    outcome: str
+    processed_at: datetime
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class RetentionStateUpdate:
+    """Every writable column of one ``memory_retention_state`` row, as it should now read."""
+
+    memory_id: uuid.UUID
+    importance: float
+    stability_days: float
+    last_reinforced_at: datetime
+    reinforcement_count: int
+    access_count: int
+    last_recalled_at: datetime | None
+    forgetting_exempt: bool
+    exemption_reason: str | None
 
 
 class DataAccessOps(ABC):
@@ -1045,6 +1113,85 @@ class DataAccessOps(ABC):
         Used to fold peers into an execution that has already been claimed;
         runs in the same transaction that locked them.
         """
+        ...
+
+    # -- Adaptive memory: retention state and the reinforcement ledger ------
+    #
+    # The lock protocol every adaptive writer follows (DESIGN.md §3 Locking): the parent
+    # ``memory_units`` rows first, in id order, so a concurrent delete cannot take them before
+    # the side rows reference them (PG's deferred FKs check only at COMMIT, #1882); then the
+    # retention rows ``FOR UPDATE`` in id order, which is where writers of one memory serialize.
+    # Every ledger write happens under that second lock, so a writer that checks the ledger
+    # after taking it sees every committed event and races no one for the unique key.
+
+    @abstractmethod
+    async def upsert_default_retention_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        retention_table: str,
+        units_table: str,
+        bank_id: str,
+        memory_ids: Sequence[uuid.UUID],
+        default_stability: Mapping[str, float],
+        fallback_stability: float,
+        anchors: Mapping[uuid.UUID, datetime],
+        now: datetime,
+        skip_locked: bool,
+    ) -> RetentionLock:
+        """Lock ``memory_ids``, give each live one a retention row if it has none, and lock those rows.
+
+        The parents are locked in id order (PG: ``FOR KEY SHARE`` in the same statement as the
+        insert, the ``bulk_insert_links`` shape; Oracle: per-row ``FOR UPDATE``). With
+        ``skip_locked`` (background producers) a memory whose row another transaction holds
+        exclusively — one being deleted — is skipped instead of waited for.
+
+        A new row gets neutral importance, ``default_stability[fact_type]`` (else
+        ``fallback_stability``) and ``last_reinforced_at`` = ``anchors[id]``, else the memory's
+        ``mentioned_at``, ``occurred_start``, ``event_date``, and finally ``created_at``, so the
+        NOT NULL column always has a value.
+        """
+        ...
+
+    @abstractmethod
+    async def fetch_reinforcement_keys(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        keys: Sequence[ReinforcementKey],
+    ) -> frozenset[ReinforcementKey]:
+        """Which of ``keys`` are already in the ledger."""
+        ...
+
+    @abstractmethod
+    async def insert_reinforcement_events(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        rows: Sequence[ReinforcementEventRow],
+    ) -> frozenset[str]:
+        """Insert ledger rows, skipping any whose unique key exists; returns the inserted row ids.
+
+        PG: one ``INSERT … ON CONFLICT DO NOTHING RETURNING id``. Oracle:
+        ``IGNORE_ROW_ON_DUPKEY_INDEX`` via executemany, then a re-select of the ids.
+        """
+        ...
+
+    @abstractmethod
+    async def update_retention_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        rows: Sequence[RetentionStateUpdate],
+        now: datetime,
+    ) -> None:
+        """Write every writable column of the given retention rows and stamp ``updated_at = now``."""
         ...
 
     # -- Shared helpers (concrete) -----------------------------------------
