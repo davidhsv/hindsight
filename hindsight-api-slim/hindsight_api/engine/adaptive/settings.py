@@ -26,6 +26,7 @@ from ...config import (
     DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS,
     DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_ENABLED,
     DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN,
+    DEFAULT_ADAPTIVE_MEMORY_SCOPE_KEYS,
     DEFAULT_ADAPTIVE_MEMORY_SCORE_ALPHA,
     DEFAULT_ADAPTIVE_MEMORY_SCORE_FLOOR,
     DEFAULT_ADAPTIVE_MEMORY_SOURCE_TRUST,
@@ -86,6 +87,17 @@ def _choice(value: Any, choices: tuple[str, ...], default: str) -> str:
     return default
 
 
+def _keys(value: Any, defaults: tuple[str, ...]) -> tuple[str, ...]:
+    """A list-of-names setting: its non-empty strings, stripped and deduplicated in order; the
+    defaults when it holds none (``None`` is a config built by field introspection in tests)."""
+    if isinstance(value, str):
+        value = value.split(",")
+    if not isinstance(value, (list, tuple)):
+        return defaults
+    keys = tuple(dict.fromkeys(k.strip() for k in value if isinstance(k, str) and k.strip()))
+    return keys or defaults
+
+
 def _weights(value: Any, defaults: Mapping[str, float]) -> Mapping[str, float]:
     """A JSON-map setting merged over its defaults, read-only.
 
@@ -140,6 +152,8 @@ class AdaptiveSettings:
     archive_protect_importance: float
     prune_enabled: bool
     prune_after_days: float
+    #: Metadata keys whose values make up a claim's scope fingerprint (lifecycle consolidation).
+    scope_keys: tuple[str, ...] = DEFAULT_ADAPTIVE_MEMORY_SCOPE_KEYS
 
     @classmethod
     def resolve(
@@ -227,4 +241,5 @@ class AdaptiveSettings:
             prune_after_days=_non_negative(
                 static.adaptive_memory_prune_after_days, DEFAULT_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS
             ),
+            scope_keys=_keys(getattr(static, "adaptive_memory_scope_keys", None), DEFAULT_ADAPTIVE_MEMORY_SCOPE_KEYS),
         )

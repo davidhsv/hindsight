@@ -7,7 +7,10 @@ providing type safety and making data flow explicit.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..response_models import RecallLifecycle
 
 
 @dataclass
@@ -161,6 +164,9 @@ class MergedCandidate:
     rrf_rank: int = 0
     source_ranks: dict[str, int] = field(default_factory=dict)  # method_name -> rank
     arm_scores: "ArmScores" = field(default_factory=lambda: ArmScores())  # raw per-strategy scores
+    # Adaptive memory lifecycle mode: the claim annotation of a candidate whose claim is not plain
+    # active, set by the pre-trim claim filter (search/lifecycle_filter.py). None otherwise.
+    lifecycle: "RecallLifecycle | None" = None
 
     @property
     def id(self) -> str:
@@ -276,5 +282,8 @@ class ScoredResult:
             ):
                 if value is not None:
                     result[key] = value
+
+        if self.candidate.lifecycle is not None:
+            result["lifecycle"] = self.candidate.lifecycle.model_dump()
 
         return result

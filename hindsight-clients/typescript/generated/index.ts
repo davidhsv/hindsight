@@ -620,6 +620,7 @@ export type {
   PromptMessageModel,
   PromptPreviewRequest,
   PromptPreviewResponse,
+  RecallLifecycle,
   RecallMemoriesData,
   RecallMemoriesError,
   RecallMemoriesErrors,

@@ -171,6 +171,7 @@ hindsight_client_api/models/prompt_block_model.py
 hindsight_client_api/models/prompt_message_model.py
 hindsight_client_api/models/prompt_preview_request.py
 hindsight_client_api/models/prompt_preview_response.py
+hindsight_client_api/models/recall_lifecycle.py
 hindsight_client_api/models/recall_request.py
 hindsight_client_api/models/recall_response.py
 hindsight_client_api/models/recall_result.py

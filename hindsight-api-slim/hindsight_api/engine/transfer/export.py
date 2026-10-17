@@ -32,16 +32,20 @@ from ..schema import fq_table
 from .schema import (
     ATTACHMENT_TABLES,
     CARRIED_HISTORY_TABLES,
+    CLAIM_EVIDENCE_ENTRY,
     HISTORY_TABLES,
+    LIFECYCLE_RELATIONS_ENTRY,
     OPERATIONAL_TABLES,
     SCHEMA_VERSION,
     BankRowsJSONEncoding,
     TransferAttachment,
     TransferCausalRelation,
     TransferChunk,
+    TransferClaimEvidence,
     TransferDocument,
     TransferFact,
     TransferKnowledgePage,
+    TransferLifecycleRelation,
     TransferManifest,
     TransferObservation,
     TransferObservationSource,
@@ -82,10 +86,13 @@ _REPLAYED_TABLES = frozenset(
         "observation_history",
         # Adaptive-memory state, keyed by memory id: retention, claim state, the raw
         # facts a claim rests on, and the lifecycle audit trail. The replay mints
-        # fresh unit ids, so these rows cannot travel verbatim; what they say belongs
-        # to the replayed fact/observation payload, re-keyed through the importer's
-        # unit id map. While that payload does not carry it, an imported memory
-        # starts from the lazy defaults (active, never reinforced).
+        # fresh unit ids, so these rows cannot travel verbatim: retention and claim
+        # ride on each TransferFact / TransferObservation, and the evidence rows and
+        # relations travel in their own sections (lifecycle_relations.json,
+        # claim_evidence.json) citing source ids, which the importer re-keys through
+        # its unit id map once every memory exists. Each is present only when the
+        # bank has such state, so a bank that never used adaptive memory exports
+        # byte-for-byte what it did before.
         "memory_retention_state",
         "memory_claim_state",
         "memory_claim_evidence",
@@ -373,6 +380,16 @@ async def stream_export_documents(
     if observations:
         async for chunk in streamer.write_file_bytes("observations.json", pydantic_core.to_json(observations)):
             yield chunk
+    # The edges between the exported memories; one whose other end was not exported travels as a
+    # tombstone.
+    if _carries_lifecycle(memories, bank_id):
+        exported_ids = {str(unit_id) for unit_id in tally.unit_index} | {
+            o.source_id for o in observations if o.source_id
+        }
+        async with _as_connection(backend) as conn:
+            lifecycle = await _load_lifecycle_sections(conn, bank_id, memories, exported_ids)
+        async for chunk in _stream_lifecycle_sections(streamer, lifecycle):
+            yield chunk
     if mental_models:
         mm_bytes = json.dumps(mental_models, default=_row_json_default).encode("utf-8")
         async for chunk in streamer.write_file_bytes("mental_models.json", mm_bytes):
@@ -582,6 +599,11 @@ async def stream_export_bank(
             )
         if observations:
             async for chunk in streamer.write_file_bytes("observations.json", pydantic_core.to_json(observations)):
+                yield chunk
+        if _carries_lifecycle(memories, bank_id):
+            async with _as_connection(conn_or_backend) as conn:
+                lifecycle = await _load_lifecycle_sections(conn, bank_id, memories, None)
+            async for chunk in _stream_lifecycle_sections(streamer, lifecycle):
                 yield chunk
 
         async for chunk in _stream_attachments(streamer, conn_or_backend, bank_id, file_storage, attachments):
@@ -806,6 +828,8 @@ class BankExportPayload:
     bank_rows: dict[str, list[dict]] = field(default_factory=dict)
     knowledge_pages: list[TransferKnowledgePage] = field(default_factory=list)
     history_rows: dict[str, list[dict]] = field(default_factory=dict)
+    lifecycle_relations: list[TransferLifecycleRelation] = field(default_factory=list)
+    claim_evidence: list[TransferClaimEvidence] = field(default_factory=list)
 
 
 async def load_bank_export(
@@ -830,6 +854,7 @@ async def load_bank_export(
     attachments: list[TransferAttachment] = []
     blobs: dict[str, bytes] = {}
     data_rows: dict[str, list[dict]] = {}
+    lifecycle = _LifecycleSections()
 
     if scope.data:
         # Whole-bank export always carries observations (they're bank-level state)
@@ -846,6 +871,8 @@ async def load_bank_export(
         observations = await memories.load_transfer_observations(
             conn=conn, fq_table=fq_table, bank_id=bank_id, unit_index=loaded.unit_index
         )
+        if _carries_lifecycle(memories, bank_id):
+            lifecycle = await _load_lifecycle_sections(conn, bank_id, memories, None)
         exported_attachments = await _dump_attachments(conn, bank_id, file_storage)
         attachments, blobs = exported_attachments.rows, exported_attachments.blobs
         data_rows.update(await _dump_operational_rows(conn, bank_id, memories))
@@ -882,6 +909,8 @@ async def load_bank_export(
         bank_rows=bank_rows,
         knowledge_pages=knowledge_pages,
         history_rows=history_rows,
+        lifecycle_relations=lifecycle.relations,
+        claim_evidence=lifecycle.evidence,
     )
 
 
@@ -940,6 +969,12 @@ def _build_bank_archive_bytes(payload: BankExportPayload) -> bytes:
         if observations:
             section = "[\n" + ",\n".join(o.model_dump_json(indent=2) for o in observations) + "\n]\n"
             zf.writestr("observations.json", section)
+        for entry, items in (
+            (LIFECYCLE_RELATIONS_ENTRY, payload.lifecycle_relations),
+            (CLAIM_EVIDENCE_ENTRY, payload.claim_evidence),
+        ):
+            if items:
+                zf.writestr(entry, "[\n" + ",\n".join(i.model_dump_json(indent=2) for i in items) + "\n]\n")
 
         if attachments:
             section = "[\n" + ",\n".join(a.model_dump_json(indent=2) for a in attachments) + "\n]\n"
@@ -988,6 +1023,42 @@ def _build_bank_archive_bytes(payload: BankExportPayload) -> bytes:
         zf.writestr("manifest.json", manifest.model_dump_json(indent=2))
 
     return archive.getvalue()
+
+
+@dataclass
+class _LifecycleSections:
+    """The lifecycle relations and claim evidence an archive carries (both empty for a bank that
+    never used adaptive memory, and then neither entry is written)."""
+
+    relations: list[TransferLifecycleRelation] = field(default_factory=list)
+    evidence: list[TransferClaimEvidence] = field(default_factory=list)
+
+
+def _carries_lifecycle(memories: Any, bank_id: str) -> bool:
+    """Whether the store keeps adaptive state for the bank (a store that predates it does not)."""
+    supports = getattr(memories, "supports_adaptive_state_for", None)
+    return bool(supports is not None and supports(bank_id))
+
+
+async def _load_lifecycle_sections(
+    conn: Any, bank_id: str, memories: Any, memory_ids: set[str] | None
+) -> _LifecycleSections:
+    """Read both sections through the store; ``memory_ids`` is the exported set (None: the whole bank)."""
+    return _LifecycleSections(
+        relations=await memories.dump_lifecycle_relations(
+            conn=conn, fq_table=fq_table, bank_id=bank_id, memory_ids=memory_ids
+        ),
+        evidence=await memories.dump_claim_evidence(
+            conn=conn, fq_table=fq_table, bank_id=bank_id, memory_ids=memory_ids
+        ),
+    )
+
+
+async def _stream_lifecycle_sections(streamer: ZipStreamer, sections: _LifecycleSections) -> AsyncIterator[bytes]:
+    for entry, items in ((LIFECYCLE_RELATIONS_ENTRY, sections.relations), (CLAIM_EVIDENCE_ENTRY, sections.evidence)):
+        if items:
+            async for chunk in streamer.write_file_bytes(entry, pydantic_core.to_json(items)):
+                yield chunk
 
 
 @dataclass

@@ -350,6 +350,55 @@ async def insert_observation(
     return str(row["id"])
 
 
+async def attach_sources_to_observation(
+    *,
+    conn,
+    ops,
+    fq_table: Callable[[str], str],
+    bank_id: str,
+    observation_id: str,
+    source_memory_ids: list[uuid.UUID],
+) -> bool:
+    """Add ``source_memory_ids`` to an observation's sources; nothing else on the row moves.
+
+    The lifecycle ``historical`` attach: an old fact restating a retired observation joins its
+    evidence, while the text, embedding, dates and ``updated_at`` stay as they are (a retired
+    belief gaining history is not a change anyone downstream must react to). The caller holds the
+    observation row (``lock_observation_tags``) and the sources (``lock_live_memory_ids``). False
+    when the observation is gone. Dialect-neutral: the sources are read through the store's own
+    reader, which knows Oracle's junction table, and written like ``rewrite_observation`` does.
+    """
+    from .adaptive_claims import observation_sources
+
+    current = (
+        await observation_sources(conn, fq_table=fq_table, bank_id=bank_id, observation_ids=[observation_id])
+    ).get(str(uuid.UUID(str(observation_id))))
+    if current is None:
+        return False
+    merged = list(dict.fromkeys([uuid.UUID(s) for s in current] + list(source_memory_ids)))
+    added = merged[len(current) :]
+    if not added:
+        return True
+    await conn.execute(
+        f"UPDATE {fq_table('memory_units')} SET source_memory_ids = $1, proof_count = $2 "
+        f"WHERE id = $3 AND bank_id = $4 AND fact_type = 'observation'",
+        merged,
+        len(merged),
+        uuid.UUID(str(observation_id)),
+        bank_id,
+    )
+    if ops.uses_observation_sources_table:
+        await conn.executemany(
+            f"""
+                INSERT INTO {fq_table("observation_sources")} (observation_id, source_id)
+                VALUES ($1, $2)
+                ON CONFLICT (observation_id, source_id) DO NOTHING
+                """,
+            [(uuid.UUID(str(observation_id)), sid) for sid in added],
+        )
+    return True
+
+
 async def delete_observation(*, conn, fq_table: Callable[[str], str], bank_id: str, observation_id: str) -> None:
     """Delete one observation row (the caller drops its history)."""
     await conn.execute(

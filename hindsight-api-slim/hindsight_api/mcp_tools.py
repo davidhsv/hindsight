@@ -1363,7 +1363,9 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                     "max_source_facts_tokens": max_source_facts_tokens,
                     "request_context": _get_request_context(config),
                     # A final, external recall: the one kind that may reinforce what it returns.
-                    "_reinforce_results": True,
+                    # No lifecycle_view/as_of here (tools/list stays unchanged): MCP recall shows
+                    # the bank's adaptive_memory_default_view, or what its historical cues pick.
+                    "_external": True,
                 }
                 if tags is not None:
                     recall_kwargs["tags"] = tags
@@ -1491,7 +1493,9 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                     "max_source_facts_tokens": max_source_facts_tokens,
                     "request_context": _get_request_context(config),
                     # A final, external recall: the one kind that may reinforce what it returns.
-                    "_reinforce_results": True,
+                    # No lifecycle_view/as_of here (tools/list stays unchanged): MCP recall shows
+                    # the bank's adaptive_memory_default_view, or what its historical cues pick.
+                    "_external": True,
                 }
                 if tags is not None:
                     recall_kwargs["tags"] = tags

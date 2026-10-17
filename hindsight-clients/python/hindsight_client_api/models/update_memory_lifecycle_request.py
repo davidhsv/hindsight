@@ -17,7 +17,7 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator
 from typing import Any, ClassVar, Dict, List, Optional, Union
 from typing_extensions import Annotated
 from typing import Optional, Set
@@ -25,12 +25,25 @@ from typing_extensions import Self
 
 class UpdateMemoryLifecycleRequest(BaseModel):
     """
-    Request model for changing how a memory is retained.  Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle'. Omitted fields stay as they are; at least one must be set.
+    Request model for changing how a memory is retained, and what should be believed about it.  The retention fields need the bank's adaptive memory mode to be 'rank' or 'lifecycle'; the truth fields need 'lifecycle'. Omitted fields stay as they are; at least one must be set.
     """ # noqa: E501
     importance: Optional[Union[Annotated[float, Field(le=1.0, strict=True, ge=0.0)], Annotated[int, Field(le=1, strict=True, ge=0)]]] = None
     forgetting_exempt: Optional[StrictBool] = None
     exemption_reason: Optional[Annotated[str, Field(min_length=1, strict=True, max_length=500)]] = None
-    __properties: ClassVar[List[str]] = ["importance", "forgetting_exempt", "exemption_reason"]
+    truth_status: Optional[StrictStr] = None
+    superseded_by: Optional[StrictStr] = None
+    reason: Optional[Annotated[str, Field(min_length=1, strict=True, max_length=500)]] = None
+    __properties: ClassVar[List[str]] = ["importance", "forgetting_exempt", "exemption_reason", "truth_status", "superseded_by", "reason"]
+
+    @field_validator('truth_status')
+    def truth_status_validate_enum(cls, value):
+        """Validates the enum"""
+        if value is None:
+            return value
+
+        if value not in set(['active', 'uncertain', 'superseded', 'refuted']):
+            raise ValueError("must be one of enum values ('active', 'uncertain', 'superseded', 'refuted')")
+        return value
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -86,6 +99,21 @@ class UpdateMemoryLifecycleRequest(BaseModel):
         if self.exemption_reason is None and "exemption_reason" in self.model_fields_set:
             _dict['exemption_reason'] = None
 
+        # set to None if truth_status (nullable) is None
+        # and model_fields_set contains the field
+        if self.truth_status is None and "truth_status" in self.model_fields_set:
+            _dict['truth_status'] = None
+
+        # set to None if superseded_by (nullable) is None
+        # and model_fields_set contains the field
+        if self.superseded_by is None and "superseded_by" in self.model_fields_set:
+            _dict['superseded_by'] = None
+
+        # set to None if reason (nullable) is None
+        # and model_fields_set contains the field
+        if self.reason is None and "reason" in self.model_fields_set:
+            _dict['reason'] = None
+
         return _dict
 
     @classmethod
@@ -100,7 +128,10 @@ class UpdateMemoryLifecycleRequest(BaseModel):
         _obj = cls.model_validate({
             "importance": obj.get("importance"),
             "forgetting_exempt": obj.get("forgetting_exempt"),
-            "exemption_reason": obj.get("exemption_reason")
+            "exemption_reason": obj.get("exemption_reason"),
+            "truth_status": obj.get("truth_status"),
+            "superseded_by": obj.get("superseded_by"),
+            "reason": obj.get("reason")
         })
         return _obj
 

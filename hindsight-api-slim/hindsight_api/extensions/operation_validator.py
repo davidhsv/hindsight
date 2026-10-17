@@ -198,6 +198,10 @@ class RecallContext:
     tags: list[str] | None = None
     tags_match: "TagsMatch" = "any"
     tag_groups: "list[TagGroup] | None" = None
+    # Adaptive memory lifecycle mode: the claim view the caller asked for (None = the bank's default
+    # view) and the validity instant. A validator can refuse a historical recall from them.
+    lifecycle_view: str | None = None
+    as_of: datetime | None = None
 
 
 @dataclass

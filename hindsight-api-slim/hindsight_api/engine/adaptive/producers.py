@@ -99,6 +99,27 @@ def write_settings_from_bank_config(bank_config: Mapping[str, Any], *, bank_id: 
     return settings if settings.effective_mode.applies_factor else None
 
 
+def mode_settings(config: Any, *, bank_id: str) -> AdaptiveSettings | None:
+    """The bank's adaptive settings whenever its effective mode is not off (observe included), else None.
+
+    For a caller that branches on the mode itself — consolidation runs the lifecycle variant in
+    lifecycle mode and records observe-mode shadow decisions. Same ``getattr`` reading as
+    :func:`write_settings`, so an off bank costs one attribute lookup.
+    """
+    mode = getattr(config, "adaptive_memory_mode", None)
+    if not isinstance(mode, str) or mode.strip().lower() in ("", "off"):
+        return None
+    from ...config import get_config
+    from ..memories import get_memories
+
+    settings = AdaptiveSettings.resolve(
+        {name: getattr(config, name, None) for name in _BANK_FIELDS},
+        get_config(),
+        store_supports=get_memories().supports_adaptive_state_for(bank_id),
+    )
+    return settings if settings.effective_mode.loads_state else None
+
+
 def write_settings(config: Any, *, bank_id: str) -> AdaptiveSettings | None:
     """:func:`write_settings_from_bank_config` for a caller holding a resolved config object.
 

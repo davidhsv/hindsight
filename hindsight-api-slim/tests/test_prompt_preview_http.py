@@ -21,15 +21,17 @@ import pytest_asyncio
 
 from hindsight_api import RequestContext
 from hindsight_api.api import create_app
+from hindsight_api.config import HindsightConfig
+from hindsight_api.engine.consolidation.prompts import build_consolidation_system_prompt
+from hindsight_api.engine.prompt_preview import render_prompt_preview
+from hindsight_api.engine.reflect.prompts import _LIFECYCLE_CONFLICT_RULES
+from hindsight_api.engine.retain.fact_extraction import build_chunk_prompt_parts
 from hindsight_api.extensions import (
     BankReadContext,
     BankReadOperation,
     OperationValidatorExtension,
     ValidationResult,
 )
-from hindsight_api.config import HindsightConfig
-from hindsight_api.engine.prompt_preview import render_prompt_preview
-from hindsight_api.engine.retain.fact_extraction import build_chunk_prompt_parts
 
 
 @pytest_asyncio.fixture
@@ -289,6 +291,27 @@ async def test_inactive_blocks_mark_unset_settings_in_place(api_client, bank_id,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["off", "observe", "rank", "lifecycle"])
+async def test_consolidation_shows_the_prompt_variant_the_banks_mode_sends(api_client, bank_id, memory, mode):
+    """Adaptive memory lifecycle mode consolidates with its own system prompt (claim labels);
+    every other mode with the base one. The preview shows the one the bank gets."""
+    await _configure(memory, bank_id, adaptive_memory_mode=mode)
+    system = _text(_message(await _preview(api_client, bank_id, "consolidation"), "system"))
+
+    assert system == build_consolidation_system_prompt(lifecycle=mode == "lifecycle")
+    assert build_consolidation_system_prompt(lifecycle=True) != build_consolidation_system_prompt()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["off", "observe", "rank", "lifecycle"])
+async def test_reflect_shows_the_claim_rules_only_in_lifecycle_mode(api_client, bank_id, memory, mode):
+    await _configure(memory, bank_id, adaptive_memory_mode=mode)
+    system = _text(_message(await _preview(api_client, bank_id, "reflect"), "system"))
+
+    assert ("\n".join(_LIFECYCLE_CONFLICT_RULES) in system) is (mode == "lifecycle")
+
+
+@pytest.mark.asyncio
 async def test_active_blocks_partition_the_message_exactly(api_client, bank_id, memory):
     """The active blocks ARE the message — a client that renders them block by block
     must not drop, duplicate or reorder a single character of what the model gets."""
@@ -525,6 +548,27 @@ def test_blocks_reassemble_into_the_real_prompt():
     # sides; compare everything around it.
     assert preview.messages[1].text.split("Event Date:")[0] == actual.user_message.split("Event Date:")[0]
     assert "Only retain facts about pricing." in _block_text(preview, "retain_mission")
+
+
+@pytest.mark.parametrize("operation", ["consolidation", "reflect"])
+def test_lifecycle_blocks_reassemble_into_the_lifecycle_prompt(operation):
+    """The lifecycle variants are cut by the same partition: every setting block the base
+    prompt shows (the output language, reflect's mission and identity) is still found in the
+    variant's text."""
+    config = HindsightConfig.from_env()
+    config.llm_output_language = "es"
+    base = render_prompt_preview(operation, config, {"name": "b"}).messages[0]
+    system = render_prompt_preview(operation, config, {"name": "b"}, lifecycle=True).messages[0]
+
+    assert [b.field for b in base.blocks if b.field]
+    assert [(b.field, b.active) for b in system.blocks if b.field] == [
+        (b.field, b.active) for b in base.blocks if b.field
+    ]
+    if operation == "consolidation":
+        assert system.text == build_consolidation_system_prompt(llm_output_language="es", lifecycle=True)
+    else:
+        assert "\n".join(_LIFECYCLE_CONFLICT_RULES) in system.text
+        assert "\n".join(_LIFECYCLE_CONFLICT_RULES) not in base.text
 
 
 def _block_text(preview, field):

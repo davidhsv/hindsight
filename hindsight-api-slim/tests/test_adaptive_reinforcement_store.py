@@ -614,8 +614,9 @@ async def test_invalidate_then_restore_keeps_stability_count_and_keys(memory, re
 
 @pytest.mark.asyncio
 async def test_an_archived_memory_restores_in_both_copies_of_a_cloned_bank(memory, request_context):
-    """The archive travels with its snapshot verbatim, so a same-database clone holds the same ledger
-    rows twice; restoring one copy must not block the other on the ledger's global primary key."""
+    """The archive carries the snapshot's learned state but not its ledger (events never leave the
+    deployment that recorded them, DESIGN.md §7): the clone restores S and the count, the source
+    keeps its keys, and restoring one copy never blocks the other on a global primary key."""
     from hindsight_api.engine.transfer import export_bank
 
     source = await _bank(memory, request_context)
@@ -640,13 +641,8 @@ async def test_an_archived_memory_restores_in_both_copies_of_a_cloned_bank(memor
         row = await _retention(memory, memory_id)
         assert row["stability_days"] == pytest.approx(learned.stability_days)
         assert row["reinforcement_count"] == learned.reinforcement_count == 2
-        assert [r["source_key"] for r in await _ledger(memory, memory_id)] == ["explicit:a", "explicit:b"]
-    ids = await _fetch(
-        memory,
-        "SELECT id FROM memory_reinforcement_events WHERE memory_id = ANY($1::uuid[])",
-        [uuid.UUID(clone), uuid.UUID(m)],
-    )
-    assert len({r["id"] for r in ids}) == 4
+    assert [r["source_key"] for r in await _ledger(memory, m)] == ["explicit:a", "explicit:b"]
+    assert await _ledger(memory, clone) == [], "the ledger is not exported"
     resent = await _record(memory, source, events)
     assert resent.deduplicated == 2 and resent.applied == 0
 

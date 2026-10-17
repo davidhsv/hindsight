@@ -559,6 +559,58 @@ async def set_retention_policies(
     return states
 
 
+async def merge_retention(
+    conn,
+    *,
+    ops,
+    fq_table: Callable[[str], str],
+    bank_id: str,
+    survivor_id: str,
+    merged_id: str,
+    settings: AdaptiveSettings,
+    now: datetime,
+) -> RetentionState | None:
+    """A lifecycle MERGE: the survivor's stability becomes the larger of the pair's (DESIGN.md §5.2).
+
+    Each side already counted its own evidence keys once, so the maximum, not a sum, avoids counting
+    them twice. Both rows are locked in the reinforcement writers' order (default rows created where
+    missing); nothing but ``stability_days`` moves. Returns the survivor's state, or None when either
+    memory is not live in the bank.
+    """
+    survivor, merged = _uuid(survivor_id), _uuid(merged_id)
+    if survivor is None or merged is None or survivor == merged:
+        return None
+    now = _as_utc(now)
+    lock = await ops.upsert_default_retention_state(
+        conn,
+        retention_table=fq_table("memory_retention_state"),
+        units_table=fq_table("memory_units"),
+        bank_id=bank_id,
+        memory_ids=sorted([survivor, merged]),
+        default_stability=_default_stability(settings),
+        fallback_stability=_fallback_stability(settings),
+        anchors={},
+        now=now,
+        skip_locked=True,
+    )
+    rows = {str(row["memory_id"]): row for row in lock.rows}
+    if str(survivor) not in rows or str(merged) not in rows:
+        return None
+    state = _state_from_row(rows[str(survivor)])
+    stability = max(state.stability_days, float(rows[str(merged)]["stability_days"]))
+    if stability == state.stability_days:
+        return state
+    new_state = replace(state, stability_days=stability)
+    await ops.update_retention_state(
+        conn,
+        table=fq_table("memory_retention_state"),
+        bank_id=bank_id,
+        rows=[_update_of(new_state, rows[str(survivor)]["exemption_reason"])],
+        now=now,
+    )
+    return new_state
+
+
 # --------------------------------------------------------------------------- read view
 
 

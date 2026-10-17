@@ -23,7 +23,7 @@ import time
 from collections.abc import Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Callable, NamedTuple
+from typing import TYPE_CHECKING, Callable, Literal, NamedTuple
 
 from opentelemetry import metrics
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
@@ -35,6 +35,9 @@ if TYPE_CHECKING:
     import asyncpg
 
     from .engine.adaptive.models import RecordedEvent
+
+#: The claim transitions ``record_adaptive_claim_transition`` counts, one counter each.
+ClaimTransition = Literal["supersession", "refutation", "uncertain", "split", "merge"]
 
 
 def _get_tenant() -> str:
@@ -401,6 +404,46 @@ class MetricsCollectorBase:
         reflect. The operation that produced it was not affected. A no-op here, like the above.
         """
 
+    def record_adaptive_carry_forward(self, *, bank_id: str, matched: int, unmatched: int):
+        """Record one re-ingest carry-forward: outgoing facts whose lifecycle state moved to a
+        re-extracted fact (``matched``) and those whose state was dropped (``unmatched``, counted
+        once, on the final call). A no-op here, like the above.
+        """
+
+    def record_adaptive_claims_reverted(self, *, bank_id: str, reason: str, count: int):
+        """Record claims returned to active because every piece of their evidence was physically
+        deleted (``reason`` "evidence_deleted") or never re-extracted by a re-ingest
+        ("reingest_unmatched"). A no-op here, like the above.
+        """
+
+    def record_adaptive_claim_transition(
+        self, *, bank_id: str, transition: ClaimTransition, origin: str, count: int = 1
+    ):
+        """Record claim transitions that won their compare-and-set: ``transition`` is supersession,
+        refutation, uncertain, split or merge; ``origin`` is consolidation or explicit (the PATCH
+        lifecycle API). Inherited raw-fact retirements are not counted here. A no-op here, like
+        the above.
+        """
+
+    def record_adaptive_lifecycle_filtered(self, *, bank_id: str, view: str, superseded: int, refuted: int):
+        """Record one lifecycle-mode recall's claim view: candidates it removed because their claim
+        is superseded or refuted (``view`` current, historical or as_of). Called once per recall, zero
+        counts included. A no-op here, like the above.
+        """
+
+    def record_adaptive_historical_cue(self, *, bank_id: str, cue: str):
+        """Record a recall the historical-cue detector turned historical; ``cue`` is the pattern name
+        (``engine/adaptive/cues.py::CUE_NAMES``). A no-op here, like the above.
+        """
+
+    def record_adaptive_lifecycle_dropped(self, *, reason: str, bank_id: str):
+        """Record one lifecycle label (a supersede, refute, split, conflict, history attach or retire)
+        that consolidation's deterministic validation dropped; ``reason`` names the rule it broke
+        (``target_not_in_pool``, ``target_not_active``, ``scope_tags``, ``scope_fingerprint``,
+        ``recency``, ``duplicate_retirement``, ``self_reference``, ``source_not_of_target``,
+        ``scope_changed``, ``cas_lost``). A no-op here, like the above.
+        """
+
     def set_db_pool(self, pool: "asyncpg.Pool"):
         """Set the database pool for metrics collection."""
         pass
@@ -507,6 +550,32 @@ class NoOpMetricsCollector(MetricsCollectorBase):
 
     def record_adaptive_reinforcement_dropped(self, *, producer: str, reason: str, bank_id: str):
         """No-op dropped-reinforcement recording."""
+        pass
+
+    def record_adaptive_carry_forward(self, *, bank_id: str, matched: int, unmatched: int):
+        """No-op carry-forward recording."""
+        pass
+
+    def record_adaptive_claims_reverted(self, *, bank_id: str, reason: str, count: int):
+        """No-op claim-revert recording."""
+        pass
+
+    def record_adaptive_claim_transition(
+        self, *, bank_id: str, transition: ClaimTransition, origin: str, count: int = 1
+    ):
+        """No-op claim-transition recording."""
+        pass
+
+    def record_adaptive_lifecycle_filtered(self, *, bank_id: str, view: str, superseded: int, refuted: int):
+        """No-op lifecycle-view recording."""
+        pass
+
+    def record_adaptive_historical_cue(self, *, bank_id: str, cue: str):
+        """No-op historical-cue recording."""
+        pass
+
+    def record_adaptive_lifecycle_dropped(self, *, reason: str, bank_id: str):
+        """No-op dropped-lifecycle-label recording."""
         pass
 
 
@@ -760,6 +829,56 @@ class MetricsCollector(MetricsCollectorBase):
         self.adaptive_reinforcement_dropped = self.meter.create_counter(
             name="hindsight.adaptive_memory.reinforcement_dropped",
             description="Reinforcements a producer gave up on, by producer and reason (error, overflow)",
+            unit="1",
+        )
+        self.adaptive_carry_forward_matched = self.meter.create_counter(
+            name="hindsight.adaptive_memory.carry_forward_matched",
+            description="Re-ingested facts whose lifecycle state was carried to a re-extracted fact",
+            unit="1",
+        )
+        self.adaptive_carry_forward_unmatched = self.meter.create_counter(
+            name="hindsight.adaptive_memory.carry_forward_unmatched",
+            description="Re-ingested facts with lifecycle state that no re-extracted fact matched (state dropped)",
+            unit="1",
+        )
+        self.adaptive_claims_reverted = self.meter.create_counter(
+            name="hindsight.adaptive_memory.claims_reverted",
+            description="Claims returned to active because all their evidence was deleted, by reason",
+            unit="1",
+        )
+        # One counter per claim transition, labelled by origin (docs/developer/monitoring.md).
+        self.adaptive_claim_transitions = {
+            transition: self.meter.create_counter(
+                name=f"hindsight.adaptive_memory.{instrument}",
+                description=description,
+                unit="1",
+            )
+            for transition, instrument, description in (
+                ("supersession", "supersessions", "Claims superseded (compare-and-set won), by origin"),
+                ("refutation", "refutations", "Claims refuted (compare-and-set won), by origin"),
+                ("uncertain", "uncertain_claims", "Claims marked uncertain, by origin"),
+                ("split", "splits", "Observations split into narrower ones, by origin"),
+                ("merge", "merges", "Observations merge-retired into a survivor, by origin"),
+            )
+        }
+        self.adaptive_recall_superseded_filtered = self.meter.create_counter(
+            name="hindsight.adaptive_memory.recall_superseded_filtered",
+            description="Recall candidates removed by the lifecycle view because their claim is superseded",
+            unit="1",
+        )
+        self.adaptive_recall_refuted_filtered = self.meter.create_counter(
+            name="hindsight.adaptive_memory.recall_refuted_filtered",
+            description="Recall candidates removed by the lifecycle view because their claim is refuted",
+            unit="1",
+        )
+        self.adaptive_historical_cue_fired = self.meter.create_counter(
+            name="hindsight.adaptive_memory.historical_cue_fired",
+            description="External recalls the historical-cue detector turned historical, by cue",
+            unit="1",
+        )
+        self.adaptive_lifecycle_dropped = self.meter.create_counter(
+            name="hindsight.adaptive_memory.lifecycle_transitions_dropped",
+            description="Consolidation lifecycle labels dropped by validation, by reason",
             unit="1",
         )
 
@@ -1131,6 +1250,60 @@ class MetricsCollector(MetricsCollectorBase):
         if self._include_bank_id:
             attrs["bank_id"] = bank_id
         self.adaptive_reinforcement_dropped.add(1, attrs)
+
+    def record_adaptive_carry_forward(self, *, bank_id: str, matched: int, unmatched: int):
+        """Record one re-ingest carry-forward; see the base class."""
+        attrs: dict[str, str] = dict(self._tenant_attrs())
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        if matched:
+            self.adaptive_carry_forward_matched.add(matched, attrs)
+        if unmatched:
+            self.adaptive_carry_forward_unmatched.add(unmatched, attrs)
+
+    def record_adaptive_claims_reverted(self, *, bank_id: str, reason: str, count: int):
+        """Record reverted claims; see the base class."""
+        if not count:
+            return
+        attrs: dict[str, str] = {"reason": reason, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.adaptive_claims_reverted.add(count, attrs)
+
+    def record_adaptive_claim_transition(
+        self, *, bank_id: str, transition: ClaimTransition, origin: str, count: int = 1
+    ):
+        """Record claim transitions; see the base class."""
+        if count <= 0:
+            return
+        attrs: dict[str, str] = {"origin": origin, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.adaptive_claim_transitions[transition].add(count, attrs)
+
+    def record_adaptive_lifecycle_filtered(self, *, bank_id: str, view: str, superseded: int, refuted: int):
+        """Record one recall's lifecycle-view removals; see the base class."""
+        attrs: dict[str, str] = {"view": view, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        if superseded:
+            self.adaptive_recall_superseded_filtered.add(superseded, attrs)
+        if refuted:
+            self.adaptive_recall_refuted_filtered.add(refuted, attrs)
+
+    def record_adaptive_historical_cue(self, *, bank_id: str, cue: str):
+        """Record a fired historical cue; see the base class."""
+        attrs: dict[str, str] = {"cue": cue, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.adaptive_historical_cue_fired.add(1, attrs)
+
+    def record_adaptive_lifecycle_dropped(self, *, reason: str, bank_id: str):
+        """Record a dropped lifecycle label; see the base class."""
+        attrs: dict[str, str] = {"reason": reason, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.adaptive_lifecycle_dropped.add(1, attrs)
 
     def _setup_process_metrics(self):
         """Set up observable gauges for process metrics."""

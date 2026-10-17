@@ -60,6 +60,7 @@ _STATIC = {
     "adaptive_memory_archive_protect_importance": 0.8,
     "adaptive_memory_prune_enabled": False,
     "adaptive_memory_prune_after_days": 180.0,
+    "adaptive_memory_scope_keys": ["environment", "service", "module"],
 }
 
 

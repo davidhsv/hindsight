@@ -14,7 +14,7 @@ into archive entry names. The real id lives inside each payload.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
@@ -131,6 +131,101 @@ class TransferCausalRelation(BaseModel):
     target_fact_index: int
 
 
+def _absent(value: object) -> bool:
+    """``exclude_if`` for the adaptive-memory fields: an archive of a bank that never used adaptive
+    memory carries none of them, so it stays byte-identical to one written before they existed."""
+    return value is None
+
+
+#: Archive entries for the lifecycle audit trail and claim evidence (DESIGN.md §7). Written only when
+#: non-empty, for the same reason; they cite memories by their source ids (``source_id``).
+LIFECYCLE_RELATIONS_ENTRY = "lifecycle_relations.json"
+CLAIM_EVIDENCE_ENTRY = "claim_evidence.json"
+
+
+class TransferRetention(BaseModel):
+    """A memory's learned retention (``memory_retention_state``), carried so an import keeps it."""
+
+    importance: float
+    stability_days: float
+    last_reinforced_at: datetime
+    reinforcement_count: int = 0
+    access_count: int = 0
+    last_recalled_at: datetime | None = None
+    forgetting_exempt: bool = False
+    exemption_reason: str | None = None
+
+
+class TransferClaim(BaseModel):
+    """A memory's claim row (``memory_claim_state``). The two pointers name source ids; the import
+    rewrites them to the target's ids and drops (and counts) the ones that did not come back."""
+
+    truth_status: str
+    confidence: float | None = None
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    retired_via: str | None = None
+    superseded_by_id: str | None = None
+    inherited_from_id: str | None = None
+    scope_fingerprint: str | None = None
+    reason: str | None = None
+    #: When the claim was decided: invalidate → restore re-attaches edges only to claims older
+    #: than the invalidation, so the import keeps the source's value.
+    updated_at: datetime | None = None
+
+
+class TransferClaimEvidence(BaseModel):
+    """One ``memory_claim_evidence`` row: claim ``memory_id`` rests on fact ``evidence_memory_id``
+    (both source ids)."""
+
+    memory_id: str
+    evidence_memory_id: str
+    created_at: datetime | None = None
+
+
+class TransferLifecycleRelation(BaseModel):
+    """One lifecycle relation. A None endpoint is a tombstone (the memory is gone, or was not
+    exported); the snapshots keep what it said."""
+
+    source_id: str
+    relation_type: str
+    source_memory_id: str | None = None
+    target_memory_id: str | None = None
+    source_snapshot: dict = Field(default_factory=dict)
+    target_snapshot: dict = Field(default_factory=dict)
+    origin: str
+    reason: str | None = None
+    confidence: float | None = None
+    evidence: dict = Field(default_factory=dict)
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ImportedMemoryState:
+    """The adaptive state of one imported memory, its claim pointers already on target ids."""
+
+    unit_id: str
+    claim: TransferClaim | None
+    retention: TransferRetention | None
+
+
+@dataclass(frozen=True)
+class LifecycleRelationsRestore:
+    """What restoring the lifecycle relations wrote: the source relation id -> new id of each row
+    written, and how many endpoints did not resolve on the target (written as tombstones)."""
+
+    id_map: dict[str, str] = field(default_factory=dict)
+    dropped_endpoints: int = 0
+
+
+@dataclass(frozen=True)
+class ClaimEvidenceRestore:
+    """What restoring the claim evidence wrote, and how many rows named a memory that did not come back."""
+
+    inserted: int = 0
+    dropped: int = 0
+
+
 class TransferFact(BaseModel):
     """One extracted fact (memory unit) without its embedding or database id.
 
@@ -168,6 +263,11 @@ class TransferFact(BaseModel):
     created_at: datetime | None = None
     consolidated_at: datetime | None = None
     consolidation_failed_at: datetime | None = None
+    # Adaptive-memory state (retention and claim), present only for a fact that has some. Events
+    # (the reinforcement ledger) do not travel: after an import, evidence the source already
+    # counted can reinforce the fact again.
+    retention: TransferRetention | None = Field(default=None, exclude_if=_absent)
+    claim: TransferClaim | None = Field(default=None, exclude_if=_absent)
 
 
 class TransferChunk(BaseModel):
@@ -211,6 +311,9 @@ class TransferObservation(BaseModel):
     observation_scopes: ObservationScopes | None = None
     proof_count: int = 1
     sources: list[TransferObservationSource] = Field(default_factory=list)
+    # As on TransferFact: present only for an observation with adaptive state.
+    retention: TransferRetention | None = Field(default=None, exclude_if=_absent)
+    claim: TransferClaim | None = Field(default=None, exclude_if=_absent)
 
 
 class TransferDocument(BaseModel):

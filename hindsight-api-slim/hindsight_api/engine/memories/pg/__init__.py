@@ -21,6 +21,11 @@ behind one object:
 * :mod:`link_expansion` — the graph recall arm (:class:`LinkExpansionRetriever`)
 * :mod:`entity_resolver` — the SQL entity registry retain resolves names against
 * :mod:`links`    — retain's temporal / semantic / causal link writes (and its entity-resolution front)
+* :mod:`adaptive` — adaptive-memory retention: the recall loader, reinforcement, retention policy, the read view
+* :mod:`adaptive_archive` — adaptive state across a curation invalidate → restore
+* :mod:`adaptive_claims` — claim lifecycle: claim locks and CAS, evidence, relations, inheritance, the
+  requeue choke point, delete repair, re-ingest carry-forward
+* :mod:`adaptive_transfer` — adaptive state across a bank or document transfer
 
 Every function here takes the live connection and Hindsight's ``fq_table``
 resolver rather than reaching for globals, so each is callable from a
@@ -31,6 +36,10 @@ their own signatures; they resolve store tables through ``fq_store_table``.
 from __future__ import annotations
 
 __all__ = [
+    "adaptive",
+    "adaptive_archive",
+    "adaptive_claims",
+    "adaptive_transfer",
     "admin",
     "banks",
     "counts",

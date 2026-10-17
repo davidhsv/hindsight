@@ -35,6 +35,12 @@ from ..base import (
     StoredMemory,
 )
 from . import counts
+from .adaptive_claims import (
+    relock_relations_before_delete,
+    repair_lifecycle_for_deleted_facts,
+    requeue_units,
+    retired_claim_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +337,10 @@ async def delete_document_rows(
 
     # Drop the facts' links in lock order before the cascade reaches them (#4251).
     await ops.delete_unit_links(conn, fq_table("memory_links"), bank_id, unit_ids)
+    # The lifecycle side, before the cascade: relation rows in one order for their SET NULL, and the
+    # claims only these facts justified back to active (DESIGN.md §7).
+    await relock_relations_before_delete(conn, fq_table=fq_table, bank_id=bank_id, unit_ids=unit_ids)
+    await repair_lifecycle_for_deleted_facts(conn, fq_table=fq_table, bank_id=bank_id, doomed_ids=unit_ids)
 
     # Delete document first (cascades to memory_units and all their links).
     # Running the stale-observation sweep AFTER the delete ensures we also
@@ -555,6 +565,12 @@ async def retag_document_memories(
                 bank_id,
                 unit_uuids,
             )
+        # A superseded or refuted observation is history, not a summary of its sources: a retag
+        # does not make it stale, so it stays (as in delete_stale_observations).
+        retired = await retired_claim_ids(
+            conn, fq_table=fq_table, bank_id=bank_id, memory_ids=[obs["id"] for obs in affected_obs]
+        )
+        affected_obs = [obs for obs in affected_obs if str(obs["id"]) not in retired]
         if affected_obs:
             obs_ids = [obs["id"] for obs in affected_obs]
 
@@ -574,14 +590,8 @@ async def retag_document_memories(
             # Requeue the co-sources the deleted observations strand: bookkeeping only, so
             # `updated_at` stays put (see META_UPDATED_AT).
             if other_source_uuids:
-                await conn.execute(
-                    f"""
-                    UPDATE {fq_table("memory_units")}
-                    SET consolidated_at = NULL
-                    WHERE id = ANY($1::uuid[])
-                      AND fact_type IN ('experience', 'world')
-                    """,
-                    other_source_uuids,
+                await requeue_units(
+                    conn, fq_table=fq_table, bank_id=bank_id, unit_ids=other_source_uuids, reason="retag_co_source"
                 )
             invalidated_obs = len(obs_ids)
             logger.info(
@@ -592,15 +602,7 @@ async def retag_document_memories(
             )
         # Requeue every unit that moved — bookkeeping only, so `updated_at` stays put (see
         # META_UPDATED_AT); the write above is what stamped these rows.
-        await conn.execute(
-            f"""
-            UPDATE {fq_table("memory_units")}
-            SET consolidated_at = NULL
-            WHERE id = ANY($1::uuid[])
-              AND fact_type IN ('experience', 'world')
-            """,
-            unit_uuids,
-        )
+        await requeue_units(conn, fq_table=fq_table, bank_id=bank_id, unit_ids=unit_uuids, reason="retag")
     return RetagResult(invalidated_observations=invalidated_obs, requeued_units=len(unit_ids))
 
 

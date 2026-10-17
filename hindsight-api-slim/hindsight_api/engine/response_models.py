@@ -262,6 +262,26 @@ class RecallScores(BaseModel):
     )
 
 
+class RecallLifecycle(BaseModel):
+    """What should be believed about a recalled memory, when that is not simply "it holds".
+
+    Present on a recall result only when the bank's adaptive memory mode is ``lifecycle`` and the
+    memory's claim is not plain ``active``: a superseded or refuted memory a historical or
+    ``as_of`` recall returned, or an ``uncertain`` one (contested by conflicting evidence).
+    """
+
+    truth_status: Literal["uncertain", "superseded", "refuted"] = Field(
+        description="'superseded' (a later memory replaced it), 'refuted' (it was wrong) or 'uncertain' "
+        "(conflicting evidence, not resolved)"
+    )
+    confidence: float | None = Field(default=None, description="Confidence in the claim, when one was recorded")
+    valid_from: str | None = Field(
+        default=None, description="ISO time the claim became true; null means since before anything recorded"
+    )
+    valid_to: str | None = Field(default=None, description="ISO time the claim stopped being true")
+    superseded_by: str | None = Field(default=None, description="Id of the memory that replaced this one")
+
+
 class MinScores(BaseModel):
     """Optional per-stage score floors for recall. Every floor is inclusive (``>=``).
 
@@ -422,6 +442,13 @@ class MemoryFact(BaseModel):
     scores: RecallScores | None = Field(
         None,
         description="Recall scores from each pipeline stage (final/reranker/semantic/keyword). Not returned for source facts.",
+    )
+    # Omitted from every dump when None, so a recall outside lifecycle mode (and every active
+    # memory inside it) serializes exactly as it did before claims existed.
+    lifecycle: RecallLifecycle | None = Field(
+        None,
+        exclude_if=lambda v: v is None,
+        description="Claim lifecycle state (adaptive memory lifecycle mode only, for a memory that is not plain active)",
     )
     # Internal, never serialised: the short ids of the attachments this fact was drawn
     # from, when the memories store returned them on the row. ``None`` means "not

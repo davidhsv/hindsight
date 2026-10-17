@@ -461,16 +461,14 @@ async def mark_consolidated(
     when: datetime | None,
     failed: bool = False,
 ) -> None:
-    """Stamp (or clear, with ``when=None``) the consolidated marker on sources.
+    """Stamp the consolidated marker on sources.
 
     ``failed`` writes ``consolidation_failed_at`` instead of ``consolidated_at``,
     which is what keeps a memory the LLM could not consolidate out of the queue.
 
-    ``when=None`` clears the column rather than stamping it — that is how a source
-    is requeued once the observation built on it is deleted. The clear keeps the
-    ``fact_type IN ('experience', 'world')`` guard the requeue sites carry:
-    observations are never themselves consolidated, so nothing about them should
-    be reset by a requeue.
+    Stamps only: clearing the marker is a requeue, and every requeue goes through
+    ``adaptive_claims.requeue_units`` (``PostgresMemories.mark_consolidated`` routes a
+    ``when=None`` there), which keeps superseded and refuted facts out of the queue.
 
     ``updated_at`` is deliberately left alone — the one exception to the contract
     documented on ``META_UPDATED_AT`` (``memories.base``) that every other write
@@ -478,16 +476,17 @@ async def mark_consolidated(
     bumping it would make every consolidation pass look like a write to the
     staleness check below.
     """
+    if when is None:
+        raise ValueError("clearing consolidated_at is a requeue: call requeue_units")
     ids = _as_uuids(unit_ids)
     if not ids:
         return
     column = "consolidation_failed_at" if failed else "consolidated_at"
-    guard = "" if when is not None else " AND fact_type IN ('experience', 'world')"
     await conn.execute(
         f"""
         UPDATE {fq_table("memory_units")}
         SET {column} = $1
-        WHERE bank_id = $2 AND id = ANY($3::uuid[]){guard}
+        WHERE bank_id = $2 AND id = ANY($3::uuid[])
         """,
         when,
         bank_id,

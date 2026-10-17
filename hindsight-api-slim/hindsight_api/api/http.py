@@ -245,6 +245,7 @@ from hindsight_api.engine.response_models import (
     DryRunExtractionResult,
     MemoryFact,
     MinScores,
+    RecallLifecycle,
     RecallScores,
     TemporalWindow,
     TokenUsage,
@@ -260,6 +261,7 @@ from hindsight_api.engine.retain.attachment_content import (
     validate_and_canonicalize_content,
 )
 from hindsight_api.engine.retain.attachment_store import StoredAttachment
+from hindsight_api.engine.search.lifecycle_filter import ClaimStateUnavailable
 from hindsight_api.engine.search.tag_resolution import needs_resolution
 from hindsight_api.engine.search.tags import TagGroup, TagsMatch
 
@@ -643,6 +645,27 @@ class RecallRequest(BaseModel):
         "while the semantic, keyword and graph arms are unaffected — so memories dated outside the window "
         "are still returned. Ignored when the bank has temporal retrieval disabled.",
     )
+    lifecycle_view: Literal["current", "historical"] | None = Field(
+        default=None,
+        description="Which memories to show when the bank's adaptive memory mode is 'lifecycle' (ignored "
+        "in every other mode). 'current' leaves out memories that were superseded or refuted; 'historical' "
+        "also returns superseded ones, each annotated with `lifecycle` (its validity and successor), but "
+        "never refuted ones. When omitted, the bank's `adaptive_memory_default_view` applies.",
+    )
+    as_of: datetime | None = Field(
+        default=None,
+        description="Show memories as they stood at this instant (ISO 8601; a time without an offset is "
+        "UTC), when the bank's adaptive memory mode is 'lifecycle': a memory is returned only if its claim "
+        "was valid then. Refuted memories never are. Takes precedence over `lifecycle_view`. It does not "
+        "change ranking: `query_timestamp` stays the clock recency is scored against.",
+    )
+
+    @field_validator("as_of")
+    @classmethod
+    def _as_of_utc(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            return value.replace(tzinfo=timezone.utc)
+        return value
 
     @field_validator("query")
     @classmethod
@@ -699,6 +722,15 @@ class RecallResult(BaseModel):
         None  # IDs of source facts (observation type only, when source_facts is enabled)
     )
     scores: RecallScores | None = None  # Per-stage recall scores (final/reranker/semantic/text)
+    lifecycle: RecallLifecycle | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description=(
+            "Claim lifecycle state, when the bank's adaptive memory mode is 'lifecycle' and the memory is not "
+            "plain active: a superseded or refuted memory a historical or as_of recall returned, or an "
+            "uncertain one. Omitted otherwise."
+        ),
+    )
     attachments: list["ChunkAttachment"] | None = Field(
         default=None,
         description=(
@@ -2999,15 +3031,19 @@ class ConfirmMemoryResponse(BaseModel):
 
 
 class UpdateMemoryLifecycleRequest(BaseModel):
-    """Request model for changing how a memory is retained.
+    """Request model for changing how a memory is retained, and what should be believed about it.
 
-    Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle'. Omitted fields stay as they
-    are; at least one must be set.
+    The retention fields need the bank's adaptive memory mode to be 'rank' or 'lifecycle'; the truth
+    fields need 'lifecycle'. Omitted fields stay as they are; at least one must be set.
     """
 
     model_config = ConfigDict(
         json_schema_extra={
-            "example": {"importance": 0.9, "forgetting_exempt": True, "exemption_reason": "compliance requirement"}
+            "example": {
+                "truth_status": "superseded",
+                "superseded_by": "123e4567-e89b-12d3-a456-426614174000",
+                "reason": "upgraded to Java 21",
+            }
         }
     )
 
@@ -3029,13 +3065,41 @@ class UpdateMemoryLifecycleRequest(BaseModel):
         max_length=500,
         description="Why the memory is exempt. Cannot be set while turning forgetting_exempt off.",
     )
+    truth_status: Literal["active", "uncertain", "superseded", "refuted"] | None = Field(
+        default=None,
+        description="What should be believed about the memory ('lifecycle' mode only). 'superseded' or "
+        "'refuted' retires it from current recall (it must be active or uncertain, 409 otherwise): on an "
+        "observation its source facts inherit the status unless another observation still stands on them; "
+        "on a fact, the observations built on it are rebuilt from their other sources. 'active' restores a "
+        "retired memory; 'uncertain' marks it contested.",
+    )
+    superseded_by: str | None = Field(
+        default=None,
+        description="With truth_status 'superseded' or 'refuted': the memory that replaces this one. It must be "
+        "a different live memory of the same bank with exactly the same tags.",
+    )
+    reason: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description="Why the truth status changed; recorded on the claim and its lifecycle relation.",
+    )
 
     @model_validator(mode="after")
     def _require_a_change(self) -> "UpdateMemoryLifecycleRequest":
-        if self.importance is None and self.forgetting_exempt is None and self.exemption_reason is None:
+        if (
+            self.importance is None
+            and self.forgetting_exempt is None
+            and self.exemption_reason is None
+            and self.truth_status is None
+        ):
             raise ValueError("Provide at least one field to update.")
         if self.exemption_reason is not None and self.forgetting_exempt is False:
             raise ValueError("exemption_reason cannot be set while turning forgetting_exempt off.")
+        if self.superseded_by is not None and self.truth_status not in ("superseded", "refuted"):
+            raise ValueError("superseded_by needs truth_status 'superseded' or 'refuted'.")
+        if self.reason is not None and self.truth_status is None:
+            raise ValueError("reason is recorded with a truth_status change; set truth_status too.")
         return self
 
 
@@ -4235,8 +4299,8 @@ class BankTemplateConfig(BaseModel):
         default=None,
         description="Adaptive memory mode: 'off' (default; recall is unchanged), 'observe' (compute retention "
         "and report it in traces and metrics only), 'rank' (retention down-weights rarely reinforced memories) "
-        "or 'lifecycle' (rank plus claim lifecycle; the claim part is reserved for a later release, so it "
-        "currently behaves exactly like 'rank')",
+        "or 'lifecycle' (rank plus claim lifecycle: superseded and refuted memories stop answering current "
+        "recall, and history is available through recall's lifecycle_view and as_of)",
     )
     adaptive_memory_score_alpha: float | None = Field(
         default=None,
@@ -4266,13 +4330,14 @@ class BankTemplateConfig(BaseModel):
     )
     adaptive_memory_default_view: str | None = Field(
         default=None,
-        description="Lifecycle recall view when the request names none: 'current' (default) or 'historical' "
-        "(reserved; takes effect in a later release)",
+        description="Lifecycle recall view when the request names none: 'current' (default; superseded and "
+        "refuted memories are left out) or 'historical' (superseded ones are returned too, annotated)",
     )
     adaptive_memory_historical_cues: bool | None = Field(
         default=None,
-        description="Detect historical phrasing in external recall queries and switch them to a historical view "
-        "(reserved; takes effect in a later release)",
+        description="Detect historical phrasing ('used to', 'before the migration', 'before <date>', ...) in "
+        "external recall queries that name no lifecycle_view, and answer them from the historical view (or as of "
+        "the date). Lifecycle mode only",
     )
     memory_defense: dict | None = Field(
         default=None,
@@ -6502,10 +6567,14 @@ def _register_routes(app: FastAPI):
         "/v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle",
         response_model=MemoryLifecycle,
         summary="Update memory lifecycle",
-        description="Change how a memory (a fact or an observation) is retained: its importance and its "
-        "exemption from retention decay. Returns the memory's lifecycle view, the same one GET "
-        "/memories/{memory_id} shows under 'lifecycle'. Needs the bank's adaptive memory mode to be "
-        "'rank' or 'lifecycle' (409 otherwise). 404 when the memory is missing or invalidated.",
+        description="Change how a memory (a fact or an observation) is retained — its importance and its "
+        "exemption from retention decay, in adaptive memory mode 'rank' or 'lifecycle' — and what should be "
+        "believed about it: truth_status, superseded_by and reason, in mode 'lifecycle' only. Retiring a memory "
+        "(superseded/refuted) takes it out of current recall and records an explicit lifecycle relation; "
+        "'active' restores it. Returns the memory's lifecycle view, the same one GET /memories/{memory_id} "
+        "shows under 'lifecycle'. 409 when the bank's mode does not allow the change or the memory is already "
+        "retired; 404 when the memory (or superseded_by) is missing or invalidated; 400 for a successor in "
+        "another scope.",
         operation_id="update_memory_lifecycle",
         tags=["Memory"],
     )
@@ -6516,7 +6585,7 @@ def _register_routes(app: FastAPI):
         request: UpdateMemoryLifecycleRequest,
         request_context: RequestContext = Depends(get_request_context),
     ):
-        """Set a memory's importance and/or forgetting exemption."""
+        """Set a memory's importance, forgetting exemption and/or truth status."""
         try:
             view = await app.state.memory.update_memory_lifecycle(
                 bank_id,
@@ -6524,6 +6593,9 @@ def _register_routes(app: FastAPI):
                 importance=request.importance,
                 forgetting_exempt=request.forgetting_exempt,
                 exemption_reason=request.exemption_reason,
+                truth_status=request.truth_status,
+                superseded_by=request.superseded_by,
+                reason=request.reason,
                 request_context=request_context,
             )
             if view is None:
@@ -6648,8 +6720,11 @@ def _register_routes(app: FastAPI):
                         tag_groups=request.tag_groups,
                         min_scores=request.min_scores,
                         temporal_window=request.temporal_window,
-                        # A final, external recall: the one kind that may reinforce what it returns.
-                        _reinforce_results=True,
+                        lifecycle_view=request.lifecycle_view,
+                        as_of=request.as_of,
+                        # A final, external recall: the one kind that may reinforce what it returns
+                        # (and the one the historical-cue detector looks at).
+                        _external=True,
                     ),
                     operation="recall",
                     bank_id=bank_id,
@@ -6674,6 +6749,7 @@ def _register_routes(app: FastAPI):
                     tags=fact.tags,
                     source_fact_ids=fact.source_fact_ids,
                     scores=fact.scores,
+                    lifecycle=fact.lifecycle,
                 )
 
             recall_results = [_fact_to_result(fact) for fact in core_result.results]
@@ -6764,6 +6840,9 @@ def _register_routes(app: FastAPI):
             raise HTTPException(status_code=e.status_code, detail=e.reason)
         except (AuthenticationError, HTTPException):
             raise
+        except ClaimStateUnavailable as e:
+            # Lifecycle mode fails closed: no answer rather than retired memories shown as current.
+            raise HTTPException(status_code=503, detail=str(e), headers={"Retry-After": str(e.retry_after)})
         except (asyncio.TimeoutError, TimeoutError):
             handler_duration = time.perf_counter() - handler_start
             logger.error(

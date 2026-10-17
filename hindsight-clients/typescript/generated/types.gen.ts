@@ -851,7 +851,7 @@ export type BankTemplateConfig = {
   /**
    * Adaptive Memory Mode
    *
-   * Adaptive memory mode: 'off' (default; recall is unchanged), 'observe' (compute retention and report it in traces and metrics only), 'rank' (retention down-weights rarely reinforced memories) or 'lifecycle' (rank plus claim lifecycle; the claim part is reserved for a later release, so it currently behaves exactly like 'rank')
+   * Adaptive memory mode: 'off' (default; recall is unchanged), 'observe' (compute retention and report it in traces and metrics only), 'rank' (retention down-weights rarely reinforced memories) or 'lifecycle' (rank plus claim lifecycle: superseded and refuted memories stop answering current recall, and history is available through recall's lifecycle_view and as_of)
    */
   adaptive_memory_mode?: string | null;
   /**
@@ -887,13 +887,13 @@ export type BankTemplateConfig = {
   /**
    * Adaptive Memory Default View
    *
-   * Lifecycle recall view when the request names none: 'current' (default) or 'historical' (reserved; takes effect in a later release)
+   * Lifecycle recall view when the request names none: 'current' (default; superseded and refuted memories are left out) or 'historical' (superseded ones are returned too, annotated)
    */
   adaptive_memory_default_view?: string | null;
   /**
    * Adaptive Memory Historical Cues
    *
-   * Detect historical phrasing in external recall queries and switch them to a historical view (reserved; takes effect in a later release)
+   * Detect historical phrasing ('used to', 'before the migration', 'before <date>', ...) in external recall queries that name no lifecycle_view, and answer them from the historical view (or as of the date). Lifecycle mode only
    */
   adaptive_memory_historical_cues?: boolean | null;
   /**
@@ -5787,6 +5787,48 @@ export type PromptPreviewResponse = {
 };
 
 /**
+ * RecallLifecycle
+ *
+ * What should be believed about a recalled memory, when that is not simply "it holds".
+ *
+ * Present on a recall result only when the bank's adaptive memory mode is ``lifecycle`` and the
+ * memory's claim is not plain ``active``: a superseded or refuted memory a historical or
+ * ``as_of`` recall returned, or an ``uncertain`` one (contested by conflicting evidence).
+ */
+export type RecallLifecycle = {
+  /**
+   * Truth Status
+   *
+   * 'superseded' (a later memory replaced it), 'refuted' (it was wrong) or 'uncertain' (conflicting evidence, not resolved)
+   */
+  truth_status: "uncertain" | "superseded" | "refuted";
+  /**
+   * Confidence
+   *
+   * Confidence in the claim, when one was recorded
+   */
+  confidence?: number | null;
+  /**
+   * Valid From
+   *
+   * ISO time the claim became true; null means since before anything recorded
+   */
+  valid_from?: string | null;
+  /**
+   * Valid To
+   *
+   * ISO time the claim stopped being true
+   */
+  valid_to?: string | null;
+  /**
+   * Superseded By
+   *
+   * Id of the memory that replaced this one
+   */
+  superseded_by?: string | null;
+};
+
+/**
  * RecallRequest
  *
  * Request model for recall endpoint.
@@ -5853,6 +5895,18 @@ export type RecallRequest = {
    * Window for the temporal retrieval arm, supplied instead of extracting dates from `query`. Set this when you already know the range you mean — a date picker, or an agent that resolved 'last quarter' itself — and recall will skip parsing the query text for dates. **This ranks, it does not filter**: the temporal arm surfaces memories whose own dates (`mentioned_at`, `occurred_start`, `occurred_end`) fall inside the window so they rank higher, while the semantic, keyword and graph arms are unaffected — so memories dated outside the window are still returned. Ignored when the bank has temporal retrieval disabled.
    */
   temporal_window?: TemporalWindow | null;
+  /**
+   * Lifecycle View
+   *
+   * Which memories to show when the bank's adaptive memory mode is 'lifecycle' (ignored in every other mode). 'current' leaves out memories that were superseded or refuted; 'historical' also returns superseded ones, each annotated with `lifecycle` (its validity and successor), but never refuted ones. When omitted, the bank's `adaptive_memory_default_view` applies.
+   */
+  lifecycle_view?: "current" | "historical" | null;
+  /**
+   * As Of
+   *
+   * Show memories as they stood at this instant (ISO 8601; a time without an offset is UTC), when the bank's adaptive memory mode is 'lifecycle': a memory is returned only if its claim was valid then. Refuted memories never are. Takes precedence over `lifecycle_view`. It does not change ranking: `query_timestamp` stays the clock recency is scored against.
+   */
+  as_of?: string | null;
 };
 
 /**
@@ -5964,6 +6018,10 @@ export type RecallResult = {
    */
   source_fact_ids?: Array<string> | null;
   scores?: RecallScores | null;
+  /**
+   * Claim lifecycle state, when the bank's adaptive memory mode is 'lifecycle' and the memory is not plain active: a superseded or refuted memory a historical or as_of recall returned, or an uncertain one. Omitted otherwise.
+   */
+  lifecycle?: RecallLifecycle | null;
   /**
    * Attachments
    *
@@ -7188,10 +7246,10 @@ export type UpdateDocumentResponse = {
 /**
  * UpdateMemoryLifecycleRequest
  *
- * Request model for changing how a memory is retained.
+ * Request model for changing how a memory is retained, and what should be believed about it.
  *
- * Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle'. Omitted fields stay as they
- * are; at least one must be set.
+ * The retention fields need the bank's adaptive memory mode to be 'rank' or 'lifecycle'; the truth
+ * fields need 'lifecycle'. Omitted fields stay as they are; at least one must be set.
  */
 export type UpdateMemoryLifecycleRequest = {
   /**
@@ -7212,6 +7270,24 @@ export type UpdateMemoryLifecycleRequest = {
    * Why the memory is exempt. Cannot be set while turning forgetting_exempt off.
    */
   exemption_reason?: string | null;
+  /**
+   * Truth Status
+   *
+   * What should be believed about the memory ('lifecycle' mode only). 'superseded' or 'refuted' retires it from current recall (it must be active or uncertain, 409 otherwise): on an observation its source facts inherit the status unless another observation still stands on them; on a fact, the observations built on it are rebuilt from their other sources. 'active' restores a retired memory; 'uncertain' marks it contested.
+   */
+  truth_status?: "active" | "uncertain" | "superseded" | "refuted" | null;
+  /**
+   * Superseded By
+   *
+   * With truth_status 'superseded' or 'refuted': the memory that replaces this one. It must be a different live memory of the same bank with exactly the same tags.
+   */
+  superseded_by?: string | null;
+  /**
+   * Reason
+   *
+   * Why the truth status changed; recorded on the claim and its lifecycle relation.
+   */
+  reason?: string | null;
 };
 
 /**

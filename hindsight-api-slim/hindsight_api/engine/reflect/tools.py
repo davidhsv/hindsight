@@ -80,6 +80,9 @@ def _drop_unread_fields(d: dict[str, Any]) -> dict[str, Any]:
         d.pop(k, None)
     if "context" in d:
         d["context"] = truncate_context_for_prompt(d["context"])
+    # A claim annotation (lifecycle mode) is a nested dict; prune its empty fields too.
+    if isinstance(d.get("lifecycle"), dict):
+        d["lifecycle"] = _prune_nulls(d["lifecycle"])
     return d
 
 
@@ -482,6 +485,7 @@ async def tool_recall(
     include_chunks: bool = True,
     created_after: datetime | None = None,
     created_before: datetime | None = None,
+    lifecycle_view: str | None = None,
 ) -> dict[str, Any]:
     """
     Search memories using TEMPR retrieval.
@@ -501,6 +505,8 @@ async def tool_recall(
         max_chunk_tokens: Maximum tokens for raw source chunk text (default 1000)
         fact_types: Optional filter for fact types to retrieve. Defaults to ["experience", "world"].
         include_chunks: Whether to fetch raw chunk text alongside facts (default True).
+        lifecycle_view: Claim view for a lifecycle-mode bank (``"historical"`` when the agent set
+            ``include_history``); None is the bank's default view. Ignored in other modes.
 
     Returns:
         Dict with list of matching memories including raw chunk text (when include_chunks)
@@ -527,10 +533,14 @@ async def tool_recall(
         _quiet=True,  # Suppress logging for internal operations
         include_chunks=include_chunks,
         max_chunk_tokens=max_chunk_tokens,
+        # Passed only when set, so every other recall call is exactly the one it always was.
+        **({"lifecycle_view": lifecycle_view} if lifecycle_view is not None else {}),
     )
 
     return {
         "query": query,
+        # A retired memory's `lifecycle` annotation survives the null-pruning (it is a non-empty
+        # dict), so the agent reads it as history, never as current.
         "memories": [_drop_unread_fields(_prune_nulls(m.model_dump())) for m in result.results],
         # ``chunks`` is deliberately not trimmed: ChunkInfo carries only
         # chunk_text / chunk_index / truncated, so it holds none of the fields
@@ -578,6 +588,7 @@ async def tool_expand(
     tags: list[str] | None,
     tags_match: TagsMatch,
     tag_groups: list[TagGroup] | None,
+    lifecycle: bool = False,
 ) -> dict[str, Any]:
     """
     Expand multiple memories to get chunk or document context.
@@ -596,6 +607,9 @@ async def tool_expand(
         tags: The reader's tag filter (same as the recall it expands)
         tags_match: How ``tags`` is matched
         tag_groups: The reader's compound tag filter, already fuzzy-resolved
+        lifecycle: The bank's adaptive memory mode is ``lifecycle``. Expanding by id bypasses
+            recall's claim view, so a retired (or uncertain) memory comes back with its
+            ``lifecycle`` annotation instead of reading as current. One claim read; False skips it.
 
     Returns:
         Dict with results array, each containing memory, chunk, and optionally document data
@@ -657,6 +671,16 @@ async def tool_expand(
     memories = [{**dict(m), "chunk_id": None, "document_id": None} if m["id"] in withheld_ids else m for m in memories]
     memory_map = {row["id"]: row for row in memories}
 
+    annotations: dict[str, dict[str, Any]] = {}
+    if lifecycle and memories:
+        from ..search.lifecycle_filter import lifecycle_annotation
+
+        claims = await _store.claims_for(conn, bank_id=bank_id, memory_ids=[str(m["id"]) for m in memories])
+        for memory_id, claim in claims.items():
+            annotation = lifecycle_annotation(claim)
+            if annotation is not None:
+                annotations[memory_id] = _prune_nulls(annotation.model_dump())
+
     # Collect chunk_ids and document_ids for batch fetching
     chunk_ids = [m["chunk_id"] for m in memories if m["chunk_id"]]
     doc_ids_from_chunks: set[str] = set()
@@ -705,6 +729,8 @@ async def tool_expand(
                 "context": truncate_context_for_prompt(memory["context"]),
             },
         }
+        if str(memory["id"]) in annotations:
+            item["memory"]["lifecycle"] = annotations[str(memory["id"])]
 
         if memory["id"] in withheld_ids:
             # Said outright so the agent stops asking, rather than retrying a depth that will

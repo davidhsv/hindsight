@@ -180,8 +180,123 @@ Expected output:
 - Return `{{"creates": [], "updates": [], "deletes": []}}` if nothing durable is found."""
 
 
+# --------------------------------------------------------------------------- lifecycle variant
+#
+# Adaptive memory in ``lifecycle`` mode keeps retired beliefs as history instead of rewriting or
+# deleting them, so the parts of the prompt that mandate an in-place rewrite (rules 4, 7 and 10,
+# Examples 2 and 3, the ``deletes`` field rule) and the note that lets a MISSION override the
+# output format are replaced, and the pool's lifecycle fields are described. Built by exact
+# replacement of the base text, so the base prompt above stays byte-identical for every other
+# mode, and a base edit that moves one of these passages fails at import instead of silently
+# shipping a variant that still carries the old rule.
+
+
+def _span(text: str, start: str, end: str) -> str:
+    """The passage of ``text`` from ``start`` up to (not including) ``end``."""
+    return text[text.index(start) : text.index(end)]
+
+
+def _replaced(text: str, *replacements: tuple[str, str]) -> str:
+    """``text`` with each ``(old, new)`` applied; each ``old`` must occur exactly once."""
+    for old, new in replacements:
+        if text.count(old) != 1:
+            raise RuntimeError(f"lifecycle consolidation prompt: expected exactly one {old[:60]!r} in the base prompt")
+        text = text.replace(old, new)
+    return text
+
+
+_LIFECYCLE_MISSION_PRIORITY_NOTE = (
+    "If anything in this MISSION conflicts with the PROCESSING RULES, "
+    "DECISION GUIDE, or OUTPUT FORMAT below, the MISSION takes priority — except for the lifecycle "
+    "labels (`relation`, `supersedes`, `refutes`, `refines`, `conflicts_with`, `split_from`, "
+    "`retires_source_ids`, `keeps_source_ids`): the MISSION decides what an observation says, never "
+    "whether a change is labelled. A MISSION that asks to update an observation in place is followed by "
+    "labelling that update."
+)
+
+_LIFECYCLE_RULE_4 = """4. STATE CHANGES — LABEL THE UPDATE: when a fact changes the state of something an existing observation records ("sold X", "X died", "moved to Y", "upgraded to Z"), emit the UPDATE of that observation you would emit anyway, with `text` written as the current state, and set `relation: "supersedes"` — or `relation: "refutes"` when the fact shows the earlier claim was wrong rather than changed. Cite in `source_fact_ids` only the facts that show the new state. The label keeps the old observation as history and stores the update as its successor, so never fold "earlier X, now Y" into one sentence. Instead of the labelled UPDATE you may CREATE the new state with `supersedes` (or `refutes`) naming the old observation. Include dates when available. Keep it concise — only information about THAT specific facet. Do NOT pull in information from other observations — each observation stays focused on its own facet."""
+
+_LIFECYCLE_RULE_7 = """7. PRESERVE HISTORY: never DELETE an observation to retire it. A belief that stopped being true is labelled `supersedes`, one that was wrong `refutes`, and both stay on record as history. `deletes` are for merging duplicates only: an observation that restates another one is deleted with `merged_into` naming the observation that keeps the content."""
+
+_LIFECYCLE_RULE_10 = """10. RECENCY IS `mentioned_at`, NOT ARRIVAL ORDER: facts can arrive out of order. Before a fact changes an observation, compare their `mentioned_at`. A fact stated EARLIER than the observation is older news: it never supersedes or refutes a newer observation. A new fact that restates an observation whose `status` is `superseded` or `refuted` is old news too: attach it to that observation with an UPDATE that copies its `text` unchanged and sets `relation: "historical"`, and do nothing else with it. When facts contradict an observation and neither side clearly wins (no later statement, no correction), CREATE the new claim with `conflicts_with` naming that observation instead of choosing one."""
+
+_LIFECYCLE_OBSERVATION_FIELDS = """- `id`: unique identifier — copy this exactly when issuing an UPDATE or DELETE, or when naming the observation in a lifecycle label
+- `text`: the observation content
+- `proof_count`: how many source facts this observation has already merged
+- `status`: `active`; `uncertain` (contested by conflicting evidence); `superseded` (no longer true); or `refuted` (shown to be wrong). Superseded and refuted observations are history, shown so that a fact restating one is recognised as old news
+- `successor`: on a superseded or refuted observation, the `id` of the observation that replaced it
+- `retirable`: false when the observation may not be retired or split — it is already history, or it belongs to a different scope than the new facts
+- `occurred_start` / `occurred_end`: the span of the events behind the observation — earliest start and latest end across its source facts
+- `mentioned_at`: the latest of the `mentioned_at` values of its source facts — the most recent point at which this observation was stated
+- `source_memories`: the supporting facts behind this observation. May be partial or absent for large observations — the count above remains the true total. Each entry carries the same `text` and temporal fields as a new fact, plus:
+  - `id`: on a retirable observation, the supporting fact's identifier — copy it into `retires_source_ids` / `keeps_source_ids`
+  - `context`: optional surrounding context for that fact"""
+
+_LIFECYCLE_EXAMPLE_2_AND_3 = """### Example 2 — A state change is a labelled UPDATE (note `relation`); an unrelated fact creates a new one
+
+Input facts:
+  [c3d4e5f6-a7b8-9012-cdef-123456789012] Alice sold her Honda Civic on March 15, 2025. (occurred_start=2025-03-15, mentioned_at=2025-03-20)
+  [d4e5f6a7-b8c9-0123-defa-234567890123] Alice mentioned she works long hours, often past midnight. (occurred_start=2025-03-20, mentioned_at=2025-03-20)
+
+Existing observation:
+  {{"id": "22222222-2222-2222-2222-222222222222", "text": "Alice owns a 2019 Honda Civic.", "proof_count": 2, "status": "active", "retirable": true}}
+
+Expected output (a labelled UPDATE for the state change, which keeps the ownership on record as history; CREATE for the unrelated work-hours facet):
+
+{{"creates": [{{"text": "Alice works long hours, often past midnight.", "source_fact_ids": ["d4e5f6a7-b8c9-0123-defa-234567890123"], "reason": "Work-hours is a distinct facet; no existing observation covers it, so CREATE."}}],
+  "updates": [{{"text": "Alice sold her 2019 Honda Civic on March 15, 2025.", "observation_id": "22222222-2222-2222-2222-222222222222", "source_fact_ids": ["c3d4e5f6-a7b8-9012-cdef-123456789012"], "reason": "State change to the Honda Civic observation 2222 — labelled so the ownership stays on record.", "relation": "supersedes"}}],
+  "deletes": []}}
+
+### Example 3 — A correction refutes two observations (note `refutes`); an old restatement of a superseded observation is attached as history (note `relation: "historical"`)
+
+Input facts:
+  [e5f6a7b8-c9d0-1234-efab-345678901234] Bob confirmed he was never on the beta waitlist; he has used open signup since June 2025. (occurred_start=2025-06-02, mentioned_at=2025-06-02)
+  [f6a7b8c9-d0e1-2345-fabc-456789012345] Bob said he runs the legacy CLI. (mentioned_at=2025-01-10)
+
+Existing observations:
+  {{"id": "33333333-3333-3333-3333-333333333333", "text": "Bob is on the beta waitlist.", "proof_count": 1, "status": "active", "retirable": true}}
+  {{"id": "44444444-4444-4444-4444-444444444444", "text": "Bob is waiting on the beta waitlist for an invite.", "proof_count": 1, "status": "active", "retirable": true}}
+  {{"id": "55555555-5555-5555-5555-555555555555", "text": "Bob runs the legacy CLI.", "proof_count": 2, "status": "superseded", "successor": "66666666-6666-6666-6666-666666666666", "retirable": false}}
+  {{"id": "66666666-6666-6666-6666-666666666666", "text": "Bob runs the new web console.", "proof_count": 1, "status": "active", "retirable": true}}
+
+Expected output:
+
+{{"creates": [{{"text": "Bob has used the product through open signup since June 2025; he was never on the beta waitlist.", "source_fact_ids": ["e5f6a7b8-c9d0-1234-efab-345678901234"], "reason": "Correction: both waitlist observations were wrong, so the new observation refutes them.", "refutes": ["33333333-3333-3333-3333-333333333333", "44444444-4444-4444-4444-444444444444"]}}],
+  "updates": [{{"text": "Bob runs the legacy CLI.", "observation_id": "55555555-5555-5555-5555-555555555555", "source_fact_ids": ["f6a7b8c9-d0e1-2345-fabc-456789012345"], "reason": "Restates the superseded CLI observation 5555 — old news, attached to it as history.", "relation": "historical"}}],
+  "deletes": []}}
+
+"""
+
+_LIFECYCLE_FIELD_RULES = """- `deletes`: only to merge duplicates — an observation whose content another observation already carries. Set `merged_into` to that observation's `id`. Every entry MUST carry `observation_id` — the EXACT `id` UUID string of the observation, copied from existing observations, exactly as an UPDATE does. A delete entry without it names no target and is rejected, and rejecting it discards the whole response — the creates and updates alongside it included. Never delete an observation to retire it: label the retirement instead.
+- `relation` (updates): `"supersedes"` when the update's facts show the observation's state changed, `"refutes"` when they show it was wrong, `"historical"` when an older fact restates an observation whose `status` is superseded or refuted. Leave it null for an ordinary update. A `supersedes` or `refutes` update keeps the old observation as history and stores `text` as its successor.
+- `supersedes` / `refutes` (creates): ids of existing observations the new observation replaces (their state changed) or corrects (they were wrong).
+- `refines` (creates): ids of existing observations the new one adds detail to while they stay true.
+- `conflicts_with` (creates): ids of existing observations the new one contradicts when neither clearly wins.
+- `split_from` (creates): two or more creates naming the same `split_from` split that observation into separate facets, one facet per create.
+- `retires_source_ids` / `keeps_source_ids`: `id`s from the replaced observation's `source_memories`. `retires_source_ids` names the supporting facts that are no longer true; leave it empty to retire every supporting fact this response does not cite again. `keeps_source_ids` names supporting facts that stay true; they carry over to the successor.
+- Only an observation with `"retirable": true` may be named in `supersedes`, `refutes`, `split_from` or `conflicts_with`, or carry a `supersedes` / `refutes` `relation`. Never retire an observation from another scope, and never give one observation two different successors in one response.
+"""
+
+_LIFECYCLE_PROCESSING_RULES = _replaced(
+    _PROCESSING_RULES,
+    (_span(_PROCESSING_RULES, "4. STATE CHANGES", "\n\n5. "), _LIFECYCLE_RULE_4),
+    (_span(_PROCESSING_RULES, "7. PRESERVE HISTORY", "\n\n8. "), _LIFECYCLE_RULE_7),
+    (_span(_PROCESSING_RULES, "10. RECENCY", "\n\n11. "), _LIFECYCLE_RULE_10),
+)
+
+_LIFECYCLE_INPUT_FORMAT_NOTE = _replaced(_INPUT_FORMAT_NOTE, (_OBSERVATION_FIELDS, _LIFECYCLE_OBSERVATION_FIELDS))
+
+_LIFECYCLE_OUTPUT_SECTION = _replaced(
+    _OUTPUT_SECTION,
+    (_span(_OUTPUT_SECTION, "### Example 2", "### Observation text rules"), _LIFECYCLE_EXAMPLE_2_AND_3),
+    (_span(_OUTPUT_SECTION, "- `deletes`: only when", "- `reason`: REQUIRED"), _LIFECYCLE_FIELD_RULES),
+)
+
+
 def build_consolidation_system_prompt(
     llm_output_language: str | None = None,
+    *,
+    lifecycle: bool = False,
 ) -> str:
     """Bank-agnostic, cacheable system instruction for batch consolidation.
 
@@ -198,17 +313,23 @@ def build_consolidation_system_prompt(
     ``llm_output_language`` picks between two mutually exclusive language rules:
     unset keeps each observation in the language of its own source facts (the
     default), set forces every observation into that one configured language.
+
+    ``lifecycle`` (adaptive memory in lifecycle mode) returns the lifecycle variant: state changes
+    and corrections are labelled instead of rewritten in place, deletes only merge duplicates, and
+    the pool's ``status`` / ``successor`` / ``retirable`` fields are described. It is a second
+    cached prefix; every other mode gets the base prompt byte for byte.
     """
     language_section = default_language_section(_DEFAULT_LANGUAGE_RULE, llm_output_language)
     template = (
         "You are a memory consolidation system. Synthesize new facts into "
         "observations, merging with existing observations when appropriate.\n\n"
-        f"{_MISSION_PRIORITY_NOTE}\n\n"
+        f"{_LIFECYCLE_MISSION_PRIORITY_NOTE if lifecycle else _MISSION_PRIORITY_NOTE}\n\n"
         f"{language_section}"
-        f"{_PROCESSING_RULES}\n\n"
-        f"{_INPUT_FORMAT_NOTE}\n\n"
+        f"{_LIFECYCLE_PROCESSING_RULES if lifecycle else _PROCESSING_RULES}\n\n"
+        f"{_LIFECYCLE_INPUT_FORMAT_NOTE if lifecycle else _INPUT_FORMAT_NOTE}\n\n"
         f"{_DECISION_GUIDE}\n\n"
-        f"{_OUTPUT_SECTION}" + output_language_directive(llm_output_language)
+        f"{_LIFECYCLE_OUTPUT_SECTION if lifecycle else _OUTPUT_SECTION}"
+        + output_language_directive(llm_output_language)
     )
     # No {facts_text}/{observations_text} placeholders here — the only braces are
     # the doubled {{ }} in the OUTPUT examples, which .format() unescapes.

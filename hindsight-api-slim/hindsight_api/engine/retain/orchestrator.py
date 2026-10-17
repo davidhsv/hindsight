@@ -711,6 +711,35 @@ async def _apply_retain_retention_policies(
     )
 
 
+async def _carry_reingest_forward(
+    conn,
+    bank_id: str,
+    reingest: "fact_storage.ReingestCarry | None",
+    result_unit_ids: list[list[str]],
+    *,
+    final: bool,
+    config,
+) -> None:
+    """Hand a re-ingest's freshly inserted facts to the store's carry-forward (DESIGN.md §7).
+
+    In the transaction that inserted them, so a fact's carried claim, retention and the evidence other
+    claims re-point at it commit with the fact itself. A no-op when the outgoing facts carried nothing.
+    """
+    if reingest is None or reingest.stash is None or reingest.finished:
+        return
+    from ..memories import get_memories
+
+    await get_memories().carry_forward_reingest(
+        conn,
+        bank_id=bank_id,
+        stash=reingest.stash,
+        new_unit_ids=[unit_id for ids in result_unit_ids for unit_id in ids],
+        final=final,
+        now=adaptive_clock.utcnow(),
+        settings=write_settings(config, bank_id=bank_id),
+    )
+
+
 async def _pre_resolve_phase1(
     pool: Any,
     entity_resolver,
@@ -2778,6 +2807,10 @@ async def _streaming_retain_batch(
     # the insert). A post-loop fallback fires the callback in those cases, so this
     # flag exists to guarantee the callback fires exactly once.
     outbox_fired = [False]
+    # The outgoing version's lifecycle state, stashed by the first batch's document tracking and
+    # carried onto the facts each batch inserts; the last batch (or the closing call after the
+    # pipeline) reverts what no batch re-extracted.
+    reingest_carry = fact_storage.ReingestCarry()
 
     # ---------------------------------------------------------------------------
     # Producer-consumer pipeline: LLM extraction runs concurrently with DB writes
@@ -3390,6 +3423,7 @@ async def _streaming_retain_batch(
                                 ops=pool.ops,
                                 store_document_text=config.store_document_text,
                                 attachment_filenames=_attachment_filenames_for(contents),
+                                reingest=reingest_carry,
                             )
                             log_buffer.append(f"[streaming] Document {effective_doc_id} tracked (full content)")
                         doc_tracking_done[0] = True
@@ -3463,8 +3497,13 @@ async def _streaming_retain_batch(
                         outbox_callback=outbox_callback if is_last else None,
                         ops=pool.ops,
                     )
+                    await _carry_reingest_forward(
+                        conn, bank_id, reingest_carry, batch_result_ids, final=is_last, config=config
+                    )
 
                 logger.info(f"[streaming] Phase 2 (write transaction): {time.perf_counter() - p2_start:.3f}s")
+                if is_last and reingest_carry.stash is not None:
+                    reingest_carry.finished = True
 
                 # The write TXN above committed the transactional-outbox row in the
                 # same transaction as this batch's facts. Record it so the post-loop
@@ -3645,6 +3684,15 @@ async def _streaming_retain_batch(
                         # read again — release the per-document text now.
                         combined_content = ""
                         log_buffer.append(f"[streaming] Document {effective_doc_id} tracked (no facts extracted)")
+
+        # The last batch carried nothing forward (it extracted no facts, or the committed-chunk
+        # count landed on a batch boundary): close the re-ingest's carry-forward on its own, so
+        # the claims whose evidence no batch re-extracted are reverted.
+        if reingest_carry.stash is not None and not reingest_carry.finished and not pipeline_aborted[0]:
+            async with acquire_with_retry(pool) as conn:
+                async with conn.transaction():
+                    await _carry_reingest_forward(conn, bank_id, reingest_carry, [], final=True, config=config)
+            reingest_carry.finished = True
 
         # Transactional-outbox fallback. The in-TXN fire only runs on a final
         # facts-bearing batch (is_last=True). When the committed-chunk count lands
@@ -4255,8 +4303,14 @@ async def _try_delta_retain(
                     for idx in changed_indices + removed_indices
                     if idx in existing_by_index
                 ]
+                reingest_carry = fact_storage.ReingestCarry()
                 invalidated_obs = await chunk_storage.delete_chunks_by_ids(
-                    conn, chunks_to_delete, bank_id, ops=pool.ops
+                    conn,
+                    chunks_to_delete,
+                    bank_id,
+                    ops=pool.ops,
+                    document_id=effective_doc_id,
+                    reingest=reingest_carry,
                 )
                 log_buffer.append(
                     f"  Deleted {len(chunks_to_delete)} chunks "
@@ -4339,6 +4393,7 @@ async def _try_delta_retain(
                     outbox_callback=outbox_callback,
                     ops=pool.ops,
                 )
+                await _carry_reingest_forward(conn, bank_id, reingest_carry, result_unit_ids, final=True, config=config)
 
             total_time = time.perf_counter() - start_time
             log_buffer.append(f"{'=' * 60}")

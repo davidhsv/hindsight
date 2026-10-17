@@ -620,6 +620,10 @@ export class ControlPlaneClient {
     };
     /** Window for the temporal retrieval arm, used instead of extracting dates from the query text. Ranks memories dated inside it higher; does not drop memories dated outside it. */
     temporal_window?: { start: string; end: string };
+    /** Adaptive memory lifecycle mode only: 'current' leaves out superseded and refuted memories; 'historical' also returns superseded ones, annotated. Omitted: the bank's default view. */
+    lifecycle_view?: "current" | "historical";
+    /** Adaptive memory lifecycle mode only: show memories as they stood at this instant (ISO 8601). Wins over lifecycle_view. */
+    as_of?: string;
   }) {
     return this.fetchApi("/api/recall", {
       method: "POST",

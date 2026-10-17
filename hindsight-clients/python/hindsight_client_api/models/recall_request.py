@@ -17,6 +17,7 @@ import pprint
 import re  # noqa: F401
 import json
 
+from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
 from typing import Any, ClassVar, Dict, List, Optional
 from hindsight_client_api.models.budget import Budget
@@ -44,7 +45,9 @@ class RecallRequest(BaseModel):
     tag_groups: Optional[List[MentalModelTriggerInputTagGroupsInner]] = None
     min_scores: Optional[MinScores] = None
     temporal_window: Optional[TemporalWindow] = None
-    __properties: ClassVar[List[str]] = ["query", "types", "prefer_observations", "budget", "max_tokens", "trace", "query_timestamp", "include", "tags", "tags_match", "tag_groups", "min_scores", "temporal_window"]
+    lifecycle_view: Optional[StrictStr] = None
+    as_of: Optional[datetime] = None
+    __properties: ClassVar[List[str]] = ["query", "types", "prefer_observations", "budget", "max_tokens", "trace", "query_timestamp", "include", "tags", "tags_match", "tag_groups", "min_scores", "temporal_window", "lifecycle_view", "as_of"]
 
     @field_validator('tags_match')
     def tags_match_validate_enum(cls, value):
@@ -54,6 +57,16 @@ class RecallRequest(BaseModel):
 
         if value not in set(['any', 'all', 'any_strict', 'all_strict', 'exact']):
             raise ValueError("must be one of enum values ('any', 'all', 'any_strict', 'all_strict', 'exact')")
+        return value
+
+    @field_validator('lifecycle_view')
+    def lifecycle_view_validate_enum(cls, value):
+        """Validates the enum"""
+        if value is None:
+            return value
+
+        if value not in set(['current', 'historical']):
+            raise ValueError("must be one of enum values ('current', 'historical')")
         return value
 
     model_config = ConfigDict(
@@ -146,6 +159,16 @@ class RecallRequest(BaseModel):
         if self.temporal_window is None and "temporal_window" in self.model_fields_set:
             _dict['temporal_window'] = None
 
+        # set to None if lifecycle_view (nullable) is None
+        # and model_fields_set contains the field
+        if self.lifecycle_view is None and "lifecycle_view" in self.model_fields_set:
+            _dict['lifecycle_view'] = None
+
+        # set to None if as_of (nullable) is None
+        # and model_fields_set contains the field
+        if self.as_of is None and "as_of" in self.model_fields_set:
+            _dict['as_of'] = None
+
         return _dict
 
     @classmethod
@@ -170,7 +193,9 @@ class RecallRequest(BaseModel):
             "tags_match": obj.get("tags_match") if obj.get("tags_match") is not None else 'any',
             "tag_groups": [MentalModelTriggerInputTagGroupsInner.from_dict(_item) for _item in obj["tag_groups"]] if obj.get("tag_groups") is not None else None,
             "min_scores": MinScores.from_dict(obj["min_scores"]) if obj.get("min_scores") is not None else None,
-            "temporal_window": TemporalWindow.from_dict(obj["temporal_window"]) if obj.get("temporal_window") is not None else None
+            "temporal_window": TemporalWindow.from_dict(obj["temporal_window"]) if obj.get("temporal_window") is not None else None,
+            "lifecycle_view": obj.get("lifecycle_view"),
+            "as_of": obj.get("as_of")
         })
         return _obj
 

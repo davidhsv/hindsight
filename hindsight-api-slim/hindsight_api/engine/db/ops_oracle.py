@@ -16,6 +16,7 @@ from .ops import (
     RETENTION_STATE_COLUMNS,
     ClaimedOperations,
     DataAccessOps,
+    LifecycleRelationRow,
     LinkExpansionRows,
     ReinforcementEventRow,
     ReinforcementKey,
@@ -1882,3 +1883,221 @@ class OracleOps(DataAccessOps):
                 for r in sorted(rows, key=lambda r: str(r.memory_id))
             ],
         )
+
+    # -- Claim lifecycle ---------------------------------------------------
+
+    async def _lock_live_parents(
+        self,
+        conn: DatabaseConnection,
+        *,
+        units_table: str,
+        bank_id: str,
+        ids: Sequence[uuid_mod.UUID],
+        skip_locked: bool,
+    ) -> list[uuid_mod.UUID]:
+        """Sorted per-row parent locks (DESIGN.md §3); the ids that are live and now locked."""
+        live: list[uuid_mod.UUID] = []
+        for memory_id in sorted(set(ids)):
+            row = await conn.fetchrow(
+                f"SELECT id FROM {units_table} WHERE id = $1 AND bank_id = $2 "
+                f"FOR UPDATE{' SKIP LOCKED' if skip_locked else ''}",
+                memory_id,
+                bank_id,
+            )
+            if row is not None:
+                live.append(memory_id)
+        return live
+
+    async def upsert_default_claim_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        claims_table: str,
+        units_table: str,
+        bank_id: str,
+        memory_ids: Sequence[uuid_mod.UUID],
+        now: datetime,
+        skip_locked: bool,
+    ) -> list[str]:
+        from ..db_utils import retry_with_backoff
+
+        ids = sorted(set(memory_ids))
+        if not ids:
+            return []
+
+        async def _lock() -> list[str]:
+            # One savepoint per attempt, as in upsert_default_retention_state: ORA-00060 rolls back
+            # only the failing statement, so a retry must first release what this attempt locked.
+            async with conn.transaction():
+                present = await self._lock_live_parents(
+                    conn, units_table=units_table, bank_id=bank_id, ids=ids, skip_locked=skip_locked
+                )
+                if not present:
+                    return []
+                existing: set[str] = set()
+                for start in range(0, len(present), ORACLE_IN_LIST_LIMIT):
+                    for row in await conn.fetch(
+                        f"SELECT memory_id FROM {claims_table} WHERE memory_id = ANY($1::uuid[])",
+                        present[start : start + ORACLE_IN_LIST_LIMIT],
+                    ):
+                        existing.add(str(row["memory_id"]))
+                new_rows = [(m, bank_id, "active", now, now) for m in present if str(m) not in existing]
+                if new_rows:
+                    await conn.executemany(
+                        f"INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX({claims_table}, pk_memory_claim_state) */ "
+                        f"INTO {claims_table} (memory_id, bank_id, truth_status, created_at, updated_at) "
+                        f"VALUES ($1, $2, $3, $4, $5)",
+                        new_rows,
+                    )
+                locked: list[str] = []
+                for memory_id in present:
+                    row = await conn.fetchrow(
+                        f"SELECT memory_id FROM {claims_table} WHERE memory_id = $1 AND bank_id = $2 FOR UPDATE",
+                        memory_id,
+                        bank_id,
+                    )
+                    if row is not None:
+                        locked.append(str(row["memory_id"]))
+                return locked
+
+        return await retry_with_backoff(_lock)
+
+    async def insert_claim_evidence(
+        self,
+        conn: DatabaseConnection,
+        *,
+        evidence_table: str,
+        units_table: str,
+        bank_id: str,
+        pairs: Sequence[tuple[uuid_mod.UUID, uuid_mod.UUID]],
+        now: datetime,
+    ) -> int:
+        ordered = sorted(set(pairs))
+        if not ordered:
+            return 0
+        live = set(
+            await self._lock_live_parents(
+                conn,
+                units_table=units_table,
+                bank_id=bank_id,
+                ids=[m for pair in ordered for m in pair],
+                skip_locked=True,
+            )
+        )
+        wanted = [p for p in ordered if p[0] in live and p[1] in live]
+        if not wanted:
+            return 0
+        holders = sorted({p[0] for p in wanted})
+        existing: set[tuple[str, str]] = set()
+        for start in range(0, len(holders), ORACLE_IN_LIST_LIMIT):
+            for row in await conn.fetch(
+                f"SELECT memory_id, evidence_memory_id FROM {evidence_table} WHERE memory_id = ANY($1::uuid[])",
+                holders[start : start + ORACLE_IN_LIST_LIMIT],
+            ):
+                existing.add((str(row["memory_id"]), str(row["evidence_memory_id"])))
+        new_rows = [(m, e, bank_id, now) for m, e in wanted if (str(m), str(e)) not in existing]
+        if new_rows:
+            await conn.executemany(
+                f"INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX({evidence_table}, pk_memory_claim_evidence) */ "
+                f"INTO {evidence_table} (memory_id, evidence_memory_id, bank_id, created_at) VALUES ($1, $2, $3, $4)",
+                new_rows,
+            )
+        return len(new_rows)
+
+    async def insert_lifecycle_relation(
+        self, conn: DatabaseConnection, *, table: str, row: LifecycleRelationRow
+    ) -> bool:
+        await conn.execute(
+            f"INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX({table}, uq_mlr_edge) */ INTO {table} "
+            f"(id, bank_id, relation_type, source_memory_id, target_memory_id, source_snapshot, target_snapshot, "
+            f"origin, reason, confidence, evidence, created_at) "
+            f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            row.id,
+            row.bank_id,
+            row.relation_type,
+            row.source_memory_id,
+            row.target_memory_id,
+            row.source_snapshot,
+            row.target_snapshot,
+            row.origin,
+            row.reason,
+            row.confidence,
+            row.evidence,
+            row.created_at,
+        )
+        # No RETURNING from a dup-suppressed insert: re-select the id this call minted.
+        return await conn.fetchrow(f"SELECT id FROM {table} WHERE id = $1", row.id) is not None
+
+    async def lock_relations_for_delete(
+        self, conn: DatabaseConnection, *, table: str, bank_id: str, unit_ids: Sequence[uuid_mod.UUID]
+    ) -> None:
+        from ..db_utils import retry_with_backoff
+
+        ids = sorted(set(unit_ids))
+        if not ids:
+            return
+        found: dict[str, tuple[str, str, str]] = {}
+        for start in range(0, len(ids), ORACLE_IN_LIST_LIMIT):
+            chunk = ids[start : start + ORACLE_IN_LIST_LIMIT]
+            for column in ("source_memory_id", "target_memory_id"):
+                for row in await conn.fetch(
+                    f"SELECT id, source_memory_id, target_memory_id, relation_type FROM {table} "
+                    f"WHERE bank_id = $1 AND {column} = ANY($2::uuid[])",
+                    bank_id,
+                    chunk,
+                ):
+                    ends = sorted(str(v) for v in (row["source_memory_id"], row["target_memory_id"]) if v is not None)
+                    found[str(row["id"])] = (ends[0] if ends else "", ends[-1] if ends else "", row["relation_type"])
+        if not found:
+            return
+        # PostgreSQL's order: LEAST/GREATEST of the endpoints (NULL ignored), type, id. Oracle takes the
+        # locks one row at a time in that order, because its FOR UPDATE does not lock in ORDER BY order.
+        order = sorted(found, key=lambda rid: (*found[rid], rid))
+
+        async def _lock() -> None:
+            async with conn.transaction():
+                for relation_id in order:
+                    await conn.fetchrow(f"SELECT id FROM {table} WHERE id = $1 FOR UPDATE", uuid_mod.UUID(relation_id))
+
+        await retry_with_backoff(_lock)
+
+    async def upsert_claim_shadow(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        units_table: str,
+        bank_id: str,
+        memory_id: uuid_mod.UUID,
+        would_status: str,
+        deciding_snapshot: str,
+        evidence_ids: str,
+        now: datetime,
+    ) -> bool:
+        if not await self._lock_live_parents(
+            conn, units_table=units_table, bank_id=bank_id, ids=[memory_id], skip_locked=True
+        ):
+            return False
+        status = await conn.execute(
+            f"UPDATE {table} SET would_status = $1, deciding_snapshot = $2, evidence_ids = $3, created_at = $4 "
+            f"WHERE memory_id = $5 AND bank_id = $6",
+            would_status,
+            deciding_snapshot,
+            evidence_ids,
+            now,
+            memory_id,
+            bank_id,
+        )
+        if status.split()[-1] == "0":
+            await conn.execute(
+                f"INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX({table}, pk_memory_claim_shadow) */ INTO {table} "
+                f"(memory_id, bank_id, would_status, deciding_snapshot, evidence_ids, created_at) "
+                f"VALUES ($1, $2, $3, $4, $5, $6)",
+                memory_id,
+                bank_id,
+                would_status,
+                deciding_snapshot,
+                evidence_ids,
+                now,
+            )
+        return True

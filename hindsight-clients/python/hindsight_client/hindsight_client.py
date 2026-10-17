@@ -667,6 +667,8 @@ class Hindsight:
         prefer_observations: bool | None = None,
         min_scores: dict[str, float] | None = None,
         temporal_window: dict[str, Any] | None = None,
+        lifecycle_view: Literal["current", "historical"] | None = None,
+        as_of: datetime | None = None,
     ) -> RecallResponse:
         """
         Recall memories using semantic similarity (sync wrapper — prefer :meth:`arecall` in async code).
@@ -705,6 +707,13 @@ class Hindsight:
                 memories dated inside the window higher; it does **not** drop memories dated outside
                 it, so it is not a way to restrict results to a period. Ignored when the bank has
                 temporal retrieval disabled.
+            lifecycle_view: Which memories to show when the bank's adaptive memory mode is
+                ``lifecycle`` (ignored otherwise): ``"current"`` leaves out superseded and refuted
+                memories; ``"historical"`` also returns superseded ones, each with a ``lifecycle``
+                annotation. ``None`` (default) uses the bank's ``adaptive_memory_default_view``.
+            as_of: Show memories as they stood at this instant (a naive datetime means UTC),
+                lifecycle mode only: a memory is returned only if its claim was valid then.
+                Takes precedence over ``lifecycle_view``; does not change ranking.
 
         Returns:
             RecallResponse with results, optional entities, optional chunks, optional source_facts, and optional trace
@@ -730,6 +739,8 @@ class Hindsight:
                 prefer_observations=prefer_observations,
                 min_scores=min_scores,
                 temporal_window=temporal_window,
+                lifecycle_view=lifecycle_view,
+                as_of=as_of,
             )
         )
 
@@ -988,9 +999,13 @@ class Hindsight:
         importance: float | None = None,
         forgetting_exempt: bool | None = None,
         exemption_reason: str | None = None,
+        truth_status: Literal["active", "uncertain", "superseded", "refuted"] | None = None,
+        superseded_by: str | None = None,
+        reason: str | None = None,
     ) -> MemoryLifecycle:
         """
-        Change how a memory is retained (sync wrapper — prefer :meth:`aupdate_memory_lifecycle` in async code).
+        Change how a memory is retained, or what should be believed about it (sync wrapper — prefer
+        :meth:`aupdate_memory_lifecycle` in async code).
 
         See :meth:`aupdate_memory_lifecycle` for the full argument and return documentation.
         """
@@ -1001,6 +1016,9 @@ class Hindsight:
                 importance=importance,
                 forgetting_exempt=forgetting_exempt,
                 exemption_reason=exemption_reason,
+                truth_status=truth_status,
+                superseded_by=superseded_by,
+                reason=reason,
             )
         )
 
@@ -1011,13 +1029,18 @@ class Hindsight:
         importance: float | None = None,
         forgetting_exempt: bool | None = None,
         exemption_reason: str | None = None,
+        truth_status: Literal["active", "uncertain", "superseded", "refuted"] | None = None,
+        superseded_by: str | None = None,
+        reason: str | None = None,
     ) -> MemoryLifecycle:
         """
-        Change how a memory is retained (async — preferred over :meth:`update_memory_lifecycle`).
+        Change how a memory is retained, or what should be believed about it (async — preferred over
+        :meth:`update_memory_lifecycle`).
 
-        Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle'; the server answers 409
-        otherwise, and 404 for a memory that is missing or invalidated. Omitted arguments leave
-        that setting as it is; at least one must be given.
+        The retention arguments need the bank's adaptive memory mode to be 'rank' or 'lifecycle',
+        the truth arguments 'lifecycle'; the server answers 409 otherwise (and when retiring a
+        memory that is already retired), and 404 for a memory that is missing or invalidated.
+        Omitted arguments leave that setting as it is; at least one must be given.
 
         Args:
             bank_id: The memory bank ID
@@ -1027,6 +1050,13 @@ class Hindsight:
             forgetting_exempt: True exempts the memory from retention decay; False lifts the
                 exemption and clears its reason.
             exemption_reason: Why the memory is exempt.
+            truth_status: ``"superseded"`` or ``"refuted"`` retires the memory from current recall
+                (an observation's source facts inherit the status; a fact's observations are
+                rebuilt from their other sources); ``"active"`` restores it; ``"uncertain"`` marks
+                it contested.
+            superseded_by: With ``"superseded"``/``"refuted"``, the memory that replaces this one:
+                a different live memory of the same bank with exactly the same tags.
+            reason: Why the truth status changed; recorded on the claim.
 
         Returns:
             MemoryLifecycle: the memory's lifecycle view after the change (the same view
@@ -1041,6 +1071,9 @@ class Hindsight:
                     "importance": importance,
                     "forgetting_exempt": forgetting_exempt,
                     "exemption_reason": exemption_reason,
+                    "truth_status": truth_status,
+                    "superseded_by": superseded_by,
+                    "reason": reason,
                 }.items()
                 if value is not None
             }
@@ -1495,6 +1528,8 @@ class Hindsight:
         prefer_observations: bool | None = None,
         min_scores: dict[str, float] | None = None,
         temporal_window: dict[str, Any] | None = None,
+        lifecycle_view: Literal["current", "historical"] | None = None,
+        as_of: datetime | None = None,
     ) -> RecallResponse:
         """
         Recall memories using semantic similarity (async — preferred over :meth:`recall`).
@@ -1538,6 +1573,13 @@ class Hindsight:
                 memories dated inside the window higher; it does **not** drop memories dated outside
                 it, so it is not a way to restrict results to a period. Ignored when the bank has
                 temporal retrieval disabled.
+            lifecycle_view: Which memories to show when the bank's adaptive memory mode is
+                ``lifecycle`` (ignored otherwise): ``"current"`` leaves out superseded and refuted
+                memories; ``"historical"`` also returns superseded ones, each with a ``lifecycle``
+                annotation. ``None`` (default) uses the bank's ``adaptive_memory_default_view``.
+            as_of: Show memories as they stood at this instant (a naive datetime means UTC),
+                lifecycle mode only: a memory is returned only if its claim was valid then.
+                Takes precedence over ``lifecycle_view``; does not change ranking.
 
         Returns:
             RecallResponse with results, optional entities, optional chunks, optional source_facts, and optional trace
@@ -1604,6 +1646,8 @@ class Hindsight:
             tag_groups=tag_groups_objs,
             min_scores=min_scores_obj,
             temporal_window=temporal_window_obj,
+            lifecycle_view=lifecycle_view,
+            as_of=as_of,
         )
 
         return await _retry_on_capacity(
@@ -3353,7 +3397,7 @@ class Hindsight:
             adaptive_memory_mode: Adaptive memory mode: 'off' (default; recall is unchanged),
                 'observe' (compute retention and report it in traces and metrics only), 'rank'
                 (retention down-weights rarely reinforced memories) or 'lifecycle' (rank plus claim
-                lifecycle; the claim part is reserved for a later release).
+                lifecycle: superseded and refuted memories stop answering current recall).
             adaptive_memory_score_alpha: Weight of the retention factor in the final recall score,
                 in [0, 1] (0 = no decay).
             adaptive_memory_score_floor: Lowest retention factor a fully-forgotten memory can
@@ -3365,9 +3409,11 @@ class Hindsight:
             adaptive_memory_max_stability_days: Cap on a memory's stability in days (must be >=
                 adaptive_memory_base_stability_days).
             adaptive_memory_default_view: Lifecycle recall view when the request names none:
-                'current' (default) or 'historical' (reserved; takes effect in a later release).
+                'current' (default; superseded and refuted memories are left out) or 'historical'
+                (superseded ones are returned too, annotated).
             adaptive_memory_historical_cues: Detect historical phrasing in external recall queries
-                and switch them to a historical view (reserved; takes effect in a later release).
+                that name no view and answer them from the historical view (or as of the date).
+                Lifecycle mode only.
 
         Returns:
             dict with ``bank_id``, ``config`` (fully resolved), and ``overrides`` (bank-level only)

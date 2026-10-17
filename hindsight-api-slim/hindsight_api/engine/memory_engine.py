@@ -650,8 +650,11 @@ from enum import Enum
 
 from ..pg0 import EmbeddedPostgres, parse_pg0_url
 from .adaptive import clock as adaptive_clock
+from .adaptive.cues import detect_historical_cue
+from .adaptive.models import TruthStatus
 from .adaptive.producers import (
     BackgroundReinforcement,
+    mode_settings,
     recall_reinforcement_allowed,
     reflect_reinforcement_allowed,
     usage_events,
@@ -748,6 +751,15 @@ from .retain.attachment_content import (
 from .retain.fact_storage import _normalize_scopes
 from .retain.fold import FoldMemberRef
 from .retain.types import RetainBatchResult, RetainContentDict, merge_processed_content_tokens
+from .search.lifecycle_filter import (
+    NAMED_VIEWS as LIFECYCLE_NAMED_VIEWS,
+)
+from .search.lifecycle_filter import (
+    ClaimStateUnavailable,
+    filter_candidates_by_claims,
+    in_trim_order,
+    resolve_view,
+)
 from .search.reranking import CrossEncoderReranker, apply_combined_scoring
 from .search.tag_resolution import MAX_VOCABULARY, TagResolutionError, needs_resolution, resolve_tag_groups
 from .search.tags import (
@@ -765,8 +777,8 @@ from .search.tags import (
     tags_satisfy_groups,
     tags_writable,
 )
-from .search.trace import AdaptiveTraceInfo
-from .search.types import ScoredResult
+from .search.trace import AdaptiveTraceInfo, LifecycleFilteredResult, LifecycleTraceInfo
+from .search.types import MergedCandidate, ScoredResult
 from .source_facts import select_source_facts_within_budget
 from .source_scope import visible_document_ids
 from .task_backend import TaskBackend
@@ -2412,6 +2424,47 @@ def _confirmation_time(event_time: datetime | None, now: datetime) -> datetime:
     if event_time > now + _CONFIRM_CLOCK_SKEW:
         raise ValueError(f"event_time {event_time.isoformat()} is in the future.")
     return min(event_time, now)
+
+
+#: How long the ``reason`` an explicit truth change records may be (it is stored on the claim).
+_TRUTH_REASON_MAX_LENGTH = 500
+
+
+def _explicit_successor_error(target: "StoredMemory", successor: "StoredMemory") -> str | None:
+    """Why ``successor`` cannot replace ``target`` in an explicit truth change, or None.
+
+    The same deterministic rules consolidation's lifecycle actions are validated against: the two
+    are different memories of the same bank (both read from it), in the same scope (identical tag
+    sets, so a claim is never retired across scopes), and the successor is not itself built on the
+    memory it would retire (an observation citing it as a source).
+    """
+    if successor.unit_id == target.unit_id:
+        return "A memory cannot supersede itself."
+    if set(successor.tags or []) != set(target.tags or []):
+        return (
+            f"Memory '{successor.unit_id}' is in a different scope (tags {sorted(set(successor.tags or []))}) from "
+            f"memory '{target.unit_id}' (tags {sorted(set(target.tags or []))}); a claim is only replaced within its scope."
+        )
+    if target.unit_id in {str(s) for s in (successor.source_memory_ids or [])}:
+        return f"Memory '{successor.unit_id}' is built on memory '{target.unit_id}', so it cannot replace it."
+    return None
+
+
+def _claim_change_instant(memory: "StoredMemory") -> datetime | None:
+    """When a memory's own evidence says its state began: ``mentioned_at``, else its dates."""
+    return memory.mentioned_at or memory.occurred_start or memory.event_date
+
+
+@dataclass(frozen=True)
+class _ExplicitTruthChange:
+    """What one explicit truth change did, for the work that follows its commit."""
+
+    #: False when the memory was not live in the bank (the PATCH answers 404).
+    found: bool
+    #: Raw facts went back to the consolidation queue (a sweep's survivors, or a restored fact).
+    requeued: bool = False
+    #: The claim actually changed (False for a no-op, e.g. restoring a memory that is active).
+    changed: bool = False
 
 
 @dataclass(frozen=True)
@@ -9007,7 +9060,10 @@ class MemoryEngine(MemoryEngineInterface):
         _connection_budget: int | None = None,
         _quiet: bool = False,
         reranking: RecallReranking = "cross_encoder",
-        _reinforce_results: bool = False,
+        lifecycle_view: str | None = None,
+        as_of: datetime | None = None,
+        _external: bool = False,
+        _exclude_retired: bool = False,
     ) -> RecallResultModel:
         """
         Recall memories using N*4-way parallel retrieval (N fact types × 4 retrieval methods).
@@ -9055,11 +9111,27 @@ class MemoryEngine(MemoryEngineInterface):
                   extracting dates from ``query``. It ranks memories dated inside it
                   higher; it does not exclude memories dated outside it, and it does
                   nothing when the bank has ``enable_temporal_retrieval`` off.
-            _reinforce_results: This is a final, external recall (the HTTP and MCP recall
-                  endpoints pass True; nothing else may): its returned memories may be
-                  reinforced as ``final_external_recall`` evidence, in the background, when
-                  the bank reinforces and the static recall-reinforcement switch is on.
-                  Internal recalls (reflect tools, consolidation, extensions) never set it.
+            lifecycle_view: Which claims a recall in a bank whose adaptive memory mode is
+                  ``lifecycle`` shows: ``"current"`` (superseded and refuted memories are left
+                  out), ``"historical"`` (superseded ones are shown, annotated; refuted and
+                  merge-retired ones are not) or the internal ``"all-with-status"`` (nothing is
+                  left out; consolidation's pool recall). None uses the bank's
+                  ``adaptive_memory_default_view``. Ignored in every other mode.
+            as_of: Show the claims as they stood at this instant (naive means UTC): a memory is
+                  kept iff its claim's validity interval contains it; refuted and merge-retired
+                  memories never are. Wins over ``lifecycle_view``. Lifecycle mode only. It does
+                  not move the ranking clock, which stays ``question_date``.
+            _external: This is a final, external recall (the HTTP and MCP recall endpoints pass
+                  True; nothing else may). Its returned memories may be reinforced as
+                  ``final_external_recall`` evidence, in the background, when the bank
+                  reinforces and the static recall-reinforcement switch is on; and with the bank's
+                  ``adaptive_memory_historical_cues`` on, a lifecycle-mode recall that names no view
+                  is checked for historical cues. Internal recalls (reflect tools, consolidation,
+                  extensions) never set it.
+            _exclude_retired: Internal (consolidation's live pool recall). In lifecycle mode the
+                  store drops superseded and refuted memories inside its retrieval arms, before
+                  their limits, so retired near-twins never take a live memory's slot; the claim
+                  view still runs on what comes back. Ignored in every other mode.
 
         Returns:
             RecallResultModel containing:
@@ -9127,6 +9199,16 @@ class MemoryEngine(MemoryEngineInterface):
                 status_code=422,
             )
 
+        if lifecycle_view is not None and lifecycle_view not in LIFECYCLE_NAMED_VIEWS:
+            from hindsight_api.extensions.operation_validator import OperationValidationError
+
+            raise OperationValidationError(
+                f"Invalid lifecycle_view '{lifecycle_view}'. Must be one of: {', '.join(LIFECYCLE_NAMED_VIEWS)}",
+                status_code=422,
+            )
+        if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
+            as_of = as_of.replace(tzinfo=UTC)
+
         if (
             min_scores is not None
             and min_scores.reranker is not None
@@ -9163,6 +9245,8 @@ class MemoryEngine(MemoryEngineInterface):
                 tags=tags,
                 tags_match=tags_match,
                 tag_groups=tag_groups,
+                lifecycle_view=lifecycle_view,
+                as_of=as_of,
             )
             _t0 = time.perf_counter()
             result = await self._validate_operation(self._operation_validator.validate_recall(ctx))
@@ -9240,6 +9324,16 @@ class MemoryEngine(MemoryEngineInterface):
             )
             if _adaptive.effective_mode.loads_state:
                 adaptive_settings = _adaptive
+        # The historical-cue detector runs only for an external lifecycle-mode recall that named
+        # no view of its own, in a bank that switched it on (adaptive_memory_historical_cues).
+        detect_historical_cues = bool(
+            _external
+            and adaptive_settings is not None
+            and adaptive_settings.effective_mode.lifecycle
+            and adaptive_settings.historical_cues
+            and lifecycle_view is None
+            and as_of is None
+        )
 
         # Log recall start with tags if present (skip if quiet mode for internal operations)
         if not _quiet:
@@ -9305,6 +9399,18 @@ class MemoryEngine(MemoryEngineInterface):
                             enable_temporal_retrieval=enable_temporal_retrieval,
                             enable_graph_retrieval=enable_graph_retrieval,
                             adaptive_settings=adaptive_settings,
+                            lifecycle_view=lifecycle_view,
+                            as_of=as_of,
+                            detect_historical_cues=detect_historical_cues,
+                            # Internal (consolidation's live pool), and only in lifecycle mode: the
+                            # retired claims leave the arms in the store's SQL, before their limits.
+                            **(
+                                {"exclude_retired": True}
+                                if _exclude_retired
+                                and adaptive_settings is not None
+                                and adaptive_settings.effective_mode.lifecycle
+                                else {}
+                            ),
                         )
                         get_metrics_collector().record_recall_phase(
                             "search_with_retries", time.perf_counter() - _t0_swr2, diagnostic=True
@@ -9416,7 +9522,7 @@ class MemoryEngine(MemoryEngineInterface):
                     await self._raise_if_bank_deleted(bank_id)
 
             # Once, after the retry loop, for what the caller actually receives.
-            if _reinforce_results and adaptive_settings is not None and result is not None and result.results:
+            if _external and adaptive_settings is not None and result is not None and result.results:
                 self._submit_recall_reinforcement(bank_id, result.results, adaptive_settings, question_date)
 
             # Call post-operation hook for success
@@ -9592,6 +9698,109 @@ class MemoryEngine(MemoryEngineInterface):
             )
         adaptive.scoring_seconds += time.perf_counter() - start
 
+    async def _apply_lifecycle_view(
+        self,
+        bank_id: str,
+        backend,
+        tracer: "SearchTracer",
+        merged_candidates: list[MergedCandidate],
+        *,
+        query: str,
+        settings: AdaptiveSettings,
+        lifecycle_view: str | None,
+        as_of: datetime | None,
+        detect_historical_cues: bool,
+        detected_temporal_constraint: tuple[datetime, datetime] | None,
+        max_candidates: int,
+        enable_trace: bool,
+        log_buffer: list[str],
+    ) -> list[MergedCandidate]:
+        """Remove the merged candidates the recall's claim view does not show (lifecycle mode).
+
+        Returns the kept candidates, annotated, in the order the reranker trim keeps them. Fails
+        closed: a claim read that raises fails the recall with :class:`ClaimStateUnavailable` (HTTP
+        503) rather than show claims it could not check, for every view (consolidation's internal
+        one included). Timed as the non-diagnostic ``lifecycle_claim_load`` phase.
+        """
+        from .memories import get_memories
+
+        start = time.perf_counter()
+        cue = None
+        if detect_historical_cues:
+            cue = detect_historical_cue(
+                query, detected_temporal_constraint[0] if detected_temporal_constraint is not None else None
+            )
+            if cue is not None:
+                get_metrics_collector().record_adaptive_historical_cue(bank_id=bank_id, cue=cue.cue)
+        view = resolve_view(
+            requested=lifecycle_view,
+            as_of=as_of,
+            default_view=settings.default_view,
+            cue_name=cue.cue if cue is not None else None,
+            cue_as_of=cue.as_of if cue is not None else None,
+        )
+        store = get_memories()
+
+        async def load_claims(memory_ids: list[str]):
+            async with acquire_with_retry(backend) as conn:
+                return await store.claims_for(conn, bank_id=bank_id, memory_ids=memory_ids)
+
+        try:
+            outcome = await filter_candidates_by_claims(
+                in_trim_order(merged_candidates, max_candidates, get_config().recall_strategy_boosts),
+                view=view,
+                target=max_candidates,
+                load_claims=load_claims,
+            )
+        except Exception as e:
+            logger.error(f"[RECALL {bank_id[:8]}] claim lifecycle state could not be read ({type(e).__name__}: {e})")
+            raise ClaimStateUnavailable(
+                "The memories' claim lifecycle state could not be read, so the recall cannot tell current "
+                "memories from retired ones; try again."
+            ) from e
+
+        superseded = sum(1 for r in outcome.removed if r.claim.truth_status is TruthStatus.SUPERSEDED)
+        refuted = sum(1 for r in outcome.removed if r.claim.truth_status is TruthStatus.REFUTED)
+        get_metrics_collector().record_adaptive_lifecycle_filtered(
+            bank_id=bank_id, view=view.name, superseded=superseded, refuted=refuted
+        )
+        if outcome.removed or outcome.unchecked:
+            log_buffer.append(
+                f"  [3.5] Lifecycle view [{view.name}{f', cue={view.cue}' if view.cue else ''}]: removed "
+                f"{len(outcome.removed)} of {outcome.claims_checked} checked "
+                f"({superseded} superseded, {refuted} refuted), {outcome.unchecked} unchecked dropped"
+            )
+        # `enable_trace`, NOT `if tracer`: see the tracer construction in _search_with_retries.
+        if enable_trace:
+            tracer.lifecycle = LifecycleTraceInfo(
+                view=view.name,
+                as_of=view.as_of,
+                historical_cue=view.cue,
+                claims_checked=outcome.claims_checked,
+                refill_rounds=outcome.refill_rounds,
+            )
+            tracer.lifecycle_filtered = [
+                LifecycleFilteredResult(
+                    node_id=r.memory_id,
+                    truth_status=r.claim.truth_status.value,
+                    retired_via=r.claim.retired_via,
+                    superseded_by=r.claim.superseded_by_id,
+                )
+                for r in outcome.removed
+            ]
+        tracer.add_phase_metric(
+            "lifecycle_claim_load",
+            time.perf_counter() - start,
+            {
+                "view": view.name,
+                "claims_checked": outcome.claims_checked,
+                "removed": len(outcome.removed),
+                "refill_rounds": outcome.refill_rounds,
+                "unchecked": outcome.unchecked,
+            },
+        )
+        return outcome.kept
+
     async def _search_with_retries(
         self,
         bank_id: str,
@@ -9626,6 +9835,10 @@ class MemoryEngine(MemoryEngineInterface):
         enable_temporal_retrieval: bool = True,
         enable_graph_retrieval: bool = True,
         adaptive_settings: AdaptiveSettings | None = None,
+        lifecycle_view: str | None = None,
+        as_of: datetime | None = None,
+        detect_historical_cues: bool = False,
+        exclude_retired: bool = False,
     ) -> RecallResultModel:
         """
         Search implementation with modular retrieval and reranking.
@@ -9654,6 +9867,14 @@ class MemoryEngine(MemoryEngineInterface):
             max_chunk_tokens: Maximum tokens for chunks
             adaptive_settings: The bank's adaptive-memory settings, or None when its effective
                 mode is off (nothing adaptive runs then)
+            lifecycle_view: The caller's claim view (see :meth:`recall_async`); lifecycle mode only
+            as_of: The caller's validity instant (see :meth:`recall_async`); lifecycle mode only
+            detect_historical_cues: Check the query for historical cues before the claim view is
+                chosen (an external lifecycle-mode recall that named no view, in a bank with
+                ``adaptive_memory_historical_cues`` on)
+            exclude_retired: Drop superseded and refuted memories inside the store's retrieval
+                arms, before their limits (lifecycle mode; consolidation's live pool), so retired
+                near-twins cannot take the slots of live ones
 
         Returns:
             RecallResultModel with results, trace, optional entities, and optional chunks
@@ -9815,6 +10036,17 @@ class MemoryEngine(MemoryEngineInterface):
                     include_source_facts=include_source_facts,
                     max_source_facts_tokens=max_source_facts_tokens,
                     max_source_facts_tokens_per_observation=max_source_facts_tokens_per_observation,
+                    # Lifecycle mode only (None/False otherwise, so every other request is the one
+                    # a store already answers). A store that cannot apply the claim view declines.
+                    lifecycle_view=(
+                        (lifecycle_view or adaptive_settings.default_view)
+                        if adaptive_settings is not None and adaptive_settings.effective_mode.lifecycle
+                        else None
+                    ),
+                    as_of=as_of
+                    if adaptive_settings is not None and adaptive_settings.effective_mode.lifecycle
+                    else None,
+                    historical_cues=detect_historical_cues,
                 )
             )
             if _store_result is not None:
@@ -9907,6 +10139,7 @@ class MemoryEngine(MemoryEngineInterface):
                         enable_text_search=enable_text_search,
                         enable_temporal_retrieval=enable_temporal_retrieval,
                         enable_graph_retrieval=enable_graph_retrieval,
+                        **({"exclude_retired": True} if exclude_retired else {}),
                     )
                     parallel_duration = time.perf_counter() - parallel_start
             finally:
@@ -10215,6 +10448,32 @@ class MemoryEngine(MemoryEngineInterface):
                 ]
                 tracer.add_rrf_merged(tracer_merged)
             tracer.add_phase_metric("rrf_merge", step_duration, {"candidates_merged": len(merged_candidates)})
+
+            # Step 3.5: the claim view (adaptive memory lifecycle mode). Claims are read for the
+            # candidates the reranker trim would keep, plus a slack, in the trim's own order; the
+            # ones the view does not show are removed HERE, so the trim backfills from the fusion
+            # tail and the reranker never scores a retired claim. A removal, so it applies on every
+            # ranking branch below (decision model and interleave included).
+            if adaptive_settings is not None and adaptive_settings.effective_mode.lifecycle:
+                merged_candidates = await self._apply_lifecycle_view(
+                    bank_id,
+                    backend,
+                    tracer,
+                    merged_candidates,
+                    query=query,
+                    settings=adaptive_settings,
+                    lifecycle_view=lifecycle_view,
+                    as_of=as_of,
+                    detect_historical_cues=detect_historical_cues,
+                    detected_temporal_constraint=detected_temporal_constraint,
+                    max_candidates=(
+                        reranker_max_candidates
+                        if reranker_max_candidates is not None
+                        else get_config().reranker_max_candidates
+                    ),
+                    enable_trace=enable_trace,
+                    log_buffer=log_buffer,
+                )
 
             # Step 4: Rerank using cross-encoder (MergedCandidate -> ScoredResult)
             step_start = time.perf_counter()
@@ -10973,6 +11232,8 @@ class MemoryEngine(MemoryEngineInterface):
                 for sr in top_scored
             }
 
+            # Claim annotations (lifecycle mode; empty otherwise), set by the pre-trim claim view.
+            lifecycle_by_id = {sr.id: sr.candidate.lifecycle for sr in top_scored if sr.candidate.lifecycle is not None}
             memory_facts = []
             for result_dict in top_results_dicts:
                 result_id = str(result_dict.get("id"))
@@ -10998,6 +11259,7 @@ class MemoryEngine(MemoryEngineInterface):
                         source_fact_ids=source_fact_ids_by_obs.get(result_id) if include_source_facts else None,
                         scores=scores_by_id.get(result_id),
                         attachment_ids=result_dict.get("attachment_ids"),
+                        lifecycle=lifecycle_by_id.get(result_id),
                     )
                 )
 
@@ -11144,10 +11406,12 @@ class MemoryEngine(MemoryEngineInterface):
                 source_facts_truncated=source_facts_truncated if include_source_facts else None,
             )
 
-        except OperationCancelledError:
+        except (OperationCancelledError, ClaimStateUnavailable):
             # Client disconnected mid-recall — propagate the cancellation so the
             # HTTP layer can return 499. Must precede the broad handler below,
             # which would otherwise bury it inside a RuntimeError (issue #2122).
+            # A lifecycle-mode claim read that failed propagates the same way, so the
+            # HTTP layer can answer 503 (fail closed) rather than an opaque 500.
             raise
         except Exception as e:
             # Use repr(e) so exceptions with empty __str__ (e.g. raise SomeError())
@@ -13124,26 +13388,48 @@ class MemoryEngine(MemoryEngineInterface):
         importance: float | None = None,
         forgetting_exempt: bool | None = None,
         exemption_reason: str | None = None,
+        truth_status: str | None = None,
+        superseded_by: str | None = None,
+        reason: str | None = None,
         request_context: "RequestContext",
     ) -> "MemoryLifecycle | None":
-        """Set a memory's importance and/or forgetting exemption; returns its lifecycle view after.
+        """Change a memory's retention policy and/or what should be believed about it; returns its
+        lifecycle view after.
 
-        ``importance`` in [0, 1] (0.5 is neutral) rescales the stability the memory has learned by
-        the ratio of the importance multipliers, so earlier reinforcement is kept. An exempt
-        memory always reads as fully retrievable. Turning the exemption off clears its reason;
-        ``None`` leaves a field as it is, and at least one must be set.
+        Retention (``rank`` or ``lifecycle`` mode): ``importance`` in [0, 1] (0.5 is neutral)
+        rescales the stability the memory has learned by the ratio of the importance multipliers,
+        so earlier reinforcement is kept. An exempt memory always reads as fully retrievable.
+        Turning the exemption off clears its reason.
+
+        Truth (``lifecycle`` mode only), ``truth_status``:
+
+        - ``superseded`` / ``refuted``: retire the claim (it must be active or uncertain; 409
+          otherwise). ``superseded_by`` names the memory that replaces it, validated as
+          consolidation validates its own actions (live in the same bank, identical tags, not the
+          memory itself). On an observation its raw sources inherit the status, unless another
+          live observation still stands on them; on a raw fact the observations built on it are
+          rebuilt from their remaining sources (the sweep invalidation runs), while the fact itself
+          stays out of consolidation.
+        - ``active``: restore a retired or uncertain claim (and, for an observation, the raw facts
+          that inherited its retirement); a restored raw fact is consolidated again.
+        - ``uncertain``: mark the claim contested.
+
+        Every retirement writes an ``explicit`` lifecycle relation; mental models whose grounding
+        changed are refreshed after the commit. ``reason`` is recorded on the claim. ``None``
+        leaves a field as it is, and at least one must be set.
 
         Returns None when the memory is not live in the bank. Raises ``OperationValidationError``
-        (409) unless the bank's adaptive-memory mode is ``rank`` or ``lifecycle`` — the same modes
-        in which retain applies an item's importance — so off and observe banks stay unchanged.
-        ``ValueError`` for a malformed id or value.
+        (409) when the bank's mode does not allow the change, or a retirement loses to a claim
+        that is already retired. ``ValueError`` for a malformed id or value, or a successor that
+        cannot replace the memory.
         """
         try:
             memory_uuid = uuid.UUID(memory_id)
         except ValueError:
             raise ValueError(f"Invalid memory_id: '{memory_id}' is not a valid UUID")
-        if importance is None and forgetting_exempt is None and exemption_reason is None:
-            raise ValueError("Set at least one of importance, forgetting_exempt or exemption_reason.")
+        retention_change = importance is not None or forgetting_exempt is not None or exemption_reason is not None
+        if not retention_change and truth_status is None:
+            raise ValueError("Set at least one of importance, forgetting_exempt, exemption_reason or truth_status.")
         if importance is not None and (
             isinstance(importance, bool)
             or not isinstance(importance, (int, float))
@@ -13157,15 +13443,49 @@ class MemoryEngine(MemoryEngineInterface):
                 raise ValueError("exemption_reason must not be blank.")
             if len(exemption_reason) > _EXEMPTION_REASON_MAX_LENGTH:
                 raise ValueError(f"exemption_reason must be at most {_EXEMPTION_REASON_MAX_LENGTH} characters.")
+        status: TruthStatus | None = None
+        if truth_status is not None:
+            try:
+                status = TruthStatus(truth_status)
+            except ValueError:
+                raise ValueError(
+                    f"truth_status must be one of {', '.join(s.value for s in TruthStatus)}, got {truth_status!r}"
+                )
+        successor_id: str | None = None
+        if superseded_by is not None:
+            if status not in (TruthStatus.SUPERSEDED, TruthStatus.REFUTED):
+                raise ValueError("superseded_by needs truth_status 'superseded' or 'refuted'.")
+            try:
+                successor_id = str(uuid.UUID(superseded_by))
+            except ValueError:
+                raise ValueError(f"Invalid superseded_by: '{superseded_by}' is not a valid UUID")
+        if reason is not None:
+            if status is None:
+                raise ValueError("reason is recorded with a truth_status change; set truth_status too.")
+            if not reason.strip():
+                raise ValueError("reason must not be blank.")
+            if len(reason) > _TRUTH_REASON_MAX_LENGTH:
+                raise ValueError(f"reason must be at most {_TRUTH_REASON_MAX_LENGTH} characters.")
         unit_id = str(memory_uuid)
+        if successor_id == unit_id:
+            raise ValueError("A memory cannot supersede itself.")
 
         from hindsight_api.extensions import BankWriteOperation, OperationValidationError
 
         await self._authorize_lifecycle_write(
             bank_id, unit_id, BankWriteOperation.UPDATE_MEMORY_LIFECYCLE, request_context
         )
+        if successor_id is not None:
+            # Outside the caller's scope the successor reads as missing, like the target would.
+            await self._require_writable(bank_id, request_context, memory_id=successor_id)
         settings = await self._adaptive_settings_for_bank(bank_id, request_context)
-        if not settings.effective_mode.applies_factor:
+        if status is not None and not settings.effective_mode.lifecycle:
+            raise OperationValidationError(
+                f"Bank '{bank_id}' does not keep claim lifecycle (adaptive memory mode "
+                f"'{settings.effective_mode.value}'); changing truth_status needs mode 'lifecycle'.",
+                status_code=409,
+            )
+        if retention_change and not settings.effective_mode.applies_factor:
             raise OperationValidationError(
                 f"Bank '{bank_id}' does not keep retention policy (adaptive memory mode "
                 f"'{settings.effective_mode.value}'); it needs mode 'rank' or 'lifecycle'.",
@@ -13177,22 +13497,271 @@ class MemoryEngine(MemoryEngineInterface):
 
         store = get_memories()
         now = clock.utcnow()
+        change = _ExplicitTruthChange(found=True)
         async with acquire_with_retry(await self._get_backend()) as conn:
-            state = await store.set_retention_policy(
+            # One transaction: a truth change that loses its compare-and-set (409) also undoes the
+            # retention change sent with it.
+            async with conn.transaction():
+                if retention_change:
+                    state = await store.set_retention_policy(
+                        conn,
+                        bank_id=bank_id,
+                        memory_id=unit_id,
+                        importance=None if importance is None else float(importance),
+                        forgetting_exempt=forgetting_exempt,
+                        exemption_reason=exemption_reason,
+                        settings=settings,
+                        now=now,
+                    )
+                    if state is None:
+                        return None
+                if status is not None:
+                    change = await self._apply_explicit_truth(
+                        conn,
+                        store,
+                        bank_id,
+                        unit_id,
+                        status=status,
+                        successor_id=successor_id,
+                        reason=reason,
+                        now=now,
+                    )
+                    if not change.found:
+                        return None
+                view = await store.get_memory_lifecycle(
+                    conn, bank_id=bank_id, memory_id=unit_id, now=now, settings=settings
+                )
+
+        if change.requeued:
+            config = await self._config_resolver.resolve_full_config(bank_id, request_context)
+            if config.enable_auto_consolidation:
+                try:
+                    await self.submit_async_consolidation(bank_id=bank_id, request_context=request_context)
+                except Exception as e:
+                    logger.warning(f"Failed to submit consolidation after a truth change in bank {bank_id}: {e}")
+        if change.changed:
+            # A retired (or restored) memory changes what grounded documents may cite. Best effort,
+            # after the commit, like curation's own call.
+            await self._submit_refreshes_for_retracted_grounding(bank_id, request_context=request_context)
+        return view
+
+    async def _apply_explicit_truth(
+        self,
+        conn,
+        store: "MemoriesExtension",
+        bank_id: str,
+        unit_id: str,
+        *,
+        status: TruthStatus,
+        successor_id: str | None,
+        reason: str | None,
+        now: datetime,
+    ) -> _ExplicitTruthChange:
+        """Apply one explicit ``truth_status`` change inside the caller's transaction.
+
+        Lock order: a raw fact's observations are swept first (the sweep's own sorted row locks,
+        the order invalidation uses), then every claim this change touches is locked in ONE
+        ``lock_claims`` pass — target, successor and an observation's sources — before any
+        compare-and-set, so it serializes with consolidation's lifecycle writes instead of
+        deadlocking against them.
+        """
+        from hindsight_api.extensions import OperationValidationError
+
+        from .adaptive.claims import RETIRED_STATUSES
+
+        rows = {
+            m.unit_id: m
+            for m in await store.get_memories(
+                conn=conn,
+                fq_table=fq_table,
+                bank_id=bank_id,
+                unit_ids=[unit_id, *([successor_id] if successor_id is not None else [])],
+            )
+        }
+        target = rows.get(unit_id)
+        if target is None:
+            return _ExplicitTruthChange(found=False)
+        successor = rows.get(successor_id) if successor_id is not None else None
+        if successor_id is not None:
+            if successor is None:
+                raise OperationValidationError(f"Memory '{successor_id}' not found", status_code=404)
+            error = _explicit_successor_error(target, successor)
+            if error is not None:
+                raise ValueError(error)
+        is_observation = target.fact_type == "observation"
+        requeued = False
+
+        if status in RETIRED_STATUSES and not is_observation:
+            # The observations built on this fact are rebuilt from their other sources, exactly as
+            # invalidating it would: swept here, before its claim row is written (the sweep's lock
+            # order), and again after (a racing observation insert). The sweep requeues only the
+            # co-sources, so the fact itself is never put back in the queue.
+            requeued = await self._delete_stale_observations_for_memories(conn, bank_id, [unit_id]) > 0
+        sources: list[str] = []
+        if is_observation and status is not TruthStatus.UNCERTAIN:
+            sources = (await store.observation_sources(conn, bank_id=bank_id, observation_ids=[unit_id])).get(
+                unit_id, []
+            )
+        locked = await store.lock_claims(
+            conn,
+            bank_id=bank_id,
+            memory_ids=[unit_id, *([successor_id] if successor_id is not None else []), *sources],
+            skip_locked=False,
+            now=now,
+        )
+        if unit_id not in locked:
+            return _ExplicitTruthChange(found=False)
+        claims = await store.claims_for(
+            conn, bank_id=bank_id, memory_ids=[unit_id, *([successor_id] if successor_id is not None else []), *sources]
+        )
+        current = claims.get(unit_id)
+
+        if status in RETIRED_STATUSES:
+            successor_claim = claims.get(successor_id) if successor_id is not None else None
+            if successor_id is not None:
+                if successor_id not in locked:
+                    raise OperationValidationError(f"Memory '{successor_id}' not found", status_code=404)
+                if successor_claim is not None and successor_claim.truth_status in RETIRED_STATUSES:
+                    raise ValueError(
+                        f"Memory '{successor_id}' is itself {successor_claim.truth_status.value}; "
+                        "it cannot replace another memory."
+                    )
+                if (
+                    current is not None
+                    and successor_claim is not None
+                    and current.scope_fingerprint is not None
+                    and successor_claim.scope_fingerprint is not None
+                    and current.scope_fingerprint != successor_claim.scope_fingerprint
+                ):
+                    raise ValueError(
+                        f"Memory '{successor_id}' holds in a different scope ({successor_claim.scope_fingerprint}) "
+                        f"from memory '{unit_id}' ({current.scope_fingerprint})."
+                    )
+            # The change instant: the successor's own start when it has one, else when its evidence
+            # was recorded, else now. Written on both sides, so an as_of recall never shows both.
+            valid_to = (
+                (successor_claim.valid_from if successor_claim is not None else None)
+                or (_claim_change_instant(successor) if successor is not None else None)
+                or now
+            )
+            won = await store.cas_retire(
                 conn,
                 bank_id=bank_id,
                 memory_id=unit_id,
-                importance=None if importance is None else float(importance),
-                forgetting_exempt=forgetting_exempt,
-                exemption_reason=exemption_reason,
-                settings=settings,
+                to_status=status,
+                retired_via="explicit",
+                superseded_by_id=successor_id,
+                valid_to=valid_to,
+                reason=reason or f"explicit:{status.value}",
+                confidence=None,
                 now=now,
             )
-            if state is None:
-                return None
-            return await store.get_memory_lifecycle(
-                conn, bank_id=bank_id, memory_id=unit_id, now=now, settings=settings
+            if not won:
+                held = current.truth_status.value if current is not None else "retired"
+                raise OperationValidationError(
+                    f"Memory '{unit_id}' is already {held}; restore it (truth_status 'active') before "
+                    f"marking it {status.value}.",
+                    status_code=409,
+                )
+            if successor_id is not None and (successor_claim is None or successor_claim.valid_from is None):
+                await store.set_claim(
+                    conn,
+                    bank_id=bank_id,
+                    memory_id=successor_id,
+                    truth_status=successor_claim.truth_status if successor_claim is not None else TruthStatus.ACTIVE,
+                    valid_from=valid_to,
+                    valid_to=successor_claim.valid_to if successor_claim is not None else None,
+                    confidence=successor_claim.confidence if successor_claim is not None else None,
+                    scope_fingerprint=successor_claim.scope_fingerprint if successor_claim is not None else None,
+                    reason=successor_claim.reason if successor_claim is not None else None,
+                    now=now,
+                )
+            inherited: list[str] = []
+            if is_observation:
+                inherited = await store.inherit_from_observation(
+                    conn,
+                    bank_id=bank_id,
+                    observation_id=unit_id,
+                    to_status=status,
+                    successor_id=successor_id,
+                    valid_to=valid_to,
+                    evidence_ids=[],
+                    candidate_source_ids=sources,
+                    now=now,
+                )
+            else:
+                # Retired, so it must never be consolidated again (a retired raw fact is never
+                # requeued): a still-pending fact is stamped now.
+                await store.mark_consolidated(
+                    conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[unit_id], when=now
+                )
+                requeued = await self._delete_stale_observations_for_memories(conn, bank_id, [unit_id]) > 0 or requeued
+            await store.insert_relation(
+                conn,
+                bank_id=bank_id,
+                relation_type="supersedes" if status is TruthStatus.SUPERSEDED else "refutes",
+                source_id=successor_id,
+                target_id=unit_id,
+                origin="explicit",
+                reason=reason,
+                confidence=None,
+                evidence={"inherited_ids": inherited} if inherited else {},
+                now=now,
             )
+            get_metrics_collector().record_adaptive_claim_transition(
+                bank_id=bank_id,
+                transition="supersession" if status is TruthStatus.SUPERSEDED else "refutation",
+                origin="explicit",
+            )
+            return _ExplicitTruthChange(found=True, requeued=requeued, changed=True)
+
+        if current is not None and current.truth_status is status:
+            return _ExplicitTruthChange(found=True)
+        if current is None and status is TruthStatus.ACTIVE:
+            return _ExplicitTruthChange(found=True)
+        was_retired = current is not None and current.truth_status in RETIRED_STATUSES
+        await store.set_claim(
+            conn,
+            bank_id=bank_id,
+            memory_id=unit_id,
+            truth_status=status,
+            valid_from=current.valid_from if current is not None else None,
+            valid_to=None,
+            confidence=current.confidence if current is not None else None,
+            scope_fingerprint=current.scope_fingerprint if current is not None else None,
+            reason=reason or f"explicit:{status.value}",
+            now=now,
+        )
+        if status is TruthStatus.ACTIVE and is_observation:
+            # The raw facts that inherited this observation's retirement come back with it. They
+            # are its sources and stay consolidated: the observation they belong to is current again.
+            for source_id in sources:
+                source_claim = claims.get(source_id)
+                if (
+                    source_claim is not None
+                    and source_claim.inherited_from_id == unit_id
+                    and source_claim.truth_status in RETIRED_STATUSES
+                ):
+                    await store.set_claim(
+                        conn,
+                        bank_id=bank_id,
+                        memory_id=source_id,
+                        truth_status=TruthStatus.ACTIVE,
+                        valid_from=source_claim.valid_from,
+                        scope_fingerprint=source_claim.scope_fingerprint,
+                        reason=reason or "explicit:active",
+                        now=now,
+                    )
+        elif was_retired and not is_observation:
+            # Its observations were rebuilt without it when it was retired; consolidate it again.
+            requeued = (
+                await store.requeue_units(conn, bank_id=bank_id, unit_ids=[unit_id], reason="explicit_restore") > 0
+            )
+        if status is TruthStatus.UNCERTAIN:
+            get_metrics_collector().record_adaptive_claim_transition(
+                bank_id=bank_id, transition="uncertain", origin="explicit"
+            )
+        return _ExplicitTruthChange(found=True, requeued=requeued, changed=True)
 
     async def run_consolidation(
         self,
@@ -13644,7 +14213,14 @@ class MemoryEngine(MemoryEngineInterface):
             )
             directives = list(listed.items)
 
-        preview = render_prompt_preview(operation, resolved_config, bank_profile, directives)
+        # Consolidation and reflect send a different prompt in adaptive memory lifecycle
+        # mode; resolved here exactly as both operations resolve it, so a lifecycle bank is
+        # shown the prompt it actually gets. Off costs one attribute lookup.
+        lifecycle = False
+        if operation != "retain":
+            adaptive = mode_settings(resolved_config, bank_id=bank_id)
+            lifecycle = adaptive is not None and adaptive.effective_mode.lifecycle
+        preview = render_prompt_preview(operation, resolved_config, bank_profile, directives, lifecycle=lifecycle)
         if operation != "retain":
             return preview
         # Reported so a client can offer a strategy picker without a second call for
@@ -16321,11 +16897,26 @@ class MemoryEngine(MemoryEngineInterface):
         recall_fact_types = [ft for ft in (fact_types or ["world", "experience"]) if ft in ("world", "experience")]
         include_recall = bool(recall_fact_types)
 
+        # Adaptive memory lifecycle mode: the recall tool offers `include_history`, the prompt says
+        # how to read claim annotations, and expand annotates retired memories. One dict lookup in
+        # every other mode, like recall's own check.
+        reflect_lifecycle = False
+        if config_dict.get("adaptive_memory_mode") not in (None, "off"):
+            from .memories import get_memories as _get_memories_for_adaptive
+
+            reflect_lifecycle = AdaptiveSettings.resolve(
+                config_dict,
+                get_config(),
+                store_supports=_get_memories_for_adaptive().supports_adaptive_state_for(bank_id),
+            ).effective_mode.lifecycle
+
         # No defaults on the token arguments: the agent resolves them from
         # `tool_token_limits` and always passes all three. Binding the configured values
         # here as defaults instead is what made #4239 invisible -- they read as live
         # while `_execute_tool` passed positionally past them.
-        async def recall_fn(q: str, max_tokens: int, max_chunk_tokens: int) -> dict[str, Any]:
+        async def recall_fn(
+            q: str, max_tokens: int, max_chunk_tokens: int, *, include_history: bool = False
+        ) -> dict[str, Any]:
             return await tool_recall(
                 self,
                 bank_id,
@@ -16340,12 +16931,20 @@ class MemoryEngine(MemoryEngineInterface):
                 include_chunks=effective_recall_include_chunks,
                 created_after=created_after,
                 created_before=created_before,
+                lifecycle_view="historical" if include_history and reflect_lifecycle else None,
             )
 
         async def expand_fn(memory_ids: list[str], depth: str) -> dict[str, Any]:
             async with backend.acquire() as conn:
                 return await tool_expand(
-                    conn, bank_id, memory_ids, depth, tags=tags, tags_match=tags_match, tag_groups=tag_groups
+                    conn,
+                    bank_id,
+                    memory_ids,
+                    depth,
+                    tags=tags,
+                    tags_match=tags_match,
+                    tag_groups=tag_groups,
+                    lifecycle=reflect_lifecycle,
                 )
 
         # Load directives from the dedicated directives table.
@@ -16430,6 +17029,8 @@ class MemoryEngine(MemoryEngineInterface):
                         evidence_is_sufficient_fn=decision_model.evidence_is_sufficient if decision_model else None,
                         prune_evidence_fn=self._prune_reflect_evidence if decision_model else None,
                         reflect_id=reflect_id,
+                        # Passed only in lifecycle mode, so every other reflect calls the agent as before.
+                        **({"lifecycle": True} if reflect_lifecycle else {}),
                     ),
                     timeout=wall_timeout,
                 )

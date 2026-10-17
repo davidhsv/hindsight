@@ -21,6 +21,7 @@ from ...search.tags import TagGroup, TagsMatch, build_tag_groups_where_clause, b
 from ...search.types import RetrievalResult
 from ...sql import create_sql_dialect
 from ..base import GRAPH_SEED_LIMIT, SemanticBm25Result
+from .adaptive_claims import retired_claim_filter_sql
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +42,13 @@ async def retrieve_semantic_bm25_combined_sql(
     min_keyword: float | None = None,
     graph_seed_min_similarity: float | None = None,
     enable_text_search: bool = True,
+    exclude_non_active: bool = False,
 ) -> dict[str, SemanticBm25Result]:
     """
     Combined semantic + BM25 retrieval for multiple fact types in a single query.
+
+    ``exclude_non_active`` drops memories whose claim is superseded or refuted inside each arm,
+    before its LIMIT (``retired_claim_filter_sql``), so retired near-duplicates cannot fill it.
 
     The BM25 half is conditional. It is omitted when the query has no word characters
     to search for, and when ``enable_text_search`` is False — the pure-vector mode, where
@@ -162,6 +167,9 @@ async def retrieve_semantic_bm25_combined_sql(
         updated_range_params.append(created_before)
         updated_range_clause += f" AND updated_at < ${_next_idx}"
         _next_idx += 1
+    # No bind parameter, so it rides on the same slot and the semantic-only fallback below too.
+    retired_clause = retired_claim_filter_sql(fq_table, f"{fq_table('memory_units')}.id") if exclude_non_active else ""
+    updated_range_clause += retired_clause
 
     # --- Semantic UNION ALL arms (one per fact_type) ---
     # Each arm has its own ORDER BY ... LIMIT, enabling the partial HNSW indexes
@@ -254,6 +262,7 @@ async def retrieve_semantic_bm25_combined_sql(
             if created_before is not None:
                 fb_updated_clause += f" AND updated_at < ${fb_next_idx}"
                 fb_next_idx += 1
+            fb_updated_clause += retired_clause
             fb_arms = [
                 dialect.build_semantic_arm(
                     table=table,
@@ -385,9 +394,12 @@ async def retrieve_temporal_combined_sql(
     tag_groups: list[TagGroup] | None = None,
     created_after: datetime | None = None,
     created_before: datetime | None = None,
+    exclude_non_active: bool = False,
 ) -> dict[str, list[RetrievalResult]]:
     """
     Temporal retrieval for multiple fact types in a single query.
+
+    ``exclude_non_active`` drops superseded/refuted memories from the entry points and the spread.
 
     Batches the entry point query using window functions to get top-N per fact type,
     then runs spreading for each fact type.
@@ -435,6 +447,9 @@ async def retrieve_temporal_combined_sql(
         updated_range_params.append(created_before)
         updated_range_clause += f" AND updated_at < ${_next_idx}"
         _next_idx += 1
+
+    if exclude_non_active:
+        updated_range_clause += retired_claim_filter_sql(fq_table, f"{fq_table('memory_units')}.id")
 
     params: list = [query_emb_str, bank_id, start_date, end_date, semantic_threshold]
     if tags:
@@ -649,6 +664,7 @@ async def retrieve_temporal_combined_sql(
                   {spreading_tags_clause}
                   {spreading_groups_clause}
                   {spreading_window.clause("mu")}
+                  {retired_claim_filter_sql(fq_table, "mu.id") if exclude_non_active else ""}
                 """,
                 *spreading_params,
             )

@@ -2439,7 +2439,7 @@ func (r ApiUpdateMemoryLifecycleRequest) Execute() (*MemoryLifecycle, *http.Resp
 /*
 UpdateMemoryLifecycle Update memory lifecycle
 
-Change how a memory (a fact or an observation) is retained: its importance and its exemption from retention decay. Returns the memory's lifecycle view, the same one GET /memories/{memory_id} shows under 'lifecycle'. Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle' (409 otherwise). 404 when the memory is missing or invalidated.
+Change how a memory (a fact or an observation) is retained — its importance and its exemption from retention decay, in adaptive memory mode 'rank' or 'lifecycle' — and what should be believed about it: truth_status, superseded_by and reason, in mode 'lifecycle' only. Retiring a memory (superseded/refuted) takes it out of current recall and records an explicit lifecycle relation; 'active' restores it. Returns the memory's lifecycle view, the same one GET /memories/{memory_id} shows under 'lifecycle'. 409 when the bank's mode does not allow the change or the memory is already retired; 404 when the memory (or superseded_by) is missing or invalidated; 400 for a successor in another scope.
 
  @param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
  @param bankId

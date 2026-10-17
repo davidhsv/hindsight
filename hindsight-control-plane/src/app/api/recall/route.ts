@@ -21,6 +21,8 @@ export async function POST(request: NextRequest) {
       tag_groups,
       min_scores,
       temporal_window,
+      lifecycle_view,
+      as_of,
     } = body;
 
     const response = await sdk.recallMemories({
@@ -40,6 +42,8 @@ export async function POST(request: NextRequest) {
         tag_groups,
         min_scores,
         temporal_window,
+        lifecycle_view,
+        as_of,
       },
     });
 

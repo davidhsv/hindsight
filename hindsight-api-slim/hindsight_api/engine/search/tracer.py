@@ -10,9 +10,12 @@ import time
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from ..response_models import RecallLifecycle
 from .trace import (
     AdaptiveTraceInfo,
     EntryPoint,
+    LifecycleFilteredResult,
+    LifecycleTraceInfo,
     NodeVisit,
     QueryInfo,
     RerankedResult,
@@ -99,6 +102,9 @@ class SearchTracer:
         # Adaptive memory summary; set by recall only when the bank's mode loads state, and only
         # when a trace was asked for. None leaves the finalized trace exactly as it was.
         self.adaptive: AdaptiveTraceInfo | None = None
+        # Lifecycle mode only (same rule): the claim view and the candidates it removed.
+        self.lifecycle: LifecycleTraceInfo | None = None
+        self.lifecycle_filtered: list[LifecycleFilteredResult] | None = None
 
         # Tracking state
         self.current_step = 0
@@ -373,6 +379,7 @@ class SearchTracer:
                 if key in result and result[key] is not None:
                     score_components[key] = result[key]
 
+            lifecycle = result.get("lifecycle")
             self.reranked.append(
                 RerankedResult(
                     node_id=node_id,
@@ -382,6 +389,7 @@ class SearchTracer:
                     rrf_rank=rrf_rank,
                     rank_change=rank_change,
                     score_components=score_components,
+                    lifecycle=RecallLifecycle.model_validate(lifecycle) if lifecycle is not None else None,
                 )
             )
 
@@ -442,6 +450,8 @@ class SearchTracer:
             summary=summary,
             final_results=final_results,
             adaptive=self.adaptive,
+            lifecycle=self.lifecycle,
+            lifecycle_filtered=self.lifecycle_filtered,
         )
 
         return trace

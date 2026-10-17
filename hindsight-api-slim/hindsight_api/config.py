@@ -1146,6 +1146,7 @@ ENV_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE = "HINDSIGHT_API_ADAPTIVE_MEMORY_AR
 ENV_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE = "HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE"
 ENV_ADAPTIVE_MEMORY_PRUNE_ENABLED = "HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_ENABLED"
 ENV_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS = "HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS"
+ENV_ADAPTIVE_MEMORY_SCOPE_KEYS = "HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS"
 
 # Audit log settings
 # AUDIT_LOG_ENABLED is the deployment-wide default and is overridable per bank
@@ -1500,6 +1501,10 @@ DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE = 0.8
 DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE = 0.8
 DEFAULT_ADAPTIVE_MEMORY_PRUNE_ENABLED = False
 DEFAULT_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS = 180.0
+# Metadata keys whose values scope a claim (its scope fingerprint): two claims whose cited facts
+# carry different values for one of these keys are about different scopes, so neither may retire
+# the other in lifecycle consolidation.
+DEFAULT_ADAPTIVE_MEMORY_SCOPE_KEYS: tuple[str, ...] = ("environment", "service", "module")
 # Retrieval arms that can be boosted; mirrors fusion.py source_names.
 RECALL_STRATEGY_NAMES = ("semantic", "bm25", "graph", "temporal")
 # User-facing priority levels. Kept in sync with recall_boost.BOOST_LEVELS by a
@@ -3661,6 +3666,7 @@ class HindsightConfig:
     adaptive_memory_archive_protect_importance: float
     adaptive_memory_prune_enabled: bool
     adaptive_memory_prune_after_days: float
+    adaptive_memory_scope_keys: list[str]
     reranker_cohere_api_key: str | None
     reranker_cohere_model: str
     reranker_cohere_base_url: str | None
@@ -5345,6 +5351,9 @@ class HindsightConfig:
                 os.getenv(ENV_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS),
                 DEFAULT_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS,
             ),
+            # An unset or empty value means the default keys.
+            adaptive_memory_scope_keys=_parse_str_list(os.getenv(ENV_ADAPTIVE_MEMORY_SCOPE_KEYS) or "")
+            or list(DEFAULT_ADAPTIVE_MEMORY_SCOPE_KEYS),
             # Cohere reranker (with backward-compatible fallback to shared API key)
             reranker_cohere_api_key=os.getenv(ENV_RERANKER_COHERE_API_KEY) or os.getenv(ENV_COHERE_API_KEY),
             reranker_cohere_model=os.getenv(ENV_RERANKER_COHERE_MODEL, DEFAULT_RERANKER_COHERE_MODEL),

@@ -15,6 +15,7 @@ from .ops import (
     ChunkIdOwnedByAnotherBank,
     ClaimedOperations,
     DataAccessOps,
+    LifecycleRelationRow,
     LinkExpansionRows,
     ReinforcementEventRow,
     ReinforcementKey,
@@ -2197,3 +2198,184 @@ class PostgreSQLOps(DataAccessOps):
             [r.exemption_reason for r in rows],
             now,
         )
+
+    # -- Claim lifecycle ---------------------------------------------------
+
+    async def upsert_default_claim_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        claims_table: str,
+        units_table: str,
+        bank_id: str,
+        memory_ids: Sequence[uuid.UUID],
+        now: datetime,
+        skip_locked: bool,
+    ) -> list[str]:
+        ids = sorted(set(memory_ids))
+        if not ids:
+            return []
+        # The bulk_insert_links shape (see upsert_default_retention_state): the parents are locked
+        # FOR KEY SHARE in id order by the statement that inserts the side rows, so a concurrent
+        # DELETE of a parent waits for our COMMIT and the deferred FK cannot fail there (#1882).
+        flags = await conn.fetch(
+            f"""
+            WITH locked AS MATERIALIZED (
+                SELECT id FROM {units_table}
+                WHERE bank_id = $1 AND id = ANY($2::uuid[])
+                ORDER BY id
+                FOR KEY SHARE{" SKIP LOCKED" if skip_locked else ""}
+            ),
+            inserted AS (
+                INSERT INTO {claims_table} (memory_id, bank_id, truth_status, created_at, updated_at)
+                SELECT l.id, $1, 'active', $3, $3 FROM locked l ORDER BY l.id
+                ON CONFLICT (memory_id) DO NOTHING
+                RETURNING memory_id
+            )
+            SELECT l.id AS memory_id FROM locked l ORDER BY l.id
+            """,
+            bank_id,
+            ids,
+            now,
+        )
+        present = [row["memory_id"] for row in flags]
+        if not present:
+            return []
+        rows = await conn.fetch(
+            f"""
+            SELECT memory_id FROM {claims_table}
+            WHERE bank_id = $1 AND memory_id = ANY($2::uuid[])
+            ORDER BY memory_id
+            FOR UPDATE
+            """,
+            bank_id,
+            present,
+        )
+        return [str(row["memory_id"]) for row in rows]
+
+    async def insert_claim_evidence(
+        self,
+        conn: DatabaseConnection,
+        *,
+        evidence_table: str,
+        units_table: str,
+        bank_id: str,
+        pairs: Sequence[tuple[uuid.UUID, uuid.UUID]],
+        now: datetime,
+    ) -> int:
+        ordered = sorted(set(pairs))
+        if not ordered:
+            return 0
+        inserted = await conn.fetch(
+            f"""
+            WITH pairs AS (
+                SELECT * FROM unnest($2::uuid[], $3::uuid[]) AS p(memory_id, evidence_memory_id)
+            ),
+            live AS MATERIALIZED (
+                SELECT id FROM {units_table}
+                WHERE bank_id = $1
+                  AND id IN (SELECT memory_id FROM pairs UNION SELECT evidence_memory_id FROM pairs)
+                ORDER BY id
+                FOR KEY SHARE SKIP LOCKED
+            )
+            INSERT INTO {evidence_table} (memory_id, evidence_memory_id, bank_id, created_at)
+            SELECT p.memory_id, p.evidence_memory_id, $1, $4
+            FROM pairs p
+            JOIN live m ON m.id = p.memory_id
+            JOIN live e ON e.id = p.evidence_memory_id
+            ORDER BY p.memory_id, p.evidence_memory_id
+            ON CONFLICT (memory_id, evidence_memory_id) DO NOTHING
+            RETURNING memory_id
+            """,
+            bank_id,
+            [p[0] for p in ordered],
+            [p[1] for p in ordered],
+            now,
+        )
+        return len(inserted)
+
+    async def insert_lifecycle_relation(
+        self, conn: DatabaseConnection, *, table: str, row: LifecycleRelationRow
+    ) -> bool:
+        inserted = await conn.fetchval(
+            f"""
+            INSERT INTO {table}
+                (id, bank_id, relation_type, source_memory_id, target_memory_id, source_snapshot,
+                 target_snapshot, origin, reason, confidence, evidence, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10, $11::jsonb, $12)
+            ON CONFLICT ON CONSTRAINT uq_mlr_edge DO NOTHING
+            RETURNING id
+            """,
+            row.id,
+            row.bank_id,
+            row.relation_type,
+            row.source_memory_id,
+            row.target_memory_id,
+            row.source_snapshot,
+            row.target_snapshot,
+            row.origin,
+            row.reason,
+            row.confidence,
+            row.evidence,
+            row.created_at,
+        )
+        return inserted is not None
+
+    async def lock_relations_for_delete(
+        self, conn: DatabaseConnection, *, table: str, bank_id: str, unit_ids: Sequence[uuid.UUID]
+    ) -> None:
+        ids = sorted(set(unit_ids))
+        if not ids:
+            return
+        # Each endpoint found through its own index (an OR across the two columns is not indexable,
+        # the #3387 lesson), then all rows locked in one total order.
+        await conn.fetch(
+            f"""
+            SELECT r.id FROM {table} r
+            WHERE r.id IN (
+                SELECT id FROM {table} WHERE bank_id = $1 AND source_memory_id = ANY($2::uuid[])
+                UNION
+                SELECT id FROM {table} WHERE bank_id = $1 AND target_memory_id = ANY($2::uuid[])
+            )
+            ORDER BY LEAST(r.source_memory_id, r.target_memory_id),
+                     GREATEST(r.source_memory_id, r.target_memory_id),
+                     r.relation_type, r.id
+            FOR UPDATE OF r
+            """,
+            bank_id,
+            ids,
+        )
+
+    async def upsert_claim_shadow(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        units_table: str,
+        bank_id: str,
+        memory_id: uuid.UUID,
+        would_status: str,
+        deciding_snapshot: str,
+        evidence_ids: str,
+        now: datetime,
+    ) -> bool:
+        written = await conn.fetchval(
+            f"""
+            WITH locked AS MATERIALIZED (
+                SELECT id FROM {units_table} WHERE bank_id = $1 AND id = $2 FOR KEY SHARE SKIP LOCKED
+            )
+            INSERT INTO {table} (memory_id, bank_id, would_status, deciding_snapshot, evidence_ids, created_at)
+            SELECT l.id, $1, $3, $4::jsonb, $5::jsonb, $6 FROM locked l
+            ON CONFLICT (memory_id) DO UPDATE
+            SET would_status = EXCLUDED.would_status, deciding_snapshot = EXCLUDED.deciding_snapshot,
+                evidence_ids = EXCLUDED.evidence_ids, created_at = EXCLUDED.created_at
+            RETURNING memory_id
+            """,
+            bank_id,
+            memory_id,
+            would_status,
+            deciding_snapshot,
+            evidence_ids,
+            now,
+        )
+        return written is not None

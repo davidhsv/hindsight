@@ -403,6 +403,24 @@ class RetentionStateUpdate:
     exemption_reason: str | None
 
 
+@dataclass(frozen=True)
+class LifecycleRelationRow:
+    """One ``memory_lifecycle_relations`` row to insert; the JSON columns already serialized."""
+
+    id: uuid.UUID
+    bank_id: str
+    relation_type: str
+    source_memory_id: uuid.UUID | None
+    target_memory_id: uuid.UUID | None
+    source_snapshot: str
+    target_snapshot: str
+    origin: str
+    reason: str | None
+    confidence: float | None
+    evidence: str
+    created_at: datetime
+
+
 class DataAccessOps(ABC):
     """Backend-specific multi-statement data access operations.
 
@@ -1192,6 +1210,89 @@ class DataAccessOps(ABC):
         now: datetime,
     ) -> None:
         """Write every writable column of the given retention rows and stamp ``updated_at = now``."""
+        ...
+
+    # -- Claim lifecycle (DESIGN.md §3 Locking, §5, §7) ---------------------
+    #
+    # Same protocol as the retention writers above: parents locked in id order in the statement that
+    # inserts the side rows (PG ``FOR KEY SHARE``; Oracle per-row ``FOR UPDATE``), then the claim rows
+    # ``FOR UPDATE`` in id order. Per-memory serialization of truth status is on the claim row.
+
+    @abstractmethod
+    async def upsert_default_claim_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        claims_table: str,
+        units_table: str,
+        bank_id: str,
+        memory_ids: Sequence[uuid.UUID],
+        now: datetime,
+        skip_locked: bool,
+    ) -> list[str]:
+        """Lock ``memory_ids``' claim rows, giving every live memory without one a default ``active`` row.
+
+        Returns the ids now locked, sorted: the requested memories that are live in the bank (and, with
+        ``skip_locked``, not held exclusively by another transaction — a memory being deleted).
+        """
+        ...
+
+    @abstractmethod
+    async def insert_claim_evidence(
+        self,
+        conn: DatabaseConnection,
+        *,
+        evidence_table: str,
+        units_table: str,
+        bank_id: str,
+        pairs: Sequence[tuple[uuid.UUID, uuid.UUID]],
+        now: datetime,
+    ) -> int:
+        """Insert ``(memory_id, evidence_memory_id)`` rows whose two memories are live in the bank.
+
+        Both parents are locked in id order with ``SKIP LOCKED`` in the inserting statement (PG), so an
+        evidence fact being deleted is skipped rather than failing the deferred FK at COMMIT. Existing
+        rows are left alone. Returns how many rows were inserted.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_lifecycle_relation(
+        self, conn: DatabaseConnection, *, table: str, row: LifecycleRelationRow
+    ) -> bool:
+        """Insert one relation row unless ``(source, target, type)`` already exists; True when inserted.
+
+        PG: ``ON CONFLICT ON CONSTRAINT uq_mlr_edge DO NOTHING``. Oracle: ``IGNORE_ROW_ON_DUPKEY_INDEX``
+        on the function-based ``uq_mlr_edge``, then a re-select of the id.
+        """
+        ...
+
+    @abstractmethod
+    async def lock_relations_for_delete(
+        self, conn: DatabaseConnection, *, table: str, bank_id: str, unit_ids: Sequence[uuid.UUID]
+    ) -> None:
+        """Lock every relation row touching ``unit_ids``, ordered by ``LEAST``/``GREATEST`` of its
+        endpoints then type, ``FOR UPDATE``, so the ``ON DELETE SET NULL`` cascade of the parent delete
+        that follows cannot deadlock against another delete (the #4251 shape). Never deletes a row.
+        """
+        ...
+
+    @abstractmethod
+    async def upsert_claim_shadow(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        units_table: str,
+        bank_id: str,
+        memory_id: uuid.UUID,
+        would_status: str,
+        deciding_snapshot: str,
+        evidence_ids: str,
+        now: datetime,
+    ) -> bool:
+        """Write the memory's observe-mode would-retire record (the latest decision replaces an older
+        one). The parent is locked ``SKIP LOCKED``; False when it is not live (or being deleted)."""
         ...
 
     # -- Shared helpers (concrete) -----------------------------------------

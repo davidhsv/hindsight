@@ -17,11 +17,14 @@ import (
 // checks if the UpdateMemoryLifecycleRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &UpdateMemoryLifecycleRequest{}
 
-// UpdateMemoryLifecycleRequest Request model for changing how a memory is retained.  Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle'. Omitted fields stay as they are; at least one must be set.
+// UpdateMemoryLifecycleRequest Request model for changing how a memory is retained, and what should be believed about it.  The retention fields need the bank's adaptive memory mode to be 'rank' or 'lifecycle'; the truth fields need 'lifecycle'. Omitted fields stay as they are; at least one must be set.
 type UpdateMemoryLifecycleRequest struct {
 	Importance NullableFloat32 `json:"importance,omitempty"`
 	ForgettingExempt NullableBool `json:"forgetting_exempt,omitempty"`
 	ExemptionReason NullableString `json:"exemption_reason,omitempty"`
+	TruthStatus NullableString `json:"truth_status,omitempty"`
+	SupersededBy NullableString `json:"superseded_by,omitempty"`
+	Reason NullableString `json:"reason,omitempty"`
 }
 
 // NewUpdateMemoryLifecycleRequest instantiates a new UpdateMemoryLifecycleRequest object
@@ -167,6 +170,132 @@ func (o *UpdateMemoryLifecycleRequest) UnsetExemptionReason() {
 	o.ExemptionReason.Unset()
 }
 
+// GetTruthStatus returns the TruthStatus field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *UpdateMemoryLifecycleRequest) GetTruthStatus() string {
+	if o == nil || IsNil(o.TruthStatus.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.TruthStatus.Get()
+}
+
+// GetTruthStatusOk returns a tuple with the TruthStatus field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *UpdateMemoryLifecycleRequest) GetTruthStatusOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.TruthStatus.Get(), o.TruthStatus.IsSet()
+}
+
+// HasTruthStatus returns a boolean if a field has been set.
+func (o *UpdateMemoryLifecycleRequest) HasTruthStatus() bool {
+	if o != nil && o.TruthStatus.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetTruthStatus gets a reference to the given NullableString and assigns it to the TruthStatus field.
+func (o *UpdateMemoryLifecycleRequest) SetTruthStatus(v string) {
+	o.TruthStatus.Set(&v)
+}
+// SetTruthStatusNil sets the value for TruthStatus to be an explicit nil
+func (o *UpdateMemoryLifecycleRequest) SetTruthStatusNil() {
+	o.TruthStatus.Set(nil)
+}
+
+// UnsetTruthStatus ensures that no value is present for TruthStatus, not even an explicit nil
+func (o *UpdateMemoryLifecycleRequest) UnsetTruthStatus() {
+	o.TruthStatus.Unset()
+}
+
+// GetSupersededBy returns the SupersededBy field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *UpdateMemoryLifecycleRequest) GetSupersededBy() string {
+	if o == nil || IsNil(o.SupersededBy.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.SupersededBy.Get()
+}
+
+// GetSupersededByOk returns a tuple with the SupersededBy field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *UpdateMemoryLifecycleRequest) GetSupersededByOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.SupersededBy.Get(), o.SupersededBy.IsSet()
+}
+
+// HasSupersededBy returns a boolean if a field has been set.
+func (o *UpdateMemoryLifecycleRequest) HasSupersededBy() bool {
+	if o != nil && o.SupersededBy.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetSupersededBy gets a reference to the given NullableString and assigns it to the SupersededBy field.
+func (o *UpdateMemoryLifecycleRequest) SetSupersededBy(v string) {
+	o.SupersededBy.Set(&v)
+}
+// SetSupersededByNil sets the value for SupersededBy to be an explicit nil
+func (o *UpdateMemoryLifecycleRequest) SetSupersededByNil() {
+	o.SupersededBy.Set(nil)
+}
+
+// UnsetSupersededBy ensures that no value is present for SupersededBy, not even an explicit nil
+func (o *UpdateMemoryLifecycleRequest) UnsetSupersededBy() {
+	o.SupersededBy.Unset()
+}
+
+// GetReason returns the Reason field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *UpdateMemoryLifecycleRequest) GetReason() string {
+	if o == nil || IsNil(o.Reason.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.Reason.Get()
+}
+
+// GetReasonOk returns a tuple with the Reason field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *UpdateMemoryLifecycleRequest) GetReasonOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Reason.Get(), o.Reason.IsSet()
+}
+
+// HasReason returns a boolean if a field has been set.
+func (o *UpdateMemoryLifecycleRequest) HasReason() bool {
+	if o != nil && o.Reason.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetReason gets a reference to the given NullableString and assigns it to the Reason field.
+func (o *UpdateMemoryLifecycleRequest) SetReason(v string) {
+	o.Reason.Set(&v)
+}
+// SetReasonNil sets the value for Reason to be an explicit nil
+func (o *UpdateMemoryLifecycleRequest) SetReasonNil() {
+	o.Reason.Set(nil)
+}
+
+// UnsetReason ensures that no value is present for Reason, not even an explicit nil
+func (o *UpdateMemoryLifecycleRequest) UnsetReason() {
+	o.Reason.Unset()
+}
+
 func (o UpdateMemoryLifecycleRequest) MarshalJSON() ([]byte, error) {
 	toSerialize,err := o.ToMap()
 	if err != nil {
@@ -185,6 +314,15 @@ func (o UpdateMemoryLifecycleRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.ExemptionReason.IsSet() {
 		toSerialize["exemption_reason"] = o.ExemptionReason.Get()
+	}
+	if o.TruthStatus.IsSet() {
+		toSerialize["truth_status"] = o.TruthStatus.Get()
+	}
+	if o.SupersededBy.IsSet() {
+		toSerialize["superseded_by"] = o.SupersededBy.Get()
+	}
+	if o.Reason.IsSet() {
+		toSerialize["reason"] = o.Reason.Get()
 	}
 	return toSerialize, nil
 }

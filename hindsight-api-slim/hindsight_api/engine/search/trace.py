@@ -10,6 +10,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from ..response_models import RecallLifecycle
+
 
 class TemporalConstraint(BaseModel):
     """Detected temporal constraint from query analysis."""
@@ -133,11 +135,42 @@ class RerankedResult(BaseModel):
     # Claim-lifecycle annotation (truth status, validity, successor) for a result whose claim is
     # not plain active, in lifecycle mode. Omitted from the payload when None, so traces from
     # every other mode keep their exact shape.
-    lifecycle: dict[str, Any] | None = Field(
+    lifecycle: RecallLifecycle | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
         description="Claim lifecycle state of this result (adaptive memory lifecycle mode only)",
     )
+
+
+class LifecycleFilteredResult(BaseModel):
+    """A candidate the lifecycle view removed before the reranker saw it."""
+
+    node_id: str = Field(description="Memory unit ID")
+    truth_status: str = Field(description="Its claim status: superseded, refuted (or uncertain, outside as_of)")
+    retired_via: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="How it was retired (supersedes, refutes, merges, splits, explicit, inherited)",
+    )
+    superseded_by: str | None = Field(
+        default=None, exclude_if=lambda v: v is None, description="The memory that replaced it"
+    )
+
+
+class LifecycleTraceInfo(BaseModel):
+    """Which claim view a lifecycle-mode recall applied, and why."""
+
+    view: str = Field(description="current, historical, as_of or all-with-status (internal)")
+    as_of: datetime | None = Field(
+        default=None, exclude_if=lambda v: v is None, description="The instant an as_of view kept claims valid at"
+    )
+    historical_cue: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="The phrase pattern that turned this recall historical (adaptive_memory_historical_cues)",
+    )
+    claims_checked: int = Field(description="Merged candidates whose claim was read before the reranker trim")
+    refill_rounds: int = Field(description="Extra claim reads made to refill the trim after removals")
 
 
 class AdaptiveTraceInfo(BaseModel):
@@ -223,6 +256,17 @@ class SearchTrace(BaseModel):
         default=None,
         exclude_if=lambda v: v is None,
         description="Adaptive memory: mode, factor parameters and observe-mode simulation",
+    )
+    # Lifecycle mode only: the claim view and what it removed. Omitted otherwise.
+    lifecycle: LifecycleTraceInfo | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Adaptive memory lifecycle mode: the claim view this recall applied",
+    )
+    lifecycle_filtered: list[LifecycleFilteredResult] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Candidates the lifecycle view removed (status and successor), in fusion order",
     )
 
     model_config = {"json_encoders": {datetime: lambda v: v.isoformat()}}

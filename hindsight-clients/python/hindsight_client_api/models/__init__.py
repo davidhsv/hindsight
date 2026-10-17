@@ -163,6 +163,7 @@ from hindsight_client_api.models.prompt_block_model import PromptBlockModel
 from hindsight_client_api.models.prompt_message_model import PromptMessageModel
 from hindsight_client_api.models.prompt_preview_request import PromptPreviewRequest
 from hindsight_client_api.models.prompt_preview_response import PromptPreviewResponse
+from hindsight_client_api.models.recall_lifecycle import RecallLifecycle
 from hindsight_client_api.models.recall_request import RecallRequest
 from hindsight_client_api.models.recall_response import RecallResponse
 from hindsight_client_api.models.recall_result import RecallResult

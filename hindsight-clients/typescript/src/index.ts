@@ -599,6 +599,10 @@ export class HindsightClient {
       minScores?: MinScores;
       /** Window for the temporal retrieval arm, supplied instead of extracting dates from the query text. Ranks memories dated inside the window higher; it does NOT drop memories dated outside it, so it is not a way to restrict results to a period. Ignored when the bank has temporal retrieval disabled. */
       temporalWindow?: TemporalWindow;
+      /** Which memories to show when the bank's adaptive memory mode is 'lifecycle' (ignored otherwise): 'current' leaves out superseded and refuted memories; 'historical' also returns superseded ones, each with a `lifecycle` annotation. Omitted: the bank's adaptive_memory_default_view. */
+      lifecycleView?: "current" | "historical";
+      /** Show memories as they stood at this instant (ISO 8601; no offset means UTC), lifecycle mode only: a memory is returned only if its claim was valid then. Takes precedence over lifecycleView; does not change ranking. */
+      asOf?: string;
       signal?: AbortSignal;
     }
   ): Promise<RecallResponse> {
@@ -634,6 +638,8 @@ export class HindsightClient {
             tag_groups: options?.tagGroups,
             min_scores: options?.minScores,
             temporal_window: options?.temporalWindow,
+            lifecycle_view: options?.lifecycleView,
+            as_of: options?.asOf,
           },
           signal: options?.signal,
         }),
@@ -1031,7 +1037,7 @@ export class HindsightClient {
       memoryDefense?: Record<string, unknown>;
       /** Write an audit log entry for each operation on this bank. */
       auditLogEnabled?: boolean;
-      /** Adaptive memory mode: 'off' (default), 'observe', 'rank' or 'lifecycle' (its claim part is reserved for a later release). */
+      /** Adaptive memory mode: 'off' (default), 'observe', 'rank' or 'lifecycle' (rank plus claim lifecycle: superseded and refuted memories stop answering current recall). */
       adaptiveMemoryMode?: string;
       /** Weight of the retention factor in the final recall score, in [0, 1] (0 = no decay). */
       adaptiveMemoryScoreAlpha?: number;
@@ -1043,9 +1049,9 @@ export class HindsightClient {
       adaptiveMemoryBaseStabilityDays?: number;
       /** Cap on a memory's stability in days (must be >= adaptiveMemoryBaseStabilityDays). */
       adaptiveMemoryMaxStabilityDays?: number;
-      /** Lifecycle recall view when the request names none: 'current' (default) or 'historical' (reserved). */
+      /** Lifecycle recall view when the request names none: 'current' (default; superseded and refuted memories are left out) or 'historical' (superseded ones are returned too, annotated). */
       adaptiveMemoryDefaultView?: string;
-      /** Detect historical phrasing in external recall queries (reserved; takes effect in a later release). */
+      /** Detect historical phrasing in external recall queries that name no view and answer them from the historical view (or as of the date). Lifecycle mode only. */
       adaptiveMemoryHistoricalCues?: boolean;
       signal?: AbortSignal;
     }

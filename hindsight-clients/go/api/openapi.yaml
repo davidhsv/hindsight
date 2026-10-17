@@ -667,11 +667,16 @@ paths:
       - Memory
   /v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle:
     patch:
-      description: "Change how a memory (a fact or an observation) is retained: its\
-        \ importance and its exemption from retention decay. Returns the memory's\
-        \ lifecycle view, the same one GET /memories/{memory_id} shows under 'lifecycle'.\
-        \ Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle' (409 otherwise).\
-        \ 404 when the memory is missing or invalidated."
+      description: "Change how a memory (a fact or an observation) is retained — its\
+        \ importance and its exemption from retention decay, in adaptive memory mode\
+        \ 'rank' or 'lifecycle' — and what should be believed about it: truth_status,\
+        \ superseded_by and reason, in mode 'lifecycle' only. Retiring a memory (superseded/refuted)\
+        \ takes it out of current recall and records an explicit lifecycle relation;\
+        \ 'active' restores it. Returns the memory's lifecycle view, the same one\
+        \ GET /memories/{memory_id} shows under 'lifecycle'. 409 when the bank's mode\
+        \ does not allow the change or the memory is already retired; 404 when the\
+        \ memory (or superseded_by) is missing or invalidated; 400 for a successor\
+        \ in another scope."
       operationId: update_memory_lifecycle
       parameters:
       - explode: false
@@ -12218,6 +12223,38 @@ components:
           nullable: true
           type: string
       title: PromptPreviewResponse
+    RecallLifecycle:
+      description: |-
+        What should be believed about a recalled memory, when that is not simply "it holds".
+
+        Present on a recall result only when the bank's adaptive memory mode is ``lifecycle`` and the
+        memory's claim is not plain ``active``: a superseded or refuted memory a historical or
+        ``as_of`` recall returned, or an ``uncertain`` one (contested by conflicting evidence).
+      properties:
+        truth_status:
+          description: "'superseded' (a later memory replaced it), 'refuted' (it was\
+            \ wrong) or 'uncertain' (conflicting evidence, not resolved)"
+          enum:
+          - uncertain
+          - superseded
+          - refuted
+          title: Truth Status
+          type: string
+        confidence:
+          nullable: true
+          type: number
+        valid_from:
+          nullable: true
+          type: string
+        valid_to:
+          nullable: true
+          type: string
+        superseded_by:
+          nullable: true
+          type: string
+      required:
+      - truth_status
+      title: RecallLifecycle
     RecallRequest:
       description: Request model for recall endpoint.
       example:
@@ -12294,6 +12331,16 @@ components:
           $ref: '#/components/schemas/MinScores'
         temporal_window:
           $ref: '#/components/schemas/TemporalWindow'
+        lifecycle_view:
+          enum:
+          - current
+          - historical
+          nullable: true
+          type: string
+        as_of:
+          format: date-time
+          nullable: true
+          type: string
       required:
       - query
       title: RecallRequest
@@ -12422,6 +12469,8 @@ components:
           type: array
         scores:
           $ref: '#/components/schemas/RecallScores'
+        lifecycle:
+          $ref: '#/components/schemas/RecallLifecycle'
         attachments:
           items:
             $ref: '#/components/schemas/ChunkAttachment'
@@ -13642,14 +13691,14 @@ components:
       title: UpdateDocumentResponse
     UpdateMemoryLifecycleRequest:
       description: |-
-        Request model for changing how a memory is retained.
+        Request model for changing how a memory is retained, and what should be believed about it.
 
-        Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle'. Omitted fields stay as they
-        are; at least one must be set.
+        The retention fields need the bank's adaptive memory mode to be 'rank' or 'lifecycle'; the truth
+        fields need 'lifecycle'. Omitted fields stay as they are; at least one must be set.
       example:
-        exemption_reason: compliance requirement
-        forgetting_exempt: true
-        importance: 0.9
+        reason: upgraded to Java 21
+        superseded_by: 123e4567-e89b-12d3-a456-426614174000
+        truth_status: superseded
       properties:
         importance:
           maximum: 1.0
@@ -13660,6 +13709,22 @@ components:
           nullable: true
           type: boolean
         exemption_reason:
+          maxLength: 500
+          minLength: 1
+          nullable: true
+          type: string
+        truth_status:
+          enum:
+          - active
+          - uncertain
+          - superseded
+          - refuted
+          nullable: true
+          type: string
+        superseded_by:
+          nullable: true
+          type: string
+        reason:
           maxLength: 500
           minLength: 1
           nullable: true

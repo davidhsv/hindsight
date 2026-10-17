@@ -875,7 +875,7 @@ async def test_only_a_flagged_recall_with_the_static_switch_on_reinforces(memory
     bank_id = await _bank(memory, request_context)
     fact = await _fact(memory, bank_id, "Jo maintains the deploy scripts.", at=day(0))
 
-    result = await _recall(memory, bank_id, request_context, _reinforce_results=True)
+    result = await _recall(memory, bank_id, request_context, _external=True)
     assert [m.id for m in result.results] == [fact]
     assert await _bank_ledger(memory, bank_id) == [], "the static switch is off by default"
 
@@ -883,7 +883,7 @@ async def test_only_a_flagged_recall_with_the_static_switch_on_reinforces(memory
     await _recall(memory, bank_id, request_context)
     assert await _bank_ledger(memory, bank_id) == [], "an unflagged (internal) recall"
 
-    await _recall(memory, bank_id, request_context, _reinforce_results=True, question_date=day(100))
+    await _recall(memory, bank_id, request_context, _external=True, question_date=day(100))
     (event,) = await _ledger(memory, fact)
     assert (event["source_type"], event["event_time"], event["outcome"]) == (
         "final_external_recall",
@@ -906,7 +906,7 @@ async def test_a_recall_reinforces_exactly_the_results_it_returned(memory, reque
     assert {m.id for m in everyone.results} == facts, "every fact is a candidate for the query"
 
     # The token budget trims the final results below the candidate pool.
-    trimmed = await _recall(memory, bank_id, request_context, max_tokens=24, _reinforce_results=True)
+    trimmed = await _recall(memory, bank_id, request_context, max_tokens=24, _external=True)
     returned = {m.id for m in trimmed.results}
     assert returned and returned < facts
     assert {str(r["memory_id"]) for r in await _bank_ledger(memory, bank_id)} == returned
@@ -919,9 +919,7 @@ async def test_a_future_query_timestamp_is_capped_at_the_wall_clock(memory, requ
     fact = await _fact(memory, bank_id, "Jo maintains the deploy scripts.", at=day(0))
     wall = datetime(2026, 6, 1, tzinfo=UTC)
     with patch("hindsight_api.engine.adaptive.clock.utcnow", return_value=wall):
-        await _recall(
-            memory, bank_id, request_context, _reinforce_results=True, question_date=wall + timedelta(days=90)
-        )
+        await _recall(memory, bank_id, request_context, _external=True, question_date=wall + timedelta(days=90))
     (event,) = await _ledger(memory, fact)
     assert event["event_time"] == wall
     await memory.delete_bank(bank_id, request_context=request_context)
@@ -951,7 +949,7 @@ async def test_both_mcp_recall_tools_flag_their_recall(mock_memory):
         mock_memory.recall_async.reset_mock()
         mcp = _make_mcp_server(mock_memory, {"recall"}, include_bank_id=include_bank_id)
         await _tools(mcp)["recall"].fn(query="q")
-        assert mock_memory.recall_async.call_args.kwargs["_reinforce_results"] is True
+        assert mock_memory.recall_async.call_args.kwargs["_external"] is True
 
 
 # --------------------------------------------------------------------------- retain
