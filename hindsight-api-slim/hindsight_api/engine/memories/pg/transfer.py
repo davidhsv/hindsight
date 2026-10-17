@@ -383,6 +383,10 @@ async def dump_archived_memories(*, conn: Any, fq_table: Callable[[str], str], b
     dumped: list[dict] = []
     for row in rows:
         record = {k: v for k, v in dict(row).items() if k not in _DERIVED_COLUMNS and k not in ("id", "entity_ids")}
+        # Present only when the memory carried adaptive state when it was archived,
+        # so a bank that never used adaptive memory exports exactly what it did before.
+        if record.get("adaptive_state") is None:
+            record.pop("adaptive_state", None)
         # parse_chunk_id, not a naive rsplit: ids written since #4244 escape the
         # separator inside the bank and document components, so splitting on the
         # last underscore recovers the wrong ordinal for an escaped id.

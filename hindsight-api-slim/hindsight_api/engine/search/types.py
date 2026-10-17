@@ -193,6 +193,17 @@ class ScoredResult:
     combined_score: float = 0.0
     weight: float = 0.0  # Final weight used for ranking
 
+    # Adaptive memory (engine/adaptive/scoring.py). None unless the bank's adaptive mode loaded
+    # state for this recall, and then only on the combined-scoring branch; to_dict() emits them
+    # only when set, so a mode-off recall serializes exactly as before.
+    adaptive_base_score: float | None = None  # weight before the adaptive factor
+    retrievability: float | None = None
+    stability_days: float | None = None
+    importance: float | None = None
+    reinforcement_count: int | None = None
+    retention_factor: float | None = None
+    adaptive_factor: float | None = None
+
     @property
     def id(self) -> str:
         """Convenience property to access ID."""
@@ -249,5 +260,21 @@ class ScoredResult:
         result["combined_score"] = self.combined_score
         result["weight"] = self.weight
         result["activation"] = self.weight  # Legacy field
+
+        if self.adaptive_factor is not None:
+            for key, value in (
+                ("adaptive_base_score", self.adaptive_base_score),
+                ("retrievability", self.retrievability),
+                ("stability_days", self.stability_days),
+                ("importance", self.importance),
+                ("reinforcement_count", self.reinforcement_count),
+                ("retention_factor", self.retention_factor),
+                ("adaptive_factor", self.adaptive_factor),
+                # The relevance the factor scales, next to it in the trace so a reader can tell a
+                # demoted-because-faded memory from a demoted-because-irrelevant one.
+                ("semantic_score", self.candidate.arm_scores.semantic),
+            ):
+                if value is not None:
+                    result[key] = value
 
         return result

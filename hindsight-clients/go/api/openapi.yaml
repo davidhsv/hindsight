@@ -6517,6 +6517,34 @@ components:
         recall_chunks_max_tokens:
           nullable: true
           type: integer
+        adaptive_memory_mode:
+          nullable: true
+          type: string
+        adaptive_memory_score_alpha:
+          maximum: 1.0
+          minimum: 0.0
+          nullable: true
+          type: number
+        adaptive_memory_score_floor:
+          maximum: 1.0
+          minimum: 0.0
+          nullable: true
+          type: number
+        adaptive_memory_reinforcement_enabled:
+          nullable: true
+          type: boolean
+        adaptive_memory_base_stability_days:
+          nullable: true
+          type: number
+        adaptive_memory_max_stability_days:
+          nullable: true
+          type: number
+        adaptive_memory_default_view:
+          nullable: true
+          type: string
+        adaptive_memory_historical_cues:
+          nullable: true
+          type: boolean
         memory_defense:
           additionalProperties: {}
           nullable: true

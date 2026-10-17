@@ -729,6 +729,116 @@
           "description": "Max tokens of raw chunks returned by recall (when recall_include_chunks is set)",
           "title": "Recall Chunks Max Tokens"
         },
+        "adaptive_memory_mode": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Adaptive memory mode: 'off' (default; recall is unchanged), 'observe' (compute retention and report it in traces and metrics only), 'rank' (retention down-weights rarely reinforced memories) or 'lifecycle' (rank plus claim lifecycle; the claim part is reserved for a later release, so it currently behaves exactly like 'rank')",
+          "title": "Adaptive Memory Mode"
+        },
+        "adaptive_memory_score_alpha": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Weight of the retention factor in the final recall score (0 = no decay)",
+          "title": "Adaptive Memory Score Alpha"
+        },
+        "adaptive_memory_score_floor": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Lowest retention factor a fully-forgotten memory can reach",
+          "title": "Adaptive Memory Score Floor"
+        },
+        "adaptive_memory_reinforcement_enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Let reinforcement events raise a memory's stability (reserved; takes effect in a later release)",
+          "title": "Adaptive Memory Reinforcement Enabled"
+        },
+        "adaptive_memory_base_stability_days": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Days before an unreinforced world fact's retrievability falls to e^-1",
+          "title": "Adaptive Memory Base Stability Days"
+        },
+        "adaptive_memory_max_stability_days": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cap on a memory's stability in days (must be >= adaptive_memory_base_stability_days)",
+          "title": "Adaptive Memory Max Stability Days"
+        },
+        "adaptive_memory_default_view": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Lifecycle recall view when the request names none: 'current' (default) or 'historical' (reserved; takes effect in a later release)",
+          "title": "Adaptive Memory Default View"
+        },
+        "adaptive_memory_historical_cues": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Detect historical phrasing in external recall queries and switch them to a historical view (reserved; takes effect in a later release)",
+          "title": "Adaptive Memory Historical Cues"
+        },
         "memory_defense": {
           "anyOf": [
             {

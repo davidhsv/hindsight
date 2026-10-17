@@ -54,6 +54,7 @@ from ..search.tags import TagGroup, TagsMatch, tag_filter_active
 from ..search.types import RetrievalResult
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..adaptive.models import AdaptiveState
     from ..consolidation.consolidator import _TemporalBounds
     from ..embeddings import Embeddings
     from ..response_models import MemoryFact
@@ -1873,6 +1874,33 @@ class MemoriesExtension(Extension, ABC):
         is for a store whose ``recall_unified`` never asks for one; asking then raises.
         """
         return None
+
+    # ------------------------------------------------------------------ adaptive memory
+    #
+    # Per-memory retention and claim state (engine/adaptive/). A store that cannot hold it
+    # answers False below, and the bank's adaptive mode then resolves to "off": recall runs
+    # exactly as it would with the feature disabled. The defaults are that answer, so a store
+    # that predates the feature keeps working untouched.
+
+    def supports_adaptive_state_for(self, bank_id: str) -> bool:
+        """Whether this store keeps adaptive-memory state (retention, claims) for ``bank_id``.
+
+        Default False. Per bank, like :meth:`store_owned_for`, for a router whose banks live in
+        stores of which only some keep the state.
+        """
+        return False
+
+    async def load_adaptive_state(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, AdaptiveState]:
+        """The stored adaptive state of ``memory_ids``, keyed by memory id; one batch per recall.
+
+        A memory with neither a retention nor a claim row is ABSENT from the result, not mapped to
+        an empty state: absence means "use the lazy defaults", which is what most memories are.
+        Ids that do not parse, or belong to another bank, are simply absent. Default ``{}``.
+
+        ``conn`` is a read connection the caller acquired for this call alone (recall runs it
+        beside the cross-encoder, outside its budgeted retrieval block).
+        """
+        return {}
 
     # ------------------------------------------------------------------ addressed reads
     #

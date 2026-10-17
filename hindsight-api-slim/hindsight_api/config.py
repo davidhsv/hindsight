@@ -7,6 +7,7 @@ All environment variables and their defaults are defined here.
 import importlib.util
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -1116,6 +1117,35 @@ ENV_RECENCY_DECAY_FUNCTION = "HINDSIGHT_API_RECENCY_DECAY_FUNCTION"
 ENV_RECENCY_DECAY_LINEAR_WINDOW_DAYS = "HINDSIGHT_API_RECENCY_DECAY_LINEAR_WINDOW_DAYS"
 ENV_RECENCY_DECAY_HALFLIFE_DAYS = "HINDSIGHT_API_RECENCY_DECAY_HALFLIFE_DAYS"
 
+# Adaptive memory: per-memory retention (how readily a memory comes back without a
+# strong cue) and truth lifecycle (whether a claim is still current). This is NOT
+# the recency decay above, which nudges every memory by its event age alone and
+# keeps no per-memory state. Prefixed ADAPTIVE_MEMORY_ because RETENTION_* already
+# names the row-retention sweeps (operation/audit/LLM-trace retention days).
+# The first block is hierarchical (overridable per bank), the second static.
+ENV_ADAPTIVE_MEMORY_MODE = "HINDSIGHT_API_ADAPTIVE_MEMORY_MODE"
+ENV_ADAPTIVE_MEMORY_SCORE_ALPHA = "HINDSIGHT_API_ADAPTIVE_MEMORY_SCORE_ALPHA"
+ENV_ADAPTIVE_MEMORY_SCORE_FLOOR = "HINDSIGHT_API_ADAPTIVE_MEMORY_SCORE_FLOOR"
+ENV_ADAPTIVE_MEMORY_REINFORCEMENT_ENABLED = "HINDSIGHT_API_ADAPTIVE_MEMORY_REINFORCEMENT_ENABLED"
+ENV_ADAPTIVE_MEMORY_BASE_STABILITY_DAYS = "HINDSIGHT_API_ADAPTIVE_MEMORY_BASE_STABILITY_DAYS"
+ENV_ADAPTIVE_MEMORY_MAX_STABILITY_DAYS = "HINDSIGHT_API_ADAPTIVE_MEMORY_MAX_STABILITY_DAYS"
+ENV_ADAPTIVE_MEMORY_DEFAULT_VIEW = "HINDSIGHT_API_ADAPTIVE_MEMORY_DEFAULT_VIEW"
+ENV_ADAPTIVE_MEMORY_HISTORICAL_CUES = "HINDSIGHT_API_ADAPTIVE_MEMORY_HISTORICAL_CUES"
+ENV_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED = "HINDSIGHT_API_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED"
+ENV_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS = "HINDSIGHT_API_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS"
+ENV_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN = "HINDSIGHT_API_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN"
+ENV_ADAPTIVE_MEMORY_SOURCE_WEIGHTS = "HINDSIGHT_API_ADAPTIVE_MEMORY_SOURCE_WEIGHTS"
+ENV_ADAPTIVE_MEMORY_TYPE_STABILITY = "HINDSIGHT_API_ADAPTIVE_MEMORY_TYPE_STABILITY"
+ENV_ADAPTIVE_MEMORY_SOURCE_TRUST = "HINDSIGHT_API_ADAPTIVE_MEMORY_SOURCE_TRUST"
+ENV_ADAPTIVE_MEMORY_CONFLICT_POLICY = "HINDSIGHT_API_ADAPTIVE_MEMORY_CONFLICT_POLICY"
+ENV_ADAPTIVE_MEMORY_ARCHIVE_ENABLED = "HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_ENABLED"
+ENV_ADAPTIVE_MEMORY_ARCHIVE_THRESHOLD = "HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_THRESHOLD"
+ENV_ADAPTIVE_MEMORY_ARCHIVE_GRACE_DAYS = "HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_GRACE_DAYS"
+ENV_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE = "HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE"
+ENV_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE = "HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE"
+ENV_ADAPTIVE_MEMORY_PRUNE_ENABLED = "HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_ENABLED"
+ENV_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS = "HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS"
+
 # Audit log settings
 # AUDIT_LOG_ENABLED is the deployment-wide default and is overridable per bank
 # (and per tenant) through the bank config API, so auditing can be turned on for
@@ -1410,6 +1440,61 @@ DEFAULT_RECENCY_DECAY_FUNCTION = "linear"
 DEFAULT_RECENCY_DECAY_LINEAR_WINDOW_DAYS = 365.0
 # Exponential: age (days) at which the recency signal is neutral (0.5).
 DEFAULT_RECENCY_DECAY_HALFLIFE_DAYS = 90.0
+# Adaptive memory. Kept in sync with engine.adaptive.models.AdaptiveMode by a guard
+# test; defined here (not imported) so config stays free of the engine import graph.
+# "off" is the default and must stay byte-identical to a server without the feature.
+ADAPTIVE_MEMORY_MODES = ("off", "observe", "rank", "lifecycle")
+DEFAULT_ADAPTIVE_MEMORY_MODE = "off"
+# Weight of the retention factor in the final score: adaptive_factor =
+# (1 - alpha) + alpha * retention_factor. 0 disables decay; penalty-only, so the
+# worst case at the defaults is 1 - alpha * (1 - floor) = 0.93.
+DEFAULT_ADAPTIVE_MEMORY_SCORE_ALPHA = 0.1
+# Lowest retention_factor a fully-forgotten memory can reach (raised per memory by importance).
+DEFAULT_ADAPTIVE_MEMORY_SCORE_FLOOR = 0.3
+DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_ENABLED = True
+# Days before an unreinforced world fact's retrievability falls to e^-1. Frozen before
+# any benchmark run (midpoint between session-scale and project-scale memory).
+DEFAULT_ADAPTIVE_MEMORY_BASE_STABILITY_DAYS = 30.0
+DEFAULT_ADAPTIVE_MEMORY_MAX_STABILITY_DAYS = 3650.0
+# Lifecycle recall view when a request names none: "current" drops superseded and
+# refuted claims, "historical" keeps superseded ones (annotated).
+ADAPTIVE_MEMORY_VIEWS = ("current", "historical")
+DEFAULT_ADAPTIVE_MEMORY_DEFAULT_VIEW = "current"
+DEFAULT_ADAPTIVE_MEMORY_HISTORICAL_CUES = False
+# Recall inclusion is selection, not evidence of usefulness, and it makes benchmark
+# probes path-dependent, so recall never reinforces unless this is switched on.
+DEFAULT_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED = False
+DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS = 6.0
+DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN = 1.0
+# Per-source reinforcement weight. The keys are the complete set of reinforcement
+# source types (the memory_reinforcement_events.source_type CHECK); an unknown key
+# in the env map is rejected rather than silently never matching.
+DEFAULT_ADAPTIVE_MEMORY_SOURCE_WEIGHTS: dict[str, float] = {
+    "explicit_confirmation": 1.0,
+    "independent_retain_confirmation": 0.8,
+    "successful_reflect_use": 0.6,
+    "observation_new_evidence": 0.5,
+    "final_external_recall": 0.2,
+}
+# Initial-stability multiplier per fact type (memory_units.fact_type CHECK values).
+DEFAULT_ADAPTIVE_MEMORY_TYPE_STABILITY: dict[str, float] = {
+    "experience": 0.5,
+    "world": 1.0,
+    "observation": 2.0,
+}
+# Trust per metadata `source` value, used only to resolve conflicting claims. Empty:
+# with no trust differential a conflict never auto-resolves, so repetition never
+# decides truth.
+DEFAULT_ADAPTIVE_MEMORY_SOURCE_TRUST: dict[str, float] = {}
+ADAPTIVE_MEMORY_CONFLICT_POLICIES = ("evidence", "latest")
+DEFAULT_ADAPTIVE_MEMORY_CONFLICT_POLICY = "evidence"
+DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_ENABLED = False
+DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_THRESHOLD = 0.05
+DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_GRACE_DAYS = 30.0
+DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE = 0.8
+DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE = 0.8
+DEFAULT_ADAPTIVE_MEMORY_PRUNE_ENABLED = False
+DEFAULT_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS = 180.0
 # Retrieval arms that can be boosted; mirrors fusion.py source_names.
 RECALL_STRATEGY_NAMES = ("semantic", "bm25", "graph", "temporal")
 # User-facing priority levels. Kept in sync with recall_boost.BOOST_LEVELS by a
@@ -2468,6 +2553,107 @@ def _validate_recency_decay_function(function: str) -> str:
     return function_lower
 
 
+def _parse_json_number_map(env_name: str, default: dict[str, float]) -> dict[str, float]:
+    """Parse a JSON-object env var of ``name -> number``, merged over ``default``.
+
+    Merged rather than replacing, so an operator who retunes one weight keeps the
+    documented values of the others. Shape errors raise here; which keys are allowed
+    and what range the values must fall in is checked in ``HindsightConfig.validate``,
+    so a config built any other way is held to the same contract.
+    """
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return dict(default)
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{env_name} must be a JSON object, got {raw!r}: {e}") from e
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{env_name} must be a JSON object, got {type(parsed).__name__}")
+    for key, value in parsed.items():
+        # bool is an int subclass, and JSON true must not pass as the weight 1.
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError(f"{env_name}[{key!r}] must be a number, got {value!r}")
+    return {**default, **{key: float(value) for key, value in parsed.items()}}
+
+
+def _require_number_in_range(
+    name: str,
+    value: Any,
+    *,
+    minimum: float,
+    maximum: float = math.inf,
+    exclusive_minimum: bool = False,
+) -> None:
+    """Raise unless ``value`` is a finite number in the given range.
+
+    Finite is checked explicitly: Python's ``float()`` and ``json.loads`` both accept
+    ``nan`` / ``inf``, and a NaN slips past every ordinary comparison.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
+    below = value <= minimum if exclusive_minimum else value < minimum
+    if below or value > maximum:
+        lower = f"> {minimum}" if exclusive_minimum else f">= {minimum}"
+        bound = lower if maximum == math.inf else f"{lower} and <= {maximum}"
+        raise ValueError(f"{name} must be {bound}, got {value!r}")
+
+
+_ADAPTIVE_MEMORY_CHOICE_FIELDS: dict[str, tuple[str, ...]] = {
+    "adaptive_memory_mode": ADAPTIVE_MEMORY_MODES,
+    "adaptive_memory_default_view": ADAPTIVE_MEMORY_VIEWS,
+}
+_ADAPTIVE_MEMORY_UNIT_INTERVAL_FIELDS = frozenset({"adaptive_memory_score_alpha", "adaptive_memory_score_floor"})
+_ADAPTIVE_MEMORY_POSITIVE_FIELDS = frozenset(
+    {"adaptive_memory_base_stability_days", "adaptive_memory_max_stability_days"}
+)
+#: The hierarchical adaptive-memory fields that carry a value constraint beyond their
+#: type (the two booleans need none).
+ADAPTIVE_MEMORY_CONSTRAINED_FIELDS = frozenset(
+    _ADAPTIVE_MEMORY_CHOICE_FIELDS.keys() | _ADAPTIVE_MEMORY_UNIT_INTERVAL_FIELDS | _ADAPTIVE_MEMORY_POSITIVE_FIELDS
+)
+
+
+def normalize_adaptive_memory_value(field_name: str, value: Any, *, name: str | None = None) -> Any:
+    """Validate one hierarchical adaptive-memory value and return its normalized form.
+
+    The single rule set for both doors: ``HindsightConfig.validate`` (env, reported by
+    env name) and the bank-config API (reported by field name, via ``name``). Choice
+    fields are matched case-insensitively and normalized to lower case, so the engine
+    compares against the canonical spelling only. Fields without a value constraint
+    pass through unchanged.
+    """
+    label = name or field_name
+    choices = _ADAPTIVE_MEMORY_CHOICE_FIELDS.get(field_name)
+    if choices is not None:
+        normalized = value.strip().lower() if isinstance(value, str) else value
+        if normalized not in choices:
+            raise ValueError(f"{label} must be one of {', '.join(choices)}, got {value!r}")
+        return normalized
+    if field_name in _ADAPTIVE_MEMORY_UNIT_INTERVAL_FIELDS:
+        _require_number_in_range(label, value, minimum=0.0, maximum=1.0)
+    elif field_name in _ADAPTIVE_MEMORY_POSITIVE_FIELDS:
+        _require_number_in_range(label, value, minimum=0.0, exclusive_minimum=True)
+    return value
+
+
+def validate_adaptive_memory_stability_bounds(
+    base_stability_days: Any,
+    max_stability_days: Any,
+    *,
+    base_name: str = "adaptive_memory_base_stability_days",
+    max_name: str = "adaptive_memory_max_stability_days",
+) -> None:
+    """Reject a stability cap below the initial stability it caps.
+
+    ``None`` on either side means "not set at this layer" and is not a violation.
+    """
+    if base_stability_days is None or max_stability_days is None:
+        return
+    if max_stability_days < base_stability_days:
+        raise ValueError(f"{max_name} ({max_stability_days}) must be >= {base_name} ({base_stability_days})")
+
+
 def _parse_bank_priority(raw: str) -> dict[str, int]:
     """Parse ``bank-pattern:priority,...`` into ``{pattern: priority}``.
 
@@ -3443,6 +3629,32 @@ class HindsightConfig:
     recency_decay_function: str
     recency_decay_linear_window_days: float
     recency_decay_halflife_days: float
+    # Adaptive memory (see ENV_ADAPTIVE_MEMORY_MODE). Hierarchical: mode through
+    # historical_cues. Static: the rest. The mode is typed str, not Literal, so the
+    # bank-config API derives a type contract for it; engine code reads an unknown or
+    # missing mode as "off".
+    adaptive_memory_mode: str
+    adaptive_memory_score_alpha: float
+    adaptive_memory_score_floor: float
+    adaptive_memory_reinforcement_enabled: bool
+    adaptive_memory_base_stability_days: float
+    adaptive_memory_max_stability_days: float
+    adaptive_memory_default_view: str
+    adaptive_memory_historical_cues: bool
+    adaptive_memory_recall_reinforcement_enabled: bool
+    adaptive_memory_reinforcement_cooldown_hours: float
+    adaptive_memory_reinforcement_gain: float
+    adaptive_memory_source_weights: dict[str, float]
+    adaptive_memory_type_stability: dict[str, float]
+    adaptive_memory_source_trust: dict[str, float]
+    adaptive_memory_conflict_policy: str
+    adaptive_memory_archive_enabled: bool
+    adaptive_memory_archive_threshold: float
+    adaptive_memory_archive_grace_days: float
+    adaptive_memory_archive_recall_min_score: float
+    adaptive_memory_archive_protect_importance: float
+    adaptive_memory_prune_enabled: bool
+    adaptive_memory_prune_after_days: float
     reranker_cohere_api_key: str | None
     reranker_cohere_model: str
     reranker_cohere_base_url: str | None
@@ -4051,6 +4263,17 @@ class HindsightConfig:
         "recall_budget_adaptive_high",
         "recall_budget_min",
         "recall_budget_max",
+        # Adaptive memory. Per bank so one bank can observe or rank while the rest of
+        # the deployment stays off; reinforcement sources, archiving and pruning stay
+        # server-level.
+        "adaptive_memory_mode",
+        "adaptive_memory_score_alpha",
+        "adaptive_memory_score_floor",
+        "adaptive_memory_reinforcement_enabled",
+        "adaptive_memory_base_stability_days",
+        "adaptive_memory_max_stability_days",
+        "adaptive_memory_default_view",
+        "adaptive_memory_historical_cues",
         # Disposition settings
         "disposition_skepticism",
         "disposition_literalism",
@@ -4301,6 +4524,8 @@ class HindsightConfig:
         if self.bm25_max_query_terms < 0:
             raise ValueError(f"Invalid bm25_max_query_terms: {self.bm25_max_query_terms}. Must be >= 0")
 
+        self._validate_adaptive_memory()
+
         # Validate bedrock_service_tier
         valid_bedrock_tiers = (None, "flex", "priority", "reserved")
         if self.llm_bedrock_service_tier not in valid_bedrock_tiers:
@@ -4398,6 +4623,77 @@ class HindsightConfig:
             raise ValueError(
                 f"{ENV_OPERATION_CLEANUP_BATCH_SIZE} must be >= 1, got {self.operation_cleanup_batch_size}"
             )
+
+    def _validate_adaptive_memory(self) -> None:
+        """Range-check the adaptive-memory settings, strictly.
+
+        A typo in the mode must fail start-up rather than quietly mean "off": an
+        operator who asked for ``rank`` and silently got ``off`` would read the
+        benchmark of an arm that never ran. Per-bank values are held to the same
+        rules by ``normalize_adaptive_memory_value`` in the bank-config API.
+        """
+        for field_name in sorted(ADAPTIVE_MEMORY_CONSTRAINED_FIELDS):
+            setattr(
+                self,
+                field_name,
+                normalize_adaptive_memory_value(
+                    field_name, getattr(self, field_name), name=f"HINDSIGHT_API_{field_name.upper()}"
+                ),
+            )
+        validate_adaptive_memory_stability_bounds(
+            self.adaptive_memory_base_stability_days,
+            self.adaptive_memory_max_stability_days,
+            base_name=ENV_ADAPTIVE_MEMORY_BASE_STABILITY_DAYS,
+            max_name=ENV_ADAPTIVE_MEMORY_MAX_STABILITY_DAYS,
+        )
+
+        if self.adaptive_memory_conflict_policy not in ADAPTIVE_MEMORY_CONFLICT_POLICIES:
+            raise ValueError(
+                f"{ENV_ADAPTIVE_MEMORY_CONFLICT_POLICY} must be one of "
+                f"{', '.join(ADAPTIVE_MEMORY_CONFLICT_POLICIES)}, got {self.adaptive_memory_conflict_policy!r}"
+            )
+        for env_name, value in (
+            (ENV_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS, self.adaptive_memory_reinforcement_cooldown_hours),
+            (ENV_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN, self.adaptive_memory_reinforcement_gain),
+            (ENV_ADAPTIVE_MEMORY_ARCHIVE_GRACE_DAYS, self.adaptive_memory_archive_grace_days),
+            (ENV_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS, self.adaptive_memory_prune_after_days),
+        ):
+            _require_number_in_range(env_name, value, minimum=0.0)
+        for env_name, value in (
+            (ENV_ADAPTIVE_MEMORY_ARCHIVE_THRESHOLD, self.adaptive_memory_archive_threshold),
+            (ENV_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE, self.adaptive_memory_archive_recall_min_score),
+            (ENV_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE, self.adaptive_memory_archive_protect_importance),
+        ):
+            _require_number_in_range(env_name, value, minimum=0.0, maximum=1.0)
+
+        # The two closed-vocabulary maps reject unknown keys: a misspelt source type
+        # or fact type would otherwise be accepted and then never match anything.
+        for env_name, mapping, allowed, exclusive_minimum in (
+            (
+                ENV_ADAPTIVE_MEMORY_SOURCE_WEIGHTS,
+                self.adaptive_memory_source_weights,
+                DEFAULT_ADAPTIVE_MEMORY_SOURCE_WEIGHTS.keys(),
+                False,
+            ),
+            (
+                ENV_ADAPTIVE_MEMORY_TYPE_STABILITY,
+                self.adaptive_memory_type_stability,
+                DEFAULT_ADAPTIVE_MEMORY_TYPE_STABILITY.keys(),
+                True,
+            ),
+            # Source trust is keyed by free-form metadata `source` values.
+            (ENV_ADAPTIVE_MEMORY_SOURCE_TRUST, self.adaptive_memory_source_trust, None, False),
+        ):
+            if not isinstance(mapping, dict):
+                raise ValueError(f"{env_name} must be a JSON object, got {type(mapping).__name__}")
+            if allowed is not None and (unknown := sorted(set(mapping) - set(allowed))):
+                raise ValueError(f"{env_name} has unknown keys {unknown}; allowed: {', '.join(allowed)}")
+            for key, value in mapping.items():
+                if not isinstance(key, str) or not key.strip():
+                    raise ValueError(f"{env_name} keys must be non-empty strings, got {key!r}")
+                _require_number_in_range(
+                    f"{env_name}[{key!r}]", value, minimum=0.0, exclusive_minimum=exclusive_minimum
+                )
 
     @classmethod
     def from_env(cls) -> "HindsightConfig":
@@ -4946,6 +5242,99 @@ class HindsightConfig:
             ),
             recency_decay_halflife_days=float(
                 os.getenv(ENV_RECENCY_DECAY_HALFLIFE_DAYS, str(DEFAULT_RECENCY_DECAY_HALFLIFE_DAYS))
+            ),
+            # Adaptive memory. Choices are lower-cased here (unset or empty = default) and
+            # rejected in validate() when unknown; numbers reject a non-number or a negative
+            # here and are range-checked in validate().
+            adaptive_memory_mode=(os.getenv(ENV_ADAPTIVE_MEMORY_MODE) or DEFAULT_ADAPTIVE_MEMORY_MODE).strip().lower(),
+            adaptive_memory_score_alpha=_parse_non_negative_float(
+                ENV_ADAPTIVE_MEMORY_SCORE_ALPHA,
+                os.getenv(ENV_ADAPTIVE_MEMORY_SCORE_ALPHA),
+                DEFAULT_ADAPTIVE_MEMORY_SCORE_ALPHA,
+            ),
+            adaptive_memory_score_floor=_parse_non_negative_float(
+                ENV_ADAPTIVE_MEMORY_SCORE_FLOOR,
+                os.getenv(ENV_ADAPTIVE_MEMORY_SCORE_FLOOR),
+                DEFAULT_ADAPTIVE_MEMORY_SCORE_FLOOR,
+            ),
+            adaptive_memory_reinforcement_enabled=_parse_boolean_env(
+                ENV_ADAPTIVE_MEMORY_REINFORCEMENT_ENABLED, DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_ENABLED
+            ),
+            adaptive_memory_base_stability_days=_parse_non_negative_float(
+                ENV_ADAPTIVE_MEMORY_BASE_STABILITY_DAYS,
+                os.getenv(ENV_ADAPTIVE_MEMORY_BASE_STABILITY_DAYS),
+                DEFAULT_ADAPTIVE_MEMORY_BASE_STABILITY_DAYS,
+            ),
+            adaptive_memory_max_stability_days=_parse_non_negative_float(
+                ENV_ADAPTIVE_MEMORY_MAX_STABILITY_DAYS,
+                os.getenv(ENV_ADAPTIVE_MEMORY_MAX_STABILITY_DAYS),
+                DEFAULT_ADAPTIVE_MEMORY_MAX_STABILITY_DAYS,
+            ),
+            adaptive_memory_default_view=(
+                os.getenv(ENV_ADAPTIVE_MEMORY_DEFAULT_VIEW) or DEFAULT_ADAPTIVE_MEMORY_DEFAULT_VIEW
+            )
+            .strip()
+            .lower(),
+            adaptive_memory_historical_cues=_parse_boolean_env(
+                ENV_ADAPTIVE_MEMORY_HISTORICAL_CUES, DEFAULT_ADAPTIVE_MEMORY_HISTORICAL_CUES
+            ),
+            adaptive_memory_recall_reinforcement_enabled=_parse_boolean_env(
+                ENV_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED, DEFAULT_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED
+            ),
+            adaptive_memory_reinforcement_cooldown_hours=_parse_non_negative_float(
+                ENV_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS,
+                os.getenv(ENV_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS),
+                DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS,
+            ),
+            adaptive_memory_reinforcement_gain=_parse_non_negative_float(
+                ENV_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN,
+                os.getenv(ENV_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN),
+                DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN,
+            ),
+            adaptive_memory_source_weights=_parse_json_number_map(
+                ENV_ADAPTIVE_MEMORY_SOURCE_WEIGHTS, DEFAULT_ADAPTIVE_MEMORY_SOURCE_WEIGHTS
+            ),
+            adaptive_memory_type_stability=_parse_json_number_map(
+                ENV_ADAPTIVE_MEMORY_TYPE_STABILITY, DEFAULT_ADAPTIVE_MEMORY_TYPE_STABILITY
+            ),
+            adaptive_memory_source_trust=_parse_json_number_map(
+                ENV_ADAPTIVE_MEMORY_SOURCE_TRUST, DEFAULT_ADAPTIVE_MEMORY_SOURCE_TRUST
+            ),
+            adaptive_memory_conflict_policy=(
+                os.getenv(ENV_ADAPTIVE_MEMORY_CONFLICT_POLICY) or DEFAULT_ADAPTIVE_MEMORY_CONFLICT_POLICY
+            )
+            .strip()
+            .lower(),
+            adaptive_memory_archive_enabled=_parse_boolean_env(
+                ENV_ADAPTIVE_MEMORY_ARCHIVE_ENABLED, DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_ENABLED
+            ),
+            adaptive_memory_archive_threshold=_parse_non_negative_float(
+                ENV_ADAPTIVE_MEMORY_ARCHIVE_THRESHOLD,
+                os.getenv(ENV_ADAPTIVE_MEMORY_ARCHIVE_THRESHOLD),
+                DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_THRESHOLD,
+            ),
+            adaptive_memory_archive_grace_days=_parse_non_negative_float(
+                ENV_ADAPTIVE_MEMORY_ARCHIVE_GRACE_DAYS,
+                os.getenv(ENV_ADAPTIVE_MEMORY_ARCHIVE_GRACE_DAYS),
+                DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_GRACE_DAYS,
+            ),
+            adaptive_memory_archive_recall_min_score=_parse_non_negative_float(
+                ENV_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE,
+                os.getenv(ENV_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE),
+                DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE,
+            ),
+            adaptive_memory_archive_protect_importance=_parse_non_negative_float(
+                ENV_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE,
+                os.getenv(ENV_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE),
+                DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE,
+            ),
+            adaptive_memory_prune_enabled=_parse_boolean_env(
+                ENV_ADAPTIVE_MEMORY_PRUNE_ENABLED, DEFAULT_ADAPTIVE_MEMORY_PRUNE_ENABLED
+            ),
+            adaptive_memory_prune_after_days=_parse_non_negative_float(
+                ENV_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS,
+                os.getenv(ENV_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS),
+                DEFAULT_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS,
             ),
             # Cohere reranker (with backward-compatible fallback to shared API key)
             reranker_cohere_api_key=os.getenv(ENV_RERANKER_COHERE_API_KEY) or os.getenv(ENV_COHERE_API_KEY),

@@ -80,6 +80,16 @@ _REPLAYED_TABLES = frozenset(
         # There is no stable observation id to re-attach history to, so it is not
         # carried; the target rebuilds observation history as it re-consolidates.
         "observation_history",
+        # Adaptive-memory state, keyed by memory id: retention, claim state, the raw
+        # facts a claim rests on, and the lifecycle audit trail. The replay mints
+        # fresh unit ids, so these rows cannot travel verbatim; what they say belongs
+        # to the replayed fact/observation payload, re-keyed through the importer's
+        # unit id map. While that payload does not carry it, an imported memory
+        # starts from the lazy defaults (active, never reinforced).
+        "memory_retention_state",
+        "memory_claim_state",
+        "memory_claim_evidence",
+        "memory_lifecycle_relations",
     }
 )
 # Carried verbatim as JSON rows (bank config + synthesized state). Embedding-bearing
@@ -120,6 +130,15 @@ _SKIP_TABLES = frozenset(
         # instance, and failing the alias-vs-bank check on another. Add them to the
         # target deliberately, once it is the bank you mean to route to.
         "bank_aliases",
+        # The reinforcement idempotency ledger. Only the state it produced travels
+        # (with the replayed facts), not the events: their source keys name this
+        # deployment's requests, sessions and reflect buckets. The cost is that an
+        # imported memory can be reinforced again by evidence it already counted.
+        "memory_reinforcement_events",
+        # Observe-mode "would retire" records: diagnostics about the source bank's
+        # own consolidation decisions, never read for filtering, and keyed by
+        # observation ids the import regenerates.
+        "memory_claim_shadow",
     }
 )
 # Derived columns dropped from carried rows so the target regenerates them with

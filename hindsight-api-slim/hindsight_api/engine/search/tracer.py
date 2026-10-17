@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from .trace import (
+    AdaptiveTraceInfo,
     EntryPoint,
     NodeVisit,
     QueryInfo,
@@ -94,6 +95,10 @@ class SearchTracer:
         self.retrieval_results: list[RetrievalMethodResults] = []
         self.rrf_merged: list[RRFMergeResult] = []
         self.reranked: list[RerankedResult] = []
+
+        # Adaptive memory summary; set by recall only when the bank's mode loads state, and only
+        # when a trace was asked for. None leaves the finalized trace exactly as it was.
+        self.adaptive: AdaptiveTraceInfo | None = None
 
         # Tracking state
         self.current_step = 0
@@ -343,7 +348,9 @@ class SearchTracer:
 
             # Extract score components (only include non-None values)
             # Keys from ScoredResult.to_dict(): cross_encoder_score, cross_encoder_score_normalized,
-            # rrf_normalized, temporal, recency, proof_norm, combined_score, weight
+            # rrf_normalized, temporal, recency, proof_norm, combined_score, weight. The adaptive
+            # keys are in the dict only when the bank's adaptive mode scored this recall, so a
+            # mode-off trace carries exactly the components it always did.
             score_components = {}
             for key in [
                 "cross_encoder_score",
@@ -354,6 +361,14 @@ class SearchTracer:
                 "recency",
                 "proof_norm",
                 "combined_score",
+                "semantic_score",
+                "adaptive_base_score",
+                "retrievability",
+                "stability_days",
+                "importance",
+                "reinforcement_count",
+                "retention_factor",
+                "adaptive_factor",
             ]:
                 if key in result and result[key] is not None:
                     score_components[key] = result[key]
@@ -426,6 +441,7 @@ class SearchTracer:
             visits=self.visits,
             summary=summary,
             final_results=final_results,
+            adaptive=self.adaptive,
         )
 
         return trace

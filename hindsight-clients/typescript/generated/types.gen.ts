@@ -849,6 +849,54 @@ export type BankTemplateConfig = {
    */
   recall_chunks_max_tokens?: number | null;
   /**
+   * Adaptive Memory Mode
+   *
+   * Adaptive memory mode: 'off' (default; recall is unchanged), 'observe' (compute retention and report it in traces and metrics only), 'rank' (retention down-weights rarely reinforced memories) or 'lifecycle' (rank plus claim lifecycle; the claim part is reserved for a later release, so it currently behaves exactly like 'rank')
+   */
+  adaptive_memory_mode?: string | null;
+  /**
+   * Adaptive Memory Score Alpha
+   *
+   * Weight of the retention factor in the final recall score (0 = no decay)
+   */
+  adaptive_memory_score_alpha?: number | null;
+  /**
+   * Adaptive Memory Score Floor
+   *
+   * Lowest retention factor a fully-forgotten memory can reach
+   */
+  adaptive_memory_score_floor?: number | null;
+  /**
+   * Adaptive Memory Reinforcement Enabled
+   *
+   * Let reinforcement events raise a memory's stability (reserved; takes effect in a later release)
+   */
+  adaptive_memory_reinforcement_enabled?: boolean | null;
+  /**
+   * Adaptive Memory Base Stability Days
+   *
+   * Days before an unreinforced world fact's retrievability falls to e^-1
+   */
+  adaptive_memory_base_stability_days?: number | null;
+  /**
+   * Adaptive Memory Max Stability Days
+   *
+   * Cap on a memory's stability in days (must be >= adaptive_memory_base_stability_days)
+   */
+  adaptive_memory_max_stability_days?: number | null;
+  /**
+   * Adaptive Memory Default View
+   *
+   * Lifecycle recall view when the request names none: 'current' (default) or 'historical' (reserved; takes effect in a later release)
+   */
+  adaptive_memory_default_view?: string | null;
+  /**
+   * Adaptive Memory Historical Cues
+   *
+   * Detect historical phrasing in external recall queries and switch them to a historical view (reserved; takes effect in a later release)
+   */
+  adaptive_memory_historical_cues?: boolean | null;
+  /**
    * Memory Defense
    *
    * Memory Defense policy for this bank (validated against the DefensePolicy schema on write)

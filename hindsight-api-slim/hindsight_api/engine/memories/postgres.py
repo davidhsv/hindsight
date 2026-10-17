@@ -57,6 +57,7 @@ from .base import (
     StoredMemory,
     TypedMemoryScope,
 )
+from .pg import adaptive as pg_adaptive
 from .pg import admin as pg_admin
 from .pg import banks as pg_banks
 from .pg import consolidation as pg_consolidation
@@ -67,6 +68,7 @@ from .pg import retain as pg_retain
 from .pg import transfer as pg_transfer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..adaptive.models import AdaptiveState
     from ..consolidation.consolidator import _TemporalBounds
     from ..embeddings import Embeddings
     from ..response_models import MemoryFact
@@ -522,6 +524,17 @@ class PostgresMemories(MemoriesExtension):
 
     async def live_memory_ids(self, *, conn, fq_table, bank_id: str, unit_ids: list[Any]) -> set[str]:
         return await reads.live_memory_ids(conn=conn, fq_table=fq_store_table, bank_id=bank_id, unit_ids=unit_ids)
+
+    # -- adaptive memory --
+
+    def supports_adaptive_state_for(self, bank_id: str) -> bool:
+        # Both SQL dialects carry the adaptive tables (migration a7d3e91c5f42).
+        return True
+
+    async def load_adaptive_state(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, AdaptiveState]:
+        return await pg_adaptive.load_adaptive_state(
+            conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids
+        )
 
     # -- count surfaces --
 

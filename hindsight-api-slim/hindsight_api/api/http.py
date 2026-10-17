@@ -4107,6 +4107,49 @@ class BankTemplateConfig(BaseModel):
     recall_chunks_max_tokens: int | None = Field(
         default=None, description="Max tokens of raw chunks returned by recall (when recall_include_chunks is set)"
     )
+    adaptive_memory_mode: str | None = Field(
+        default=None,
+        description="Adaptive memory mode: 'off' (default; recall is unchanged), 'observe' (compute retention "
+        "and report it in traces and metrics only), 'rank' (retention down-weights rarely reinforced memories) "
+        "or 'lifecycle' (rank plus claim lifecycle; the claim part is reserved for a later release, so it "
+        "currently behaves exactly like 'rank')",
+    )
+    adaptive_memory_score_alpha: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Weight of the retention factor in the final recall score (0 = no decay)",
+    )
+    adaptive_memory_score_floor: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Lowest retention factor a fully-forgotten memory can reach",
+    )
+    adaptive_memory_reinforcement_enabled: bool | None = Field(
+        default=None,
+        description="Let reinforcement events raise a memory's stability (reserved; takes effect in a later release)",
+    )
+    adaptive_memory_base_stability_days: float | None = Field(
+        default=None,
+        gt=0,
+        description="Days before an unreinforced world fact's retrievability falls to e^-1",
+    )
+    adaptive_memory_max_stability_days: float | None = Field(
+        default=None,
+        gt=0,
+        description="Cap on a memory's stability in days (must be >= adaptive_memory_base_stability_days)",
+    )
+    adaptive_memory_default_view: str | None = Field(
+        default=None,
+        description="Lifecycle recall view when the request names none: 'current' (default) or 'historical' "
+        "(reserved; takes effect in a later release)",
+    )
+    adaptive_memory_historical_cues: bool | None = Field(
+        default=None,
+        description="Detect historical phrasing in external recall queries and switch them to a historical view "
+        "(reserved; takes effect in a later release)",
+    )
     memory_defense: dict | None = Field(
         default=None,
         description="Memory Defense policy for this bank (validated against the DefensePolicy schema on write)",

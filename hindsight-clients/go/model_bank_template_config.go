@@ -73,6 +73,14 @@ type BankTemplateConfig struct {
 	RecallPreferObservations NullableBool `json:"recall_prefer_observations,omitempty"`
 	RecallMaxTokens NullableInt32 `json:"recall_max_tokens,omitempty"`
 	RecallChunksMaxTokens NullableInt32 `json:"recall_chunks_max_tokens,omitempty"`
+	AdaptiveMemoryMode NullableString `json:"adaptive_memory_mode,omitempty"`
+	AdaptiveMemoryScoreAlpha NullableFloat32 `json:"adaptive_memory_score_alpha,omitempty"`
+	AdaptiveMemoryScoreFloor NullableFloat32 `json:"adaptive_memory_score_floor,omitempty"`
+	AdaptiveMemoryReinforcementEnabled NullableBool `json:"adaptive_memory_reinforcement_enabled,omitempty"`
+	AdaptiveMemoryBaseStabilityDays NullableFloat32 `json:"adaptive_memory_base_stability_days,omitempty"`
+	AdaptiveMemoryMaxStabilityDays NullableFloat32 `json:"adaptive_memory_max_stability_days,omitempty"`
+	AdaptiveMemoryDefaultView NullableString `json:"adaptive_memory_default_view,omitempty"`
+	AdaptiveMemoryHistoricalCues NullableBool `json:"adaptive_memory_historical_cues,omitempty"`
 	MemoryDefense map[string]interface{} `json:"memory_defense,omitempty"`
 }
 
@@ -2289,6 +2297,342 @@ func (o *BankTemplateConfig) UnsetRecallChunksMaxTokens() {
 	o.RecallChunksMaxTokens.Unset()
 }
 
+// GetAdaptiveMemoryMode returns the AdaptiveMemoryMode field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BankTemplateConfig) GetAdaptiveMemoryMode() string {
+	if o == nil || IsNil(o.AdaptiveMemoryMode.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.AdaptiveMemoryMode.Get()
+}
+
+// GetAdaptiveMemoryModeOk returns a tuple with the AdaptiveMemoryMode field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BankTemplateConfig) GetAdaptiveMemoryModeOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.AdaptiveMemoryMode.Get(), o.AdaptiveMemoryMode.IsSet()
+}
+
+// HasAdaptiveMemoryMode returns a boolean if a field has been set.
+func (o *BankTemplateConfig) HasAdaptiveMemoryMode() bool {
+	if o != nil && o.AdaptiveMemoryMode.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetAdaptiveMemoryMode gets a reference to the given NullableString and assigns it to the AdaptiveMemoryMode field.
+func (o *BankTemplateConfig) SetAdaptiveMemoryMode(v string) {
+	o.AdaptiveMemoryMode.Set(&v)
+}
+// SetAdaptiveMemoryModeNil sets the value for AdaptiveMemoryMode to be an explicit nil
+func (o *BankTemplateConfig) SetAdaptiveMemoryModeNil() {
+	o.AdaptiveMemoryMode.Set(nil)
+}
+
+// UnsetAdaptiveMemoryMode ensures that no value is present for AdaptiveMemoryMode, not even an explicit nil
+func (o *BankTemplateConfig) UnsetAdaptiveMemoryMode() {
+	o.AdaptiveMemoryMode.Unset()
+}
+
+// GetAdaptiveMemoryScoreAlpha returns the AdaptiveMemoryScoreAlpha field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BankTemplateConfig) GetAdaptiveMemoryScoreAlpha() float32 {
+	if o == nil || IsNil(o.AdaptiveMemoryScoreAlpha.Get()) {
+		var ret float32
+		return ret
+	}
+	return *o.AdaptiveMemoryScoreAlpha.Get()
+}
+
+// GetAdaptiveMemoryScoreAlphaOk returns a tuple with the AdaptiveMemoryScoreAlpha field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BankTemplateConfig) GetAdaptiveMemoryScoreAlphaOk() (*float32, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.AdaptiveMemoryScoreAlpha.Get(), o.AdaptiveMemoryScoreAlpha.IsSet()
+}
+
+// HasAdaptiveMemoryScoreAlpha returns a boolean if a field has been set.
+func (o *BankTemplateConfig) HasAdaptiveMemoryScoreAlpha() bool {
+	if o != nil && o.AdaptiveMemoryScoreAlpha.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetAdaptiveMemoryScoreAlpha gets a reference to the given NullableFloat32 and assigns it to the AdaptiveMemoryScoreAlpha field.
+func (o *BankTemplateConfig) SetAdaptiveMemoryScoreAlpha(v float32) {
+	o.AdaptiveMemoryScoreAlpha.Set(&v)
+}
+// SetAdaptiveMemoryScoreAlphaNil sets the value for AdaptiveMemoryScoreAlpha to be an explicit nil
+func (o *BankTemplateConfig) SetAdaptiveMemoryScoreAlphaNil() {
+	o.AdaptiveMemoryScoreAlpha.Set(nil)
+}
+
+// UnsetAdaptiveMemoryScoreAlpha ensures that no value is present for AdaptiveMemoryScoreAlpha, not even an explicit nil
+func (o *BankTemplateConfig) UnsetAdaptiveMemoryScoreAlpha() {
+	o.AdaptiveMemoryScoreAlpha.Unset()
+}
+
+// GetAdaptiveMemoryScoreFloor returns the AdaptiveMemoryScoreFloor field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BankTemplateConfig) GetAdaptiveMemoryScoreFloor() float32 {
+	if o == nil || IsNil(o.AdaptiveMemoryScoreFloor.Get()) {
+		var ret float32
+		return ret
+	}
+	return *o.AdaptiveMemoryScoreFloor.Get()
+}
+
+// GetAdaptiveMemoryScoreFloorOk returns a tuple with the AdaptiveMemoryScoreFloor field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BankTemplateConfig) GetAdaptiveMemoryScoreFloorOk() (*float32, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.AdaptiveMemoryScoreFloor.Get(), o.AdaptiveMemoryScoreFloor.IsSet()
+}
+
+// HasAdaptiveMemoryScoreFloor returns a boolean if a field has been set.
+func (o *BankTemplateConfig) HasAdaptiveMemoryScoreFloor() bool {
+	if o != nil && o.AdaptiveMemoryScoreFloor.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetAdaptiveMemoryScoreFloor gets a reference to the given NullableFloat32 and assigns it to the AdaptiveMemoryScoreFloor field.
+func (o *BankTemplateConfig) SetAdaptiveMemoryScoreFloor(v float32) {
+	o.AdaptiveMemoryScoreFloor.Set(&v)
+}
+// SetAdaptiveMemoryScoreFloorNil sets the value for AdaptiveMemoryScoreFloor to be an explicit nil
+func (o *BankTemplateConfig) SetAdaptiveMemoryScoreFloorNil() {
+	o.AdaptiveMemoryScoreFloor.Set(nil)
+}
+
+// UnsetAdaptiveMemoryScoreFloor ensures that no value is present for AdaptiveMemoryScoreFloor, not even an explicit nil
+func (o *BankTemplateConfig) UnsetAdaptiveMemoryScoreFloor() {
+	o.AdaptiveMemoryScoreFloor.Unset()
+}
+
+// GetAdaptiveMemoryReinforcementEnabled returns the AdaptiveMemoryReinforcementEnabled field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BankTemplateConfig) GetAdaptiveMemoryReinforcementEnabled() bool {
+	if o == nil || IsNil(o.AdaptiveMemoryReinforcementEnabled.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.AdaptiveMemoryReinforcementEnabled.Get()
+}
+
+// GetAdaptiveMemoryReinforcementEnabledOk returns a tuple with the AdaptiveMemoryReinforcementEnabled field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BankTemplateConfig) GetAdaptiveMemoryReinforcementEnabledOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.AdaptiveMemoryReinforcementEnabled.Get(), o.AdaptiveMemoryReinforcementEnabled.IsSet()
+}
+
+// HasAdaptiveMemoryReinforcementEnabled returns a boolean if a field has been set.
+func (o *BankTemplateConfig) HasAdaptiveMemoryReinforcementEnabled() bool {
+	if o != nil && o.AdaptiveMemoryReinforcementEnabled.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetAdaptiveMemoryReinforcementEnabled gets a reference to the given NullableBool and assigns it to the AdaptiveMemoryReinforcementEnabled field.
+func (o *BankTemplateConfig) SetAdaptiveMemoryReinforcementEnabled(v bool) {
+	o.AdaptiveMemoryReinforcementEnabled.Set(&v)
+}
+// SetAdaptiveMemoryReinforcementEnabledNil sets the value for AdaptiveMemoryReinforcementEnabled to be an explicit nil
+func (o *BankTemplateConfig) SetAdaptiveMemoryReinforcementEnabledNil() {
+	o.AdaptiveMemoryReinforcementEnabled.Set(nil)
+}
+
+// UnsetAdaptiveMemoryReinforcementEnabled ensures that no value is present for AdaptiveMemoryReinforcementEnabled, not even an explicit nil
+func (o *BankTemplateConfig) UnsetAdaptiveMemoryReinforcementEnabled() {
+	o.AdaptiveMemoryReinforcementEnabled.Unset()
+}
+
+// GetAdaptiveMemoryBaseStabilityDays returns the AdaptiveMemoryBaseStabilityDays field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BankTemplateConfig) GetAdaptiveMemoryBaseStabilityDays() float32 {
+	if o == nil || IsNil(o.AdaptiveMemoryBaseStabilityDays.Get()) {
+		var ret float32
+		return ret
+	}
+	return *o.AdaptiveMemoryBaseStabilityDays.Get()
+}
+
+// GetAdaptiveMemoryBaseStabilityDaysOk returns a tuple with the AdaptiveMemoryBaseStabilityDays field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BankTemplateConfig) GetAdaptiveMemoryBaseStabilityDaysOk() (*float32, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.AdaptiveMemoryBaseStabilityDays.Get(), o.AdaptiveMemoryBaseStabilityDays.IsSet()
+}
+
+// HasAdaptiveMemoryBaseStabilityDays returns a boolean if a field has been set.
+func (o *BankTemplateConfig) HasAdaptiveMemoryBaseStabilityDays() bool {
+	if o != nil && o.AdaptiveMemoryBaseStabilityDays.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetAdaptiveMemoryBaseStabilityDays gets a reference to the given NullableFloat32 and assigns it to the AdaptiveMemoryBaseStabilityDays field.
+func (o *BankTemplateConfig) SetAdaptiveMemoryBaseStabilityDays(v float32) {
+	o.AdaptiveMemoryBaseStabilityDays.Set(&v)
+}
+// SetAdaptiveMemoryBaseStabilityDaysNil sets the value for AdaptiveMemoryBaseStabilityDays to be an explicit nil
+func (o *BankTemplateConfig) SetAdaptiveMemoryBaseStabilityDaysNil() {
+	o.AdaptiveMemoryBaseStabilityDays.Set(nil)
+}
+
+// UnsetAdaptiveMemoryBaseStabilityDays ensures that no value is present for AdaptiveMemoryBaseStabilityDays, not even an explicit nil
+func (o *BankTemplateConfig) UnsetAdaptiveMemoryBaseStabilityDays() {
+	o.AdaptiveMemoryBaseStabilityDays.Unset()
+}
+
+// GetAdaptiveMemoryMaxStabilityDays returns the AdaptiveMemoryMaxStabilityDays field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BankTemplateConfig) GetAdaptiveMemoryMaxStabilityDays() float32 {
+	if o == nil || IsNil(o.AdaptiveMemoryMaxStabilityDays.Get()) {
+		var ret float32
+		return ret
+	}
+	return *o.AdaptiveMemoryMaxStabilityDays.Get()
+}
+
+// GetAdaptiveMemoryMaxStabilityDaysOk returns a tuple with the AdaptiveMemoryMaxStabilityDays field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BankTemplateConfig) GetAdaptiveMemoryMaxStabilityDaysOk() (*float32, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.AdaptiveMemoryMaxStabilityDays.Get(), o.AdaptiveMemoryMaxStabilityDays.IsSet()
+}
+
+// HasAdaptiveMemoryMaxStabilityDays returns a boolean if a field has been set.
+func (o *BankTemplateConfig) HasAdaptiveMemoryMaxStabilityDays() bool {
+	if o != nil && o.AdaptiveMemoryMaxStabilityDays.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetAdaptiveMemoryMaxStabilityDays gets a reference to the given NullableFloat32 and assigns it to the AdaptiveMemoryMaxStabilityDays field.
+func (o *BankTemplateConfig) SetAdaptiveMemoryMaxStabilityDays(v float32) {
+	o.AdaptiveMemoryMaxStabilityDays.Set(&v)
+}
+// SetAdaptiveMemoryMaxStabilityDaysNil sets the value for AdaptiveMemoryMaxStabilityDays to be an explicit nil
+func (o *BankTemplateConfig) SetAdaptiveMemoryMaxStabilityDaysNil() {
+	o.AdaptiveMemoryMaxStabilityDays.Set(nil)
+}
+
+// UnsetAdaptiveMemoryMaxStabilityDays ensures that no value is present for AdaptiveMemoryMaxStabilityDays, not even an explicit nil
+func (o *BankTemplateConfig) UnsetAdaptiveMemoryMaxStabilityDays() {
+	o.AdaptiveMemoryMaxStabilityDays.Unset()
+}
+
+// GetAdaptiveMemoryDefaultView returns the AdaptiveMemoryDefaultView field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BankTemplateConfig) GetAdaptiveMemoryDefaultView() string {
+	if o == nil || IsNil(o.AdaptiveMemoryDefaultView.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.AdaptiveMemoryDefaultView.Get()
+}
+
+// GetAdaptiveMemoryDefaultViewOk returns a tuple with the AdaptiveMemoryDefaultView field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BankTemplateConfig) GetAdaptiveMemoryDefaultViewOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.AdaptiveMemoryDefaultView.Get(), o.AdaptiveMemoryDefaultView.IsSet()
+}
+
+// HasAdaptiveMemoryDefaultView returns a boolean if a field has been set.
+func (o *BankTemplateConfig) HasAdaptiveMemoryDefaultView() bool {
+	if o != nil && o.AdaptiveMemoryDefaultView.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetAdaptiveMemoryDefaultView gets a reference to the given NullableString and assigns it to the AdaptiveMemoryDefaultView field.
+func (o *BankTemplateConfig) SetAdaptiveMemoryDefaultView(v string) {
+	o.AdaptiveMemoryDefaultView.Set(&v)
+}
+// SetAdaptiveMemoryDefaultViewNil sets the value for AdaptiveMemoryDefaultView to be an explicit nil
+func (o *BankTemplateConfig) SetAdaptiveMemoryDefaultViewNil() {
+	o.AdaptiveMemoryDefaultView.Set(nil)
+}
+
+// UnsetAdaptiveMemoryDefaultView ensures that no value is present for AdaptiveMemoryDefaultView, not even an explicit nil
+func (o *BankTemplateConfig) UnsetAdaptiveMemoryDefaultView() {
+	o.AdaptiveMemoryDefaultView.Unset()
+}
+
+// GetAdaptiveMemoryHistoricalCues returns the AdaptiveMemoryHistoricalCues field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BankTemplateConfig) GetAdaptiveMemoryHistoricalCues() bool {
+	if o == nil || IsNil(o.AdaptiveMemoryHistoricalCues.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.AdaptiveMemoryHistoricalCues.Get()
+}
+
+// GetAdaptiveMemoryHistoricalCuesOk returns a tuple with the AdaptiveMemoryHistoricalCues field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BankTemplateConfig) GetAdaptiveMemoryHistoricalCuesOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.AdaptiveMemoryHistoricalCues.Get(), o.AdaptiveMemoryHistoricalCues.IsSet()
+}
+
+// HasAdaptiveMemoryHistoricalCues returns a boolean if a field has been set.
+func (o *BankTemplateConfig) HasAdaptiveMemoryHistoricalCues() bool {
+	if o != nil && o.AdaptiveMemoryHistoricalCues.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetAdaptiveMemoryHistoricalCues gets a reference to the given NullableBool and assigns it to the AdaptiveMemoryHistoricalCues field.
+func (o *BankTemplateConfig) SetAdaptiveMemoryHistoricalCues(v bool) {
+	o.AdaptiveMemoryHistoricalCues.Set(&v)
+}
+// SetAdaptiveMemoryHistoricalCuesNil sets the value for AdaptiveMemoryHistoricalCues to be an explicit nil
+func (o *BankTemplateConfig) SetAdaptiveMemoryHistoricalCuesNil() {
+	o.AdaptiveMemoryHistoricalCues.Set(nil)
+}
+
+// UnsetAdaptiveMemoryHistoricalCues ensures that no value is present for AdaptiveMemoryHistoricalCues, not even an explicit nil
+func (o *BankTemplateConfig) UnsetAdaptiveMemoryHistoricalCues() {
+	o.AdaptiveMemoryHistoricalCues.Unset()
+}
+
 // GetMemoryDefense returns the MemoryDefense field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *BankTemplateConfig) GetMemoryDefense() map[string]interface{} {
 	if o == nil {
@@ -2493,6 +2837,30 @@ func (o BankTemplateConfig) ToMap() (map[string]interface{}, error) {
 	}
 	if o.RecallChunksMaxTokens.IsSet() {
 		toSerialize["recall_chunks_max_tokens"] = o.RecallChunksMaxTokens.Get()
+	}
+	if o.AdaptiveMemoryMode.IsSet() {
+		toSerialize["adaptive_memory_mode"] = o.AdaptiveMemoryMode.Get()
+	}
+	if o.AdaptiveMemoryScoreAlpha.IsSet() {
+		toSerialize["adaptive_memory_score_alpha"] = o.AdaptiveMemoryScoreAlpha.Get()
+	}
+	if o.AdaptiveMemoryScoreFloor.IsSet() {
+		toSerialize["adaptive_memory_score_floor"] = o.AdaptiveMemoryScoreFloor.Get()
+	}
+	if o.AdaptiveMemoryReinforcementEnabled.IsSet() {
+		toSerialize["adaptive_memory_reinforcement_enabled"] = o.AdaptiveMemoryReinforcementEnabled.Get()
+	}
+	if o.AdaptiveMemoryBaseStabilityDays.IsSet() {
+		toSerialize["adaptive_memory_base_stability_days"] = o.AdaptiveMemoryBaseStabilityDays.Get()
+	}
+	if o.AdaptiveMemoryMaxStabilityDays.IsSet() {
+		toSerialize["adaptive_memory_max_stability_days"] = o.AdaptiveMemoryMaxStabilityDays.Get()
+	}
+	if o.AdaptiveMemoryDefaultView.IsSet() {
+		toSerialize["adaptive_memory_default_view"] = o.AdaptiveMemoryDefaultView.Get()
+	}
+	if o.AdaptiveMemoryHistoricalCues.IsSet() {
+		toSerialize["adaptive_memory_historical_cues"] = o.AdaptiveMemoryHistoricalCues.Get()
 	}
 	if o.MemoryDefense != nil {
 		toSerialize["memory_defense"] = o.MemoryDefense

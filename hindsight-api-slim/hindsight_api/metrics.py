@@ -20,6 +20,7 @@ import random
 _resource_mod = importlib.import_module("resource") if importlib.util.find_spec("resource") else None
 import threading
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Callable, NamedTuple
@@ -99,6 +100,12 @@ LLM_DURATION_BUCKETS = (0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 15.0, 30.0, 60
 
 # HTTP request duration buckets (millisecond-level for fast endpoints)
 HTTP_DURATION_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
+
+# Adaptive memory: retrievability is in (0, 1], so 0.05-wide buckets across it; stability spans
+# half a day to ten years, so roughly log-spaced day buckets with the calendar marks a reader
+# thinks in (a week is between 5 and 10, a month is 30, a year 365).
+ADAPTIVE_RETRIEVABILITY_BUCKETS = tuple(round(0.05 * i, 2) for i in range(1, 21))
+ADAPTIVE_STABILITY_DAYS_BUCKETS = (1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 90.0, 180.0, 365.0, 730.0, 1825.0, 3650.0)
 
 # How often the backlog / queue-depth gauge caches are refreshed (seconds).
 # The counts are aggregate COUNT queries, so a background task refreshes a
@@ -354,6 +361,29 @@ class MetricsCollectorBase:
         """
         raise NotImplementedError
 
+    def record_adaptive_state_load_error(self, *, mode: str, bank_id: str):
+        """Record a recall whose adaptive-state load failed; it continued with factor 1."""
+        raise NotImplementedError
+
+    def record_adaptive_recall(
+        self,
+        *,
+        mode: str,
+        bank_id: str,
+        retrievability: Sequence[float],
+        stability_days: Sequence[float],
+        rerank_changed: bool | None,
+        top_k_changed: bool | None,
+    ):
+        """Record one adaptively-scored recall, once, over its FINAL results (never per candidate).
+
+        `retrievability` / `stability_days` are the returned memories' values. `rerank_changed`
+        (rank/lifecycle) says the returned ids differ from what the factor-free order would have
+        returned; `top_k_changed` (observe) says the simulated factor-applied ids differ from the
+        ones returned. None means "not measured in this mode".
+        """
+        raise NotImplementedError
+
     def set_db_pool(self, pool: "asyncpg.Pool"):
         """Set the database pool for metrics collection."""
         pass
@@ -435,6 +465,23 @@ class NoOpMetricsCollector(MetricsCollectorBase):
 
     def record_consolidation_batch_failure(self, failure_class: str, error_type: str):
         """No-op consolidation batch-failure recording."""
+        pass
+
+    def record_adaptive_state_load_error(self, *, mode: str, bank_id: str):
+        """No-op adaptive state-load error recording."""
+        pass
+
+    def record_adaptive_recall(
+        self,
+        *,
+        mode: str,
+        bank_id: str,
+        retrievability: Sequence[float],
+        stability_days: Sequence[float],
+        rerank_changed: bool | None,
+        top_k_changed: bool | None,
+    ):
+        """No-op adaptive recall recording."""
         pass
 
 
@@ -637,6 +684,38 @@ class MetricsCollector(MetricsCollectorBase):
             name="hindsight.event_loop.lag",
             description="Event-loop lag: extra time a ready coroutine waited before it ran",
             unit="s",
+        )
+
+        # Adaptive memory (engine/adaptive). Units are chosen for the exported Prometheus names:
+        # "1" adds no suffix and "d" adds "_days", which the stability name already ends with, so
+        # these export as hindsight_adaptive_memory_<name>[_total] exactly (asserted in
+        # tests/test_adaptive_scoring.py). Emitted only for banks whose adaptive mode is not off.
+        self.adaptive_state_load_errors = self.meter.create_counter(
+            name="hindsight.adaptive_memory.state_load_errors",
+            description="Recalls whose adaptive-memory state could not be loaded (they continued with factor 1)",
+            unit="1",
+        )
+        self.adaptive_rerank_changes = self.meter.create_counter(
+            name="hindsight.adaptive_memory.rerank_changes",
+            description="Rank/lifecycle recalls whose returned ids differ from the factor-free order's",
+            unit="1",
+        )
+        self.adaptive_top_k_changed = self.meter.create_counter(
+            name="hindsight.adaptive_memory.top_k_changed",
+            description="Observe recalls whose simulated factor-applied ids differ from the ones returned",
+            unit="1",
+        )
+        self.adaptive_retrievability = self.meter.create_histogram(
+            name="hindsight.adaptive_memory.retrievability",
+            description="Retrievability of the memories a recall returned (adaptive memory)",
+            unit="1",
+            explicit_bucket_boundaries_advisory=list(ADAPTIVE_RETRIEVABILITY_BUCKETS),
+        )
+        self.adaptive_stability_days = self.meter.create_histogram(
+            name="hindsight.adaptive_memory.stability_days",
+            description="Stability, in days, of the memories a recall returned (adaptive memory)",
+            unit="d",
+            explicit_bucket_boundaries_advisory=list(ADAPTIVE_STABILITY_DAYS_BUCKETS),
         )
 
         # Process metrics (observable gauges - collected on scrape)
@@ -954,6 +1033,37 @@ class MetricsCollector(MetricsCollectorBase):
         self.consolidation_batch_failures.add(
             1, {"failure_class": failure_class, "error_type": error_type, **self._tenant_attrs()}
         )
+
+    def _adaptive_attrs(self, mode: str, bank_id: str) -> dict[str, str]:
+        attrs = {"mode": mode, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        return attrs
+
+    def record_adaptive_state_load_error(self, *, mode: str, bank_id: str):
+        """Record a recall whose adaptive-state load failed; it continued with factor 1."""
+        self.adaptive_state_load_errors.add(1, self._adaptive_attrs(mode, bank_id))
+
+    def record_adaptive_recall(
+        self,
+        *,
+        mode: str,
+        bank_id: str,
+        retrievability: Sequence[float],
+        stability_days: Sequence[float],
+        rerank_changed: bool | None,
+        top_k_changed: bool | None,
+    ):
+        """Record one adaptively-scored recall over its final results; see the base class."""
+        attrs = self._adaptive_attrs(mode, bank_id)
+        for value in retrievability:
+            self.adaptive_retrievability.record(value, attrs)
+        for value in stability_days:
+            self.adaptive_stability_days.record(value, attrs)
+        if rerank_changed:
+            self.adaptive_rerank_changes.add(1, attrs)
+        if top_k_changed:
+            self.adaptive_top_k_changed.add(1, attrs)
 
     def _setup_process_metrics(self):
         """Set up observable gauges for process metrics."""

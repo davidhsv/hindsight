@@ -130,6 +130,53 @@ class RerankedResult(BaseModel):
     rrf_rank: int = Field(description="Original RRF rank before reranking")
     rank_change: int = Field(description="Change in rank (positive = moved up)")
     score_components: dict[str, float] = Field(default_factory=dict, description="Score breakdown")
+    # Claim-lifecycle annotation (truth status, validity, successor) for a result whose claim is
+    # not plain active, in lifecycle mode. Omitted from the payload when None, so traces from
+    # every other mode keep their exact shape.
+    lifecycle: dict[str, Any] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Claim lifecycle state of this result (adaptive memory lifecycle mode only)",
+    )
+
+
+class AdaptiveTraceInfo(BaseModel):
+    """What adaptive memory did on this recall. Present only when the bank's mode loads state."""
+
+    mode: str = Field(description="Effective adaptive_memory_mode: observe, rank or lifecycle")
+    alpha: float = Field(description="adaptive_memory_score_alpha: weight of the retention factor")
+    floor: float = Field(description="adaptive_memory_score_floor: retention factor at R=0, before importance")
+    scored: bool = Field(
+        description=(
+            "Whether the adaptive factor was computed. False for the decision-model and interleave "
+            "orders (authoritative, never re-weighted), an empty pool, or a failed state load"
+        )
+    )
+    states_loaded: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Candidates that had stored adaptive state; the rest used lazy defaults",
+    )
+    simulated_final_ids: list[str] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Observe mode: the ids this recall would have returned with the factor applied",
+    )
+    top_k_changed: bool | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Observe mode: whether simulated_final_ids differs from the ids actually returned",
+    )
+    rerank_changed: bool | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Rank/lifecycle mode: whether the returned ids differ from the factor-free ones",
+    )
+    state_load_error: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Exception type when the adaptive state could not be loaded (the recall then used factor 1)",
+    )
 
 
 class SearchSummary(BaseModel):
@@ -170,6 +217,13 @@ class SearchTrace(BaseModel):
 
     # Final results (for comparison with visits)
     final_results: list[dict[str, Any]] = Field(description="Final ranked results returned to user")
+
+    # Omitted unless the bank's adaptive_memory_mode loaded state: a mode-off trace is unchanged.
+    adaptive: AdaptiveTraceInfo | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Adaptive memory: mode, factor parameters and observe-mode simulation",
+    )
 
     model_config = {"json_encoders": {datetime: lambda v: v.isoformat()}}
 

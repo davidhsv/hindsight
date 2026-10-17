@@ -1723,6 +1723,46 @@ existing links below a raised threshold, and nodes that already have enough sema
 when the threshold is lowered. To make an existing semantic graph fully conform to a new threshold, rebuild the
 graph or re-ingest the source data into a new memory bank.
 
+#### Adaptive memory
+
+Adaptive memory gives each memory its own retention state (how readily it comes back without a strong cue, strengthened by independent reinforcement) and, in `lifecycle` mode, a claim state (whether what it says is still current). **Recency decay is not forgetting.** The `HINDSIGHT_API_RECENCY_DECAY_*` settings above apply one small freshness adjustment to every memory by its event age alone and keep no per-memory state. Adaptive memory is separate and runs alongside it: a memory that keeps being confirmed stays strong however old it is, and one that was never reinforced fades.
+
+The feature is off by default. With `HINDSIGHT_API_ADAPTIVE_MEMORY_MODE=off` recall is byte-identical to a server without it: no extra queries, response keys, trace keys or metrics. A mode only reaches the recall path for banks whose storage can hold the state; on any other bank it behaves as `off`.
+
+This release implements retention scoring only. `observe` and `rank` work as described below, and `lifecycle` behaves exactly like `rank`. Nothing writes reinforcement, claim or archive state yet, so every memory is scored from the default retention its fact type and timestamps give it. The settings marked _Reserved_ are validated and stored but have no effect until a later release.
+
+| Mode | What changes |
+|------|--------------|
+| `off` (default) | Nothing. |
+| `observe` | Retention is loaded and scored, and reported in the recall trace (`trace: true`) and metrics, including whether the top results would have changed. Results and their order are unchanged. |
+| `rank` | Each memory's final recall score is multiplied by `(1 - alpha) + alpha * retention_factor`. This factor only penalises and never removes a memory: at the defaults the lowest it can go is `0.93`, so an old memory that matches the query closely is still found. |
+| `lifecycle` | `rank`, plus claim lifecycle: superseded or refuted claims stop answering as current. _Reserved: the claim lifecycle takes effect in a later release; until then `lifecycle` behaves exactly like `rank`._ |
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_MODE` | `off`, `observe`, `rank` or `lifecycle` (see above). An unknown value fails start-up rather than silently meaning `off`. A stored per-bank value that is no longer valid resolves to `off`. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `off` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_SCORE_ALPHA` | Weight of the retention factor in the final score, in `[0, 1]`. `0` turns decay off while keeping the rest of the mode. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `0.1` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_SCORE_FLOOR` | Lowest retention factor a fully faded memory can reach, in `[0, 1]`. A memory's importance raises its own floor. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `0.3` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_REINFORCEMENT_ENABLED` | Let reinforcement events (explicit confirmation, an independent source restating an observation, a successful reflect, new evidence for an observation) raise a memory's stability. `false` keeps decay without reinforcement. _Reserved: validated and stored, takes effect in a later release._ Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `true` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_BASE_STABILITY_DAYS` | Initial stability, in days, of an unreinforced world fact of default importance: its retrievability falls to `e^-1` after this long. Scaled per fact type by `HINDSIGHT_API_ADAPTIVE_MEMORY_TYPE_STABILITY` and by importance. Must be `> 0`. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `30` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_MAX_STABILITY_DAYS` | Cap on a memory's stability, in days. Must be `>=` the base stability: validated on the server and on per-bank config writes; a tenant override below the base is clamped up to it. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `3650` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_DEFAULT_VIEW` | Lifecycle recall view when a request names none: `current` drops superseded and refuted claims, `historical` keeps superseded ones, annotated. Only read in `lifecycle` mode. _Reserved: validated and stored, takes effect in a later release._ Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `current` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_HISTORICAL_CUES` | Detect historical phrasing in external recall queries (for example `before <date>`) and answer them from the historical view. Only read in `lifecycle` mode. _Reserved: validated and stored, takes effect in a later release._ Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `false` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED` | Let a memory returned by an external (HTTP/MCP) recall count as weak reinforcement. Off by default: being retrieved is not evidence that a memory was useful, and it would make repeated benchmark queries depend on their order. _Reserved: validated and stored, takes effect in a later release._ Server-level. | `false` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS` | A reinforcement within this many hours of the memory's last one adds nothing, so a burst of events counts once. Must be `>= 0`. _Reserved: validated and stored, takes effect in a later release._ Server-level. | `6` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN` | Global multiplier on how much one reinforcement raises stability. Must be `>= 0`. _Reserved: validated and stored, takes effect in a later release._ Server-level. | `1.0` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_SOURCE_WEIGHTS` | JSON object of reinforcement weight per source type, merged over the defaults (set only the ones you change). Keys: `explicit_confirmation` (1.0), `independent_retain_confirmation` (0.8), `successful_reflect_use` (0.6), `observation_new_evidence` (0.5), `final_external_recall` (0.2). An unknown key fails start-up. Values must be `>= 0`. _Reserved: validated and stored, takes effect in a later release._ Server-level. | _(the weights listed)_ |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_TYPE_STABILITY` | JSON object of initial-stability multiplier per fact type, merged over the defaults: `experience` (0.5), `world` (1.0), `observation` (2.0). An unknown key fails start-up. Values must be `> 0`. Server-level. | _(the multipliers listed)_ |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_SOURCE_TRUST` | JSON object of trust per metadata `source` value (for example `{"crm": 0.9, "chat": 0.4}`), used only to settle conflicting claims. Empty means a conflict never resolves automatically, so repeating a claim never makes it true. Values must be `>= 0`. _Reserved: validated and stored, takes effect in a later release._ Server-level. | `{}` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_CONFLICT_POLICY` | How conflicting claims resolve. `evidence`: a side wins only if it has higher source trust and more recent evidence; otherwise both stay uncertain. `latest`: the most recent side wins. _Reserved: validated and stored, takes effect in a later release._ Server-level. | `evidence` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_ENABLED` | Archive memories whose retrievability stayed below `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_THRESHOLD` for `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_GRACE_DAYS`. An archived memory stays stored and returns only on a strong cue. Exempt and important memories are never archived, and neither is a memory that is the only evidence for a retired claim. _Reserved: validated and stored, takes effect in a later release._ Server-level. | `false` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_THRESHOLD` | Retrievability below which a memory starts its archive grace period, in `[0, 1]`. _Reserved: validated and stored, takes effect in a later release._ Server-level. | `0.05` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_GRACE_DAYS` | Days retrievability must stay below the threshold before the memory is archived. Must be `>= 0`. _Reserved: validated and stored, takes effect in a later release._ Server-level. | `30` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE` | Normalised reranker score, in `[0, 1]`, an archived memory needs to be returned by recall. _Reserved: validated and stored, takes effect in a later release._ Server-level. | `0.8` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE` | Memories with at least this importance, in `[0, 1]`, are never archived. _Reserved: validated and stored, takes effect in a later release._ Server-level. | `0.8` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_ENABLED` | Permanently delete memories that have been archived longer than `HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS`. Separate from archiving and off by default, because it cannot be undone. _Reserved: validated and stored, takes effect in a later release._ Server-level. | `false` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS` | Days a memory stays archived before pruning may delete it. Must be `>= 0`. _Reserved: validated and stored, takes effect in a later release._ Server-level. | `180` |
+
 #### Graph Retrieval Algorithm
 
 - **`link_expansion`** (default): Fast graph expansion from semantic seeds via entity co-occurrence, semantic kNN, and causal links. Target latency under 100ms.
@@ -2949,6 +2989,7 @@ Configuration fields are categorized for security:
 1. **Configurable Fields** - Safe behavioral settings that can be customized per-bank:
    - Retention: `retain_chunk_size`, `retain_structured_chunk_size`, `retain_extraction_mode`, `retain_mission`, `retain_custom_instructions`
    - Observations: `enable_observations`, `enable_auto_consolidation`, `observations_mission`, `max_observations_per_scope`
+   - Adaptive memory: `adaptive_memory_mode`, `adaptive_memory_score_alpha`, `adaptive_memory_score_floor`, `adaptive_memory_reinforcement_enabled`, `adaptive_memory_base_stability_days`, `adaptive_memory_max_stability_days`, `adaptive_memory_default_view`, `adaptive_memory_historical_cues`
    - MCP access control: `mcp_enabled_tools`
 
 2. **Credential Fields** - NEVER exposed or configurable via API:

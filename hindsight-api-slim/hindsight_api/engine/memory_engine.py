@@ -639,6 +639,7 @@ if TYPE_CHECKING:
     from .prompt_preview import PromptPreview
     from .retain.attachment_content import AttachmentOccurrence, LoadedAttachment, RetainAttachment
     from .retain.attachment_store import StoredAttachment
+    from .search.tracer import SearchTracer
     from .transfer import BankImportResult, ImportResult, TransferScope
     from .transfer.importer import Archive, OnConflict
     from .vector_index_health import CoverageTrigger
@@ -647,6 +648,16 @@ if TYPE_CHECKING:
 from enum import Enum
 
 from ..pg0 import EmbeddedPostgres, parse_pg0_url
+from .adaptive.scoring import (
+    AdaptiveRecall,
+    AdaptiveStateLoad,
+    CachedTokenCounter,
+    drop_superseded_raw_facts,
+    filter_min_scores,
+    observations_in_window,
+    superseded_source_ids,
+)
+from .adaptive.settings import AdaptiveSettings
 from .fact_budget import select_facts_within_budget
 from .llm_wrapper import (
     ConfiguredLLMProvider,
@@ -744,6 +755,7 @@ from .search.tags import (
     tags_satisfy_groups,
     tags_writable,
 )
+from .search.trace import AdaptiveTraceInfo
 from .search.types import ScoredResult
 from .source_facts import select_source_facts_within_budget
 from .source_scope import visible_document_ids
@@ -9138,9 +9150,10 @@ class MemoryEngine(MemoryEngineInterface):
         if _d > 0.100:
             logger.info("[RECALL PHASE] bank_config=%.3fs bank=%s", _d, bank_id)
         thinking_budget = _resolve_thinking_budget(budget_config_dict, budget, max_tokens)
+        static_config = get_config()
         # Reranker candidate cap, optionally scaled by the same budget level (env-configured,
         # 0/unset → flat reranker_max_candidates). Static config, so read from get_config().
-        reranker_max_candidates = _resolve_reranker_max_candidates(get_config(), budget)
+        reranker_max_candidates = _resolve_reranker_max_candidates(static_config, budget)
 
         # Recall pipeline stages, resolved per bank. A bank can switch off arms its
         # content cannot use, trading recall breadth for latency.
@@ -9150,6 +9163,21 @@ class MemoryEngine(MemoryEngineInterface):
         reranking = _resolve_reranking(budget_config_dict, reranking)
         if prefer_observations is None:
             prefer_observations = bool(budget_config_dict.get("recall_prefer_observations", False))
+        # Adaptive memory, from the config dict already in hand (no second resolve). None unless
+        # the effective mode loads state -- a store that cannot hold it makes every mode "off" --
+        # so a mode-off recall carries nothing new down the pipeline. The mode is checked first so
+        # the default (off) costs one lookup; stored values are already normalized to lower case.
+        adaptive_settings: AdaptiveSettings | None = None
+        if budget_config_dict.get("adaptive_memory_mode") not in (None, "off"):
+            from .memories import get_memories as _get_memories_for_adaptive
+
+            _adaptive = AdaptiveSettings.resolve(
+                budget_config_dict,
+                static_config,
+                store_supports=_get_memories_for_adaptive().supports_adaptive_state_for(bank_id),
+            )
+            if _adaptive.effective_mode.loads_state:
+                adaptive_settings = _adaptive
 
         # Log recall start with tags if present (skip if quiet mode for internal operations)
         if not _quiet:
@@ -9214,6 +9242,7 @@ class MemoryEngine(MemoryEngineInterface):
                             enable_text_search=enable_text_search,
                             enable_temporal_retrieval=enable_temporal_retrieval,
                             enable_graph_retrieval=enable_graph_retrieval,
+                            adaptive_settings=adaptive_settings,
                         )
                         get_metrics_collector().record_recall_phase(
                             "search_with_retries", time.perf_counter() - _t0_swr2, diagnostic=True
@@ -9356,6 +9385,80 @@ class MemoryEngine(MemoryEngineInterface):
         finally:
             recall_span_context.__exit__(None, None, None)
 
+    async def _load_adaptive_state(self, backend, bank_id: str, memory_ids: list[str]) -> AdaptiveStateLoad:
+        """Read the adaptive state of a recall's candidates; a failure is returned, never raised.
+
+        Runs as a task beside the cross-encoder, on its own connection from the read backend and
+        outside the budgeted retrieval block (that block has closed by now). Returning the error
+        instead of raising keeps a failed read from surfacing as an un-retrieved task exception
+        when the recall is cancelled before awaiting it.
+        """
+        from .memories import get_memories
+
+        start = time.perf_counter()
+        try:
+            async with acquire_with_retry(backend) as conn:
+                states = await get_memories().load_adaptive_state(conn, bank_id=bank_id, memory_ids=memory_ids)
+        except Exception as e:
+            return AdaptiveStateLoad(states=None, error=e, seconds=time.perf_counter() - start)
+        return AdaptiveStateLoad(states=states, error=None, seconds=time.perf_counter() - start)
+
+    def _finish_adaptive_recall(
+        self,
+        adaptive: AdaptiveRecall,
+        tracer: "SearchTracer",
+        *,
+        enable_trace: bool,
+        bank_id: str,
+        top_scored: list[ScoredResult],
+        min_reranker: float | None,
+        min_final: float | None,
+        prefer_observations: bool,
+        rerank_limit: int,
+        max_tokens: int,
+    ) -> None:
+        """Replay the recall tail over the counterfactual order; record metrics and the trace summary.
+
+        Pure apart from the metric and trace writes: the replay reuses the sources the dedup read
+        already resolved and the memoised token counts.
+        """
+        start = time.perf_counter()
+        mode = adaptive.settings.effective_mode
+        final_ids = [sr.id for sr in top_scored]
+        outcome = adaptive.finish(
+            final_ids,
+            min_reranker=min_reranker,
+            min_final=min_final,
+            prefer_observations=prefer_observations,
+            rerank_limit=rerank_limit,
+            max_tokens=max_tokens,
+        )
+        rerank_changed = outcome.changed if outcome is not None and mode.applies_factor else None
+        top_k_changed = outcome.changed if outcome is not None and not mode.applies_factor else None
+        if outcome is not None:
+            get_metrics_collector().record_adaptive_recall(
+                mode=mode.value,
+                bank_id=bank_id,
+                retrievability=[sr.retrievability for sr in top_scored if sr.retrievability is not None],
+                stability_days=[sr.stability_days for sr in top_scored if sr.stability_days is not None],
+                rerank_changed=rerank_changed,
+                top_k_changed=top_k_changed,
+            )
+        # `enable_trace`, NOT `if tracer`: see the tracer construction in _search_with_retries.
+        if enable_trace:
+            tracer.adaptive = AdaptiveTraceInfo(
+                mode=mode.value,
+                alpha=adaptive.settings.score_alpha,
+                floor=adaptive.settings.score_floor,
+                scored=outcome is not None,
+                states_loaded=len(adaptive.states) if adaptive.states is not None else None,
+                simulated_final_ids=outcome.ids if outcome is not None and not mode.applies_factor else None,
+                top_k_changed=top_k_changed,
+                rerank_changed=rerank_changed,
+                state_load_error=type(adaptive.load_error).__name__ if adaptive.load_error is not None else None,
+            )
+        adaptive.scoring_seconds += time.perf_counter() - start
+
     async def _search_with_retries(
         self,
         bank_id: str,
@@ -9389,6 +9492,7 @@ class MemoryEngine(MemoryEngineInterface):
         enable_text_search: bool = True,
         enable_temporal_retrieval: bool = True,
         enable_graph_retrieval: bool = True,
+        adaptive_settings: AdaptiveSettings | None = None,
     ) -> RecallResultModel:
         """
         Search implementation with modular retrieval and reranking.
@@ -9415,6 +9519,8 @@ class MemoryEngine(MemoryEngineInterface):
             max_entity_tokens: Maximum tokens for entity observations
             include_chunks: Whether to include raw chunks (fetched before max_tokens filtering)
             max_chunk_tokens: Maximum tokens for chunks
+            adaptive_settings: The bank's adaptive-memory settings, or None when its effective
+                mode is off (nothing adaptive runs then)
 
         Returns:
             RecallResultModel with results, trace, optional entities, and optional chunks
@@ -9991,6 +10097,17 @@ class MemoryEngine(MemoryEngineInterface):
             served_provider: str | None = None
             pre_filtered_count = 0
             rerank_kind = "cross-encoder"
+            # Adaptive memory: per-recall state, and the state load running beside the reranker.
+            adaptive = (
+                AdaptiveRecall(
+                    settings=adaptive_settings,
+                    now=_recall_scoring_now(question_date),
+                    count_tokens=CachedTokenCounter(count_tokens),
+                )
+                if adaptive_settings is not None
+                else None
+            )
+            adaptive_load_task: asyncio.Task[AdaptiveStateLoad] | None = None
             try:
                 # Pre-filter candidates by RRF before the (optional) cross-encoder.
                 # RRF already provides good ranking; this caps cross-encoder cost.
@@ -10053,6 +10170,25 @@ class MemoryEngine(MemoryEngineInterface):
                     {"candidates": len(merged_candidates)},
                 )
 
+                # Adaptive state for the post-trim ids, read on its own connection while the
+                # cross-encoder runs (the candidate set is final here, and the read needs nothing
+                # the reranker produces). Only for the combined-scoring branch: interleave and a
+                # decision model keep their order authoritative and never get a factor, so they
+                # never pay for the read.
+                if (
+                    adaptive is not None
+                    and merged_candidates
+                    and reranking != "interleave"
+                    and not (
+                        reranking == "cross_encoder"
+                        and getattr(reranker_instance.cross_encoder, "primary_provider_name", "")
+                        == DECISION_MODEL_RERANKER
+                    )
+                ):
+                    adaptive_load_task = asyncio.create_task(
+                        self._load_adaptive_state(backend, bank_id, [mc.id for mc in merged_candidates])
+                    )
+
                 if reranking == "cross_encoder":
                     # Cancellation checkpoint: the cross-encoder rerank is the
                     # single most CPU-expensive stage and runs in a worker thread
@@ -10090,12 +10226,36 @@ class MemoryEngine(MemoryEngineInterface):
                         for mc in sorted(merged_candidates, key=lambda mc: mc.rrf_score, reverse=True)
                     ]
 
+                if adaptive is not None and adaptive_load_task is not None:
+                    # A failover onto the decision model makes its order authoritative after all.
+                    if scored_results and served_provider != DECISION_MODEL_RERANKER:
+                        adaptive.receive(await adaptive_load_task)
+                        if adaptive.load_error is not None:
+                            # P1 has no fail-closed path: rank/observe continue with factor 1.
+                            logger.warning(
+                                "[RECALL %s] adaptive state load failed (%s: %s); continuing with factor 1",
+                                recall_id,
+                                type(adaptive.load_error).__name__,
+                                adaptive.load_error,
+                            )
+                            get_metrics_collector().record_adaptive_state_load_error(
+                                mode=adaptive.settings.effective_mode.value, bank_id=bank_id
+                            )
+                    else:
+                        adaptive_load_task.cancel()
+                    adaptive_load_task = None
+
                 step_duration = time.perf_counter() - step_start
                 pre_filter_note = f" (pre-filtered {pre_filtered_count})" if pre_filtered_count > 0 else ""
                 log_buffer.append(
                     f"  [4] Reranking [{rerank_kind}]: {len(scored_results)} candidates "
                     f"scored in {step_duration:.3f}s{pre_filter_note}"
                 )
+            except BaseException:
+                # The state read must not outlive a rerank that failed or was cancelled.
+                if adaptive_load_task is not None:
+                    adaptive_load_task.cancel()
+                raise
             finally:
                 rerank_span.set_attribute("hindsight.scored_count", len(scored_results))
                 if pre_filtered_count > 0:
@@ -10151,10 +10311,22 @@ class MemoryEngine(MemoryEngineInterface):
                     from .search.recall_boost import apply_post_rerank_boost
 
                     stage2 = apply_post_rerank_boost(scored_results, strategy_boosts, passthrough=is_passthrough)
+                # Adaptive factor: after every boost, before the sort (DESIGN.md §4.2). Observe
+                # computes it and the counterfactual without touching `weight`.
+                adaptive_scored = False
+                if adaptive is not None:
+                    _t0_adaptive = time.perf_counter()
+                    adaptive_scored = adaptive.score(scored_results)
+                    adaptive.scoring_seconds += time.perf_counter() - _t0_adaptive
                 scored_results.sort(key=lambda x: x.weight, reverse=True)
                 log_buffer.append("  [4.6] Combined scoring: ce * recency_boost(0.2) * temporal_boost(0.2)")
                 if strategy_boosts:
                     log_buffer.append(f"  [4.7] Strategy boosts applied: {strategy_boosts} {stage2}")
+                if adaptive_scored and adaptive is not None:
+                    log_buffer.append(
+                        f"  [4.75] Adaptive memory [{adaptive.settings.effective_mode.value}]: "
+                        f"{len(adaptive.states or {})} stored states, alpha={adaptive.settings.score_alpha}"
+                    )
 
             # Step 4.9: post-query min_scores filters (reranker + final). The
             # semantic/text floors are applied earlier inside the SQL arms (see
@@ -10176,12 +10348,7 @@ class MemoryEngine(MemoryEngineInterface):
                 min_reranker = None
             if (min_reranker is not None or min_final is not None) and scored_results:
                 before_min_score = len(scored_results)
-                scored_results = [
-                    sr
-                    for sr in scored_results
-                    if (min_reranker is None or sr.cross_encoder_score_normalized >= min_reranker)
-                    and (min_final is None or sr.weight >= min_final)
-                ]
+                scored_results = filter_min_scores(scored_results, min_reranker=min_reranker, min_final=min_final)
                 log_buffer.append(
                     f"  [4.9] min_scores(reranker={min_reranker}, final={min_final}): "
                     f"{before_min_score}->{len(scored_results)} results"
@@ -10222,19 +10389,34 @@ class MemoryEngine(MemoryEngineInterface):
             # the next-best results, keeping the result count at the budget. No-op unless
             # 'observation' and at least one raw type were both requested.
             raw_types_requested = {"world", "experience"} & set(fact_type)
-            if prefer_observations and "observation" in fact_type and raw_types_requested:
+            dedup_observations = bool(prefer_observations and "observation" in fact_type and raw_types_requested)
+            if dedup_observations:
                 # "The observation list" = observations within the window we would return.
                 # Only those can supersede a raw fact; a far-down observation should not
                 # suppress a top raw fact it merely happens to reference.
-                observation_srs = [
-                    sr for sr in scored_results[: thinking_budget * 2] if sr.retrieval.fact_type == "observation"
-                ]
+                observation_srs = observations_in_window(scored_results, thinking_budget * 2)
                 observation_ids = [uuid.UUID(sr.id) for sr in observation_srs]
-                if observation_ids:
+                # Adaptive memory replays this dedup over its counterfactual order, whose window
+                # can hold observations this one does not. Their sources ride on the same read
+                # (the copies share `retrieval` with these results), so the replay needs no query
+                # of its own. Empty when adaptive memory is off: the read is exactly as before.
+                in_window = {sr.id for sr in observation_srs}
+                counterfactual_srs = (
+                    [
+                        sr
+                        for sr in adaptive.counterfactual_window_observations(
+                            min_reranker=min_reranker, min_final=min_final, window=thinking_budget * 2
+                        )
+                        if sr.id not in in_window
+                    ]
+                    if adaptive is not None
+                    else []
+                )
+                if observation_ids or counterfactual_srs:
                     dedup_start = time.perf_counter()
-                    superseded_ids: set[str] = set()
                     from .memories import get_memories
 
+                    read_srs = observation_srs + counterfactual_srs
                     # A backend that carries an observation's sources on the recalled result has
                     # already paid for this record — hydration fetched it whole, so skip the read.
                     # Same all-or-nothing shape as the entity fast path: one observation that did
@@ -10242,7 +10424,7 @@ class MemoryEngine(MemoryEngineInterface):
                     # all. The resolved sources are written back onto sr.retrieval (previously they
                     # were read into a local and discarded), so the store-owned chunk walk in Step
                     # 5.5 and the source-facts step reuse them instead of reading them a second time.
-                    if not all(sr.retrieval.source_memory_ids is not None for sr in observation_srs):
+                    if not all(sr.retrieval.source_memory_ids is not None for sr in read_srs):
                         async with self._store_read_conn(bank_id) as dedup_conn:
                             obs_by_id = {
                                 m.unit_id: [str(s) for s in (m.source_memory_ids or [])]
@@ -10250,11 +10432,11 @@ class MemoryEngine(MemoryEngineInterface):
                                     conn=dedup_conn,
                                     fq_table=fq_table,
                                     bank_id=bank_id,
-                                    unit_ids=[str(o) for o in observation_ids],
+                                    unit_ids=[str(uuid.UUID(sr.id)) for sr in read_srs],
                                 )
                                 if m.fact_type == "observation"
                             }
-                            for sr in observation_srs:
+                            for sr in read_srs:
                                 if sr.id in obs_by_id:
                                     sr.retrieval.source_memory_ids = obs_by_id[sr.id]
                     tracer.add_phase_metric(
@@ -10262,16 +10444,10 @@ class MemoryEngine(MemoryEngineInterface):
                         time.perf_counter() - dedup_start,
                         {"observations_considered": len(observation_ids)},
                     )
-                    for sr in observation_srs:
-                        for sid in sr.retrieval.source_memory_ids or []:
-                            superseded_ids.add(str(sid))
+                    superseded_ids = superseded_source_ids(observation_srs)
                     if superseded_ids:
                         before_count = len(scored_results)
-                        scored_results = [
-                            sr
-                            for sr in scored_results
-                            if not (sr.retrieval.fact_type in ("world", "experience") and sr.id in superseded_ids)
-                        ]
+                        scored_results = drop_superseded_raw_facts(scored_results, superseded_ids)
                         log_buffer.append(
                             f"  [4.8] prefer_observations: dropped {before_count - len(scored_results)} "
                             f"raw fact(s) superseded by {len(observation_ids)} observation(s)"
@@ -10416,11 +10592,25 @@ class MemoryEngine(MemoryEngineInterface):
                 fact_ids_ordered=[sr.id for sr in top_scored],
                 text_by_id={sr.id: sr.retrieval.text for sr in top_scored},
                 max_tokens=max_tokens,
-                count_tokens=count_tokens,
+                # The memoised counter only when adaptive memory will replay this budget.
+                count_tokens=adaptive.count_tokens if adaptive is not None else count_tokens,
             )
             total_tokens = selection.total_tokens
             selected_ids = set(selection.ids)
             top_scored = [sr for sr in top_scored if sr.id in selected_ids]
+            if adaptive is not None:
+                self._finish_adaptive_recall(
+                    adaptive,
+                    tracer,
+                    enable_trace=enable_trace,
+                    bank_id=bank_id,
+                    top_scored=top_scored,
+                    min_reranker=min_reranker,
+                    min_final=min_final,
+                    prefer_observations=dedup_observations,
+                    rerank_limit=rerank_limit,
+                    max_tokens=max_tokens,
+                )
 
             step_duration = time.perf_counter() - step_start
             truncated_note = " (truncated)" if selection.truncated else ""
@@ -10720,6 +10910,14 @@ class MemoryEngine(MemoryEngineInterface):
                 tracer.add_phase_metric("semaphore_wait", semaphore_wait, {"diagnostic": True})
             if max_conn_wait > 0:
                 tracer.add_phase_metric("connection_wait", max_conn_wait, {"diagnostic": True})
+            # Adaptive memory: the state load runs beside the cross-encoder (a subset of
+            # `reranking`), and its scoring is spread over `combined_scoring` and
+            # `token_filtering` (the counterfactual replay), so both are subsets too.
+            if adaptive is not None:
+                if adaptive.load_seconds > 0:
+                    tracer.add_phase_metric("adaptive_state_load", adaptive.load_seconds, {"diagnostic": True})
+                if adaptive.scoring_seconds > 0:
+                    tracer.add_phase_metric("adaptive_scoring", adaptive.scoring_seconds, {"diagnostic": True})
 
             # Finalize trace if enabled. finalize() snapshots total_duration_seconds at
             # entry, so its own object construction + to_dict() serialization fall outside
