@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import cast
 
+from ..causal_links import DEFAULT_CAUSAL_LINK_WEIGHT, CausalLinkDescriptor
 from .base import DatabaseConnection
 from .ops import (
     RETENTION_STATE_COLUMNS,
@@ -2099,5 +2100,144 @@ class OracleOps(DataAccessOps):
                 deciding_snapshot,
                 evidence_ids,
                 now,
+            )
+        return True
+
+    # -- Curation archive and observation folds ----------------------------
+
+    async def table_columns(self, conn: DatabaseConnection, table: str) -> list[str]:
+        # No pg_attribute / regclass on Oracle. The backend sets CURRENT_SCHEMA per session (tenant
+        # schemas included), so the bare table name resolves there, as the transfer importer does.
+        rows = await conn.fetch(
+            "SELECT column_name FROM all_tab_columns "
+            "WHERE owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AND table_name = UPPER($1) "
+            "ORDER BY column_id",
+            table.rsplit(".", 1)[-1].strip('"'),
+        )
+        return [f'"{str(r["column_name"]).upper()}"' for r in rows]
+
+    def search_vector_expr(self, config, *, text_col: str = "text", context_col: str = "context") -> str | None:
+        return None
+
+    async def fetch_causal_link_descriptors(
+        self,
+        conn: DatabaseConnection,
+        *,
+        links_table: str,
+        archive_table: str,
+        bank_id: str,
+        unit_id: str,
+        link_types: Sequence[str],
+    ) -> list[CausalLinkDescriptor]:
+        types = list(link_types)
+        live = await conn.fetch(
+            f"SELECT from_unit_id, to_unit_id, link_type, weight FROM {links_table} "
+            f"WHERE (from_unit_id = $1 OR to_unit_id = $1) AND bank_id = $2 AND link_type = ANY($3::text[])",
+            unit_id,
+            bank_id,
+            types,
+        )
+        # The parked descriptors hold dashed uuid strings while the bind is RAW(16), so each endpoint
+        # is turned into RAW for the comparison. A UNION with the arm above would need both sides as
+        # RAW and gains nothing; the two are merged below instead.
+        archived = await conn.fetch(
+            f"""
+            SELECT d.from_unit_id, d.to_unit_id, d.link_type, d.weight
+            FROM {archive_table} a,
+                 JSON_TABLE(a.causal_links, '$[*]' COLUMNS (
+                     from_unit_id VARCHAR2(64) PATH '$.from_unit_id',
+                     to_unit_id VARCHAR2(64) PATH '$.to_unit_id',
+                     link_type VARCHAR2(64) PATH '$.link_type',
+                     weight BINARY_DOUBLE PATH '$.weight'
+                 )) d
+            WHERE a.bank_id = $2
+              AND d.from_unit_id IS NOT NULL
+              AND d.to_unit_id IS NOT NULL
+              AND (HEXTORAW(REPLACE(d.from_unit_id, '-', '')) = $1 OR HEXTORAW(REPLACE(d.to_unit_id, '-', '')) = $1)
+              AND d.link_type = ANY($3::text[])
+            """,
+            unit_id,
+            bank_id,
+            types,
+        )
+        # A frozen dataclass, so the dict dedupes like PG's UNION and keeps the first-seen order.
+        out: dict[CausalLinkDescriptor, None] = {}
+        for row in [*live, *archived]:
+            weight = row["weight"]
+            descriptor = CausalLinkDescriptor(
+                from_unit_id=str(uuid_mod.UUID(str(row["from_unit_id"]))),
+                to_unit_id=str(uuid_mod.UUID(str(row["to_unit_id"]))),
+                link_type=row["link_type"],
+                weight=float(weight) if weight is not None else DEFAULT_CAUSAL_LINK_WEIGHT,
+            )
+            out[descriptor] = None
+        return list(out)
+
+    async def fold_sources_into_observation(
+        self,
+        conn: DatabaseConnection,
+        *,
+        units_table: str,
+        sources_table: str,
+        observation_id: uuid_mod.UUID,
+        expected_text: str,
+        merged_text: str,
+        source_memory_ids: Sequence[uuid_mod.UUID],
+        event_date: datetime | None,
+        occurred_start: datetime | None,
+        occurred_end: datetime | None,
+        mentioned_at: datetime | None,
+        search_vector_clause: str,
+    ) -> bool:
+        # The lock the PG UPDATE takes, at the same point (the caller already holds the sources).
+        # The text gate runs here: Oracle cannot compare a CLOB with `=`.
+        row = await conn.fetchrow(
+            f"SELECT text, source_memory_ids FROM {units_table} WHERE id = $1 FOR UPDATE", observation_id
+        )
+        if row is None or row["text"] != expected_text:
+            return False
+        stored = conn.parse_json(row["source_memory_ids"]) or []
+        merged: list[uuid_mod.UUID] = []
+        for value in [*stored, *source_memory_ids]:
+            try:
+                merged.append(value if isinstance(value, uuid_mod.UUID) else uuid_mod.UUID(str(value)))
+            except ValueError:
+                continue
+        merged = list(dict.fromkeys(merged))
+        # LEAST/GREATEST return NULL as soon as one argument is NULL on Oracle, so the outer COALESCE
+        # keeps the bound date when the column is NULL (the rewrite_observation spelling, which also
+        # gives a NULL bind its TIMESTAMP-TZ input size).
+        await conn.execute(
+            f"""
+            UPDATE {units_table}
+            SET text = $1,
+                source_memory_ids = $2,
+                proof_count = $3,
+                event_date = COALESCE(LEAST(event_date, COALESCE($4, event_date)), $4),
+                occurred_start = COALESCE(LEAST(occurred_start, COALESCE($5, occurred_start)), $5),
+                occurred_end = COALESCE(GREATEST(occurred_end, COALESCE($6, occurred_end)), $6),
+                mentioned_at = COALESCE(GREATEST(mentioned_at, COALESCE($7, mentioned_at)), $7),
+                updated_at = now(){search_vector_clause}
+            WHERE id = $8
+            """,
+            merged_text,
+            merged,
+            len(merged),
+            event_date,
+            occurred_start,
+            occurred_end,
+            mentioned_at,
+            observation_id,
+        )
+        # Oracle reads an observation's sources through the junction, so the new ids are posted there.
+        new_ids = list(dict.fromkeys(source_memory_ids))
+        if new_ids:
+            await conn.executemany(
+                f"""
+                INSERT INTO {sources_table} (observation_id, source_id)
+                VALUES ($1, $2)
+                ON CONFLICT (observation_id, source_id) DO NOTHING
+                """,
+                [(observation_id, sid) for sid in new_ids],
             )
         return True

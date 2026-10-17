@@ -1002,6 +1002,8 @@ class Hindsight:
         truth_status: Literal["active", "uncertain", "superseded", "refuted"] | None = None,
         superseded_by: str | None = None,
         reason: str | None = None,
+        hold: bool | None = None,
+        retention_state: Literal["active"] | None = None,
     ) -> MemoryLifecycle:
         """
         Change how a memory is retained, or what should be believed about it (sync wrapper — prefer
@@ -1019,6 +1021,8 @@ class Hindsight:
                 truth_status=truth_status,
                 superseded_by=superseded_by,
                 reason=reason,
+                hold=hold,
+                retention_state=retention_state,
             )
         )
 
@@ -1032,6 +1036,8 @@ class Hindsight:
         truth_status: Literal["active", "uncertain", "superseded", "refuted"] | None = None,
         superseded_by: str | None = None,
         reason: str | None = None,
+        hold: bool | None = None,
+        retention_state: Literal["active"] | None = None,
     ) -> MemoryLifecycle:
         """
         Change how a memory is retained, or what should be believed about it (async — preferred over
@@ -1057,6 +1063,10 @@ class Hindsight:
             superseded_by: With ``"superseded"``/``"refuted"``, the memory that replaces this one:
                 a different live memory of the same bank with exactly the same tags.
             reason: Why the truth status changed; recorded on the claim.
+            hold: True places the memory on hold: it is never archived or pruned and always ranks
+                as fully retrievable (an exemption whose reason is ``"hold"``); False lifts the
+                exemption. Not combined with ``forgetting_exempt`` or ``exemption_reason``.
+            retention_state: ``"active"`` returns an archived memory to normal recall.
 
         Returns:
             MemoryLifecycle: the memory's lifecycle view after the change (the same view
@@ -1074,6 +1084,8 @@ class Hindsight:
                     "truth_status": truth_status,
                     "superseded_by": superseded_by,
                     "reason": reason,
+                    "hold": hold,
+                    "retention_state": retention_state,
                 }.items()
                 if value is not None
             }

@@ -176,7 +176,8 @@ class MaintenanceLoop:
         llm_on = sweep_on and cfg.llm_trace_enabled and cfg.llm_trace_retention_days > 0
         mm_refresh_on = cfg.mental_model_refresh_tick_seconds > 0
         op_cleanup_on = cfg.operation_cleanup_interval_seconds > 0 and cfg.operation_retention_days > 0
-        return reconcile_on or audit_on or llm_on or mm_refresh_on or op_cleanup_on
+        adaptive_on = cfg.adaptive_memory_maintenance_interval_seconds > 0 and cfg.adaptive_memory_archive_enabled
+        return reconcile_on or audit_on or llm_on or mm_refresh_on or op_cleanup_on or adaptive_on
 
     # ── loop ───────────────────────────────────────────────────────────────
 
@@ -240,6 +241,13 @@ class MaintenanceLoop:
             and self._is_due("operation_cleanup", cleanup_interval)
         ):
             await self._run_timed("operation cleanup", self._run_operation_cleanup(cfg))
+        adaptive_interval = cfg.adaptive_memory_maintenance_interval_seconds
+        if (
+            adaptive_interval > 0
+            and cfg.adaptive_memory_archive_enabled
+            and self._is_due("adaptive_memory_maintenance", adaptive_interval)
+        ):
+            await self._run_timed("adaptive memory maintenance", self._run_adaptive_memory_maintenance())
 
     async def _run_timed(self, name: str, coro: Coroutine[Any, Any, None]) -> None:
         """Run a maintenance job and emit one timing line for it.
@@ -532,6 +540,54 @@ class MaintenanceLoop:
                 if bank_id is not None and count > 0 and store.store_owned_for(bank_id)
             )
         return found
+
+    # ── adaptive memory maintenance ──────────────────────────────────────────
+
+    async def _run_adaptive_memory_maintenance(self) -> None:
+        """Submit the archive/prune job for every bank that holds retention state.
+
+        Discovery is one statement per served schema (the banks with any retention row); the
+        per-bank submit resolves the bank's mode, so a bank that is not rank/lifecycle costs a
+        config lookup and enqueues nothing. The submit deduplicates against a pending or running
+        job of the bank, which is what keeps the leaderless fleet from queueing one job per process.
+        Consolidation also submits the job after each run; this covers banks that are quiet.
+        """
+        engine = self._engine
+        from .memories import get_memories
+        from .memory_engine import _current_schema
+
+        try:
+            tenants = await engine._tenant_extension.list_tenants()
+        except Exception as e:
+            logger.warning(f"Adaptive memory maintenance tenant discovery failed: {e}")
+            return
+        tenant_by_schema = {t.schema: t for t in tenants}
+        default_schema = get_config().database_schema
+        store = get_memories()
+
+        submitted = 0
+        for schema in sorted({default_schema, *tenant_by_schema}):
+            tenant = tenant_by_schema.get(schema)
+            token = _current_schema.set(schema)
+            try:
+                async with acquire_with_retry(engine._backend, max_retries=1) as conn:
+                    bank_ids = await store.banks_with_retention_state(conn)
+                context = RequestContext(internal=True, tenant_id=tenant.tenant_id if tenant else None)
+                for bank_id in bank_ids:
+                    try:
+                        result = await engine.submit_async_adaptive_memory_maintenance(
+                            bank_id=bank_id, request_context=context
+                        )
+                        if result.get("operation_id"):
+                            submitted += 1
+                    except Exception as e:
+                        logger.warning(f"Adaptive memory maintenance submit failed for bank {bank_id} in {schema}: {e}")
+            except Exception as e:
+                logger.warning(f"Adaptive memory maintenance discovery failed for schema {schema}: {e}")
+            finally:
+                _current_schema.reset(token)
+        if submitted:
+            logger.info(f"Adaptive memory maintenance: scheduled {submitted} bank(s)")
 
     # ── scheduled mental model refresh ───────────────────────────────────────
 

@@ -573,6 +573,9 @@ def returned_memories(tool: str, output: dict[str, Any]) -> list[MemoryFact]:
             context=m.get("context"),
             occurred_start=m.get("occurred_start"),
             occurred_end=m.get("occurred_end"),
+            # Lifecycle mode: a retired memory read as history keeps its claim annotation, so the
+            # citation records that it was not a current answer when cited.
+            lifecycle=m.get("lifecycle"),
         )
         for m in raw
         if m.get("id")

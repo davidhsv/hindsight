@@ -440,6 +440,35 @@ async def record_reinforcement(
                 rows=[_update_of(state, reasons[mid]) for mid, state in states.items() if state != base[mid]],
                 now=now,
             )
+            # Any applied reinforcement brings an archived memory back (R25): it was just useful.
+            # Cooldowns and duplicates are not evidence of new use, so they leave it archived. On an
+            # active row it restarts the archive grace period: the sweep may not run again before
+            # R falls back below the threshold, and the mark must not span the use in between.
+            applied = {
+                r.memory_id
+                for r in recorded
+                if r is not None and r.outcome == "applied" and base.get(r.memory_id) is not None
+            }
+            revived = sorted(applied & {mid for mid, state in base.items() if state.retention_state == "archived"})
+            unmarked = sorted(
+                mid
+                for mid in applied
+                if base[mid].retention_state != "archived" and base[mid].below_threshold_since is not None
+            )
+            if revived or unmarked:
+                from .adaptive_maintenance import clear_below_threshold_marks, unarchive_memories
+
+                for mid in await unarchive_memories(
+                    conn, fq_table=fq_table, bank_id=bank_id, memory_ids=revived, now=now
+                ):
+                    states[mid] = replace(
+                        states[mid], retention_state="active", archived_at=None, below_threshold_since=None
+                    )
+                await clear_below_threshold_marks(
+                    conn, fq_table=fq_table, bank_id=bank_id, memory_ids=unmarked, now=now
+                )
+                for mid in unmarked:
+                    states[mid] = replace(states[mid], below_threshold_since=None)
 
     done = tuple(r for r in recorded if r is not None)
     result = ReinforcementResult(

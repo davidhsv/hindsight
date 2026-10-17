@@ -304,6 +304,27 @@ async def test_patch_lifecycle_sets_importance_and_exemption(api_client, memory,
     assert (retention["forgetting_exempt"], retention["exemption_reason"]) == (False, None)
 
 
+async def test_patch_lifecycle_places_and_lifts_a_hold(api_client, memory, bank):
+    await _set_config(api_client, bank, adaptive_memory_mode="rank")
+    memory_id = await _insert_memory(memory, bank, "The audit log is kept for seven years.")
+
+    held = await _patch_lifecycle(api_client, bank, memory_id, hold=True)
+    assert held.status_code == 200, held.text
+    retention = held.json()["retention"]
+    assert (retention["forgetting_exempt"], retention["exemption_reason"], retention["retrievability"]) == (
+        True,
+        "hold",
+        1.0,
+    )
+    # Unarchiving a memory that is not archived leaves it as it is.
+    active = await _patch_lifecycle(api_client, bank, memory_id, retention_state="active")
+    assert active.status_code == 200, active.text
+    assert active.json()["retention"]["retention_state"] == "active"
+
+    lifted = (await _patch_lifecycle(api_client, bank, memory_id, hold=False)).json()["retention"]
+    assert (lifted["forgetting_exempt"], lifted["exemption_reason"]) == (False, None)
+
+
 async def test_importance_rescales_what_the_memory_learned(api_client, memory, bank):
     await _set_config(api_client, bank, adaptive_memory_mode="rank")
     memory_id = await _insert_memory(memory, bank, "The release train leaves every other Tuesday.")
@@ -324,6 +345,9 @@ async def test_importance_rescales_what_the_memory_learned(api_client, memory, b
         {"importance": "high"},
         {"forgetting_exempt": False, "exemption_reason": "why"},
         {"exemption_reason": ""},
+        {"hold": True, "forgetting_exempt": True},
+        {"hold": False, "exemption_reason": "why"},
+        {"retention_state": "archived"},
     ],
 )
 async def test_a_malformed_lifecycle_patch_is_rejected(api_client, memory, bank, body):

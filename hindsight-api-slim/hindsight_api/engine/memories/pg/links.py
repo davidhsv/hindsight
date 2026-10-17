@@ -4,6 +4,7 @@ Link creation utilities for temporal, semantic, and entity links.
 
 import logging
 import time
+import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import cast
@@ -14,12 +15,12 @@ from ...._vector_index import ann_search_tuning_settings, configured_vector_exte
 from ...causal_links import (
     CANONICAL_CAUSAL_LINK_TYPES,
     CAUSAL_LINK_TYPES,
-    DEFAULT_CAUSAL_LINK_WEIGHT,
     LEGACY_CAUSAL_LINK_TYPES,
     CausalLinkDescriptor,
 )
 from ...db.base import DatabaseConnection
 from ...db.ops import DataAccessOps
+from ...db.ops_oracle import ORACLE_IN_LIST_LIMIT
 from ...db.postgresql import setting_rejected_by_server
 from ...retain.entity_processing import _MAX_ENTITY_NAME_CHARS, _normalize_entity_name
 from ...retain.types import CausalRelation, EmbeddingLike, EntityResolutionResult, embedding_to_pgvector
@@ -1078,43 +1079,18 @@ async def snapshot_causal_links(conn: DatabaseConnection, bank_id: str, unit_id:
 
     Returns:
         The descriptors to store on the archive row (deduplicated across both
-        sources by the UNION).
+        sources; the per-dialect read is ``DataAccessOps.fetch_causal_link_descriptors``).
     """
-    rows = await conn.fetch(
-        f"""
-        SELECT from_unit_id, to_unit_id, link_type, weight
-        FROM {fq_table("memory_links")}
-        WHERE (from_unit_id = $1 OR to_unit_id = $1)
-          AND bank_id = $2
-          AND link_type = ANY($3::text[])
-        UNION
-        SELECT d.from_unit_id, d.to_unit_id, d.link_type, d.weight
-        FROM {fq_table("invalidated_memory_units")} a
-        CROSS JOIN LATERAL jsonb_to_recordset(a.causal_links)
-            AS d(from_unit_id uuid, to_unit_id uuid, link_type text, weight float8)
-        WHERE a.bank_id = $2
-          AND a.causal_links <> '[]'::jsonb
-          AND (d.from_unit_id = $1 OR d.to_unit_id = $1)
-          -- Same guard as CausalLinkDescriptor.from_json_dict: the column is
-          -- schemaless JSON, and a malformed entry would otherwise be copied
-          -- forward as a NULL-endpoint descriptor.
-          AND d.from_unit_id IS NOT NULL
-          AND d.to_unit_id IS NOT NULL
-          AND d.link_type = ANY($3::text[])
-        """,
-        unit_id,
-        bank_id,
-        list(CAUSAL_LINK_TYPES),
+    from .graph import _ops_for
+
+    return await _ops_for(conn).fetch_causal_link_descriptors(
+        conn,
+        links_table=fq_table("memory_links"),
+        archive_table=fq_table("invalidated_memory_units"),
+        bank_id=bank_id,
+        unit_id=unit_id,
+        link_types=list(CAUSAL_LINK_TYPES),
     )
-    return [
-        CausalLinkDescriptor(
-            from_unit_id=str(row["from_unit_id"]),
-            to_unit_id=str(row["to_unit_id"]),
-            link_type=row["link_type"],
-            weight=float(row["weight"]) if row["weight"] is not None else DEFAULT_CAUSAL_LINK_WEIGHT,
-        )
-        for row in rows
-    ]
 
 
 async def rematerialize_causal_links(
@@ -1157,5 +1133,28 @@ async def rematerialize_causal_links(
     ]
     if not links:
         return 0
+    if getattr(conn, "backend_type", None) == "oracle":
+        # Oracle's bulk link writer has no WHERE EXISTS (its callers vouch for the endpoints), and
+        # memory_links' FKs would reject an edge to a still-archived or deleted peer outright, so
+        # keep only the edges whose two endpoints are live in this bank.
+        def _canonical(endpoint) -> str | None:
+            try:
+                return str(uuid.UUID(str(endpoint)))
+            except ValueError:
+                return None
+
+        parsed = {c for link in links for c in (_canonical(link[0]), _canonical(link[1])) if c is not None}
+        endpoints = sorted(parsed)
+        live: set[str] = set()
+        for start in range(0, len(endpoints), ORACLE_IN_LIST_LIMIT):
+            rows = await conn.fetch(
+                f"SELECT id FROM {fq_table('memory_units')} WHERE bank_id = $1 AND id = ANY($2::uuid[])",
+                bank_id,
+                endpoints[start : start + ORACLE_IN_LIST_LIMIT],
+            )
+            live.update(str(r["id"]) for r in rows)
+        links = [link for link in links if _canonical(link[0]) in live and _canonical(link[1]) in live]
+        if not links:
+            return 0
     await _bulk_insert_links(conn, links, bank_id=bank_id, ops=ops)
     return len(links)

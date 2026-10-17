@@ -4500,6 +4500,7 @@ export type MentalModelDryRunRefreshResult = {
     | "structured_doc_unreadable"
     | "delta_ops_failed"
     | "delta_ops_all_skipped"
+    | "retired_grounding"
     | null;
   /**
    * Outcome
@@ -4737,6 +4738,7 @@ export type MentalModelRefreshTrace = {
     | "structured_doc_unreadable"
     | "delta_ops_failed"
     | "delta_ops_all_skipped"
+    | "retired_grounding"
     | null;
   /**
    * Outcome
@@ -4903,12 +4905,16 @@ export type MentalModelResponse = {
  * report: the fact is gone from the bank, so it appears in no recall, no tool
  * call, and no supporting-fact list. Without this, a refresh that quietly
  * deleted a paragraph — or quietly declined to — leaves no evidence of why.
+ *
+ * In adaptive memory ``lifecycle`` mode a cited memory whose claim was superseded or
+ * refuted counts too: it is still a row, but no longer a current answer. ``cause`` and
+ * ``successor_ids`` say so; both are omitted when no such citation was found.
  */
 export type MentalModelRetraction = {
   /**
    * Fact Ids
    *
-   * Ids the document's based_on cites that no longer exist in the bank.
+   * Ids the document's based_on cites that no longer exist in the bank, or (lifecycle mode) whose claim was superseded or refuted.
    */
   fact_ids?: Array<string>;
   /**
@@ -4920,9 +4926,21 @@ export type MentalModelRetraction = {
   /**
    * Applied
    *
-   * Whether the pass that removes them ran to completion (zero edits still counts).
+   * Whether the pass that removes them ran to completion (zero edits still counts). For retired claims that pass is the full regeneration: true when it produced the document.
    */
   applied: boolean;
+  /**
+   * Cause
+   *
+   * Lifecycle mode: why cited memories stopped being current — 'refuted' when any of them was refuted, else 'superseded'. Omitted when every retracted fact is simply gone.
+   */
+  cause?: "superseded" | "refuted" | null;
+  /**
+   * Successor Ids
+   *
+   * Lifecycle mode: the memories that replaced the retired citations. Omitted when none.
+   */
+  successor_ids?: Array<string>;
   /**
    * Deferred Reason
    *
@@ -7288,6 +7306,18 @@ export type UpdateMemoryLifecycleRequest = {
    * Why the truth status changed; recorded on the claim and its lifecycle relation.
    */
   reason?: string | null;
+  /**
+   * Hold
+   *
+   * Place the memory on hold ('rank' or 'lifecycle' mode): it is never archived or pruned and always ranks as fully retrievable. Stored as forgetting_exempt with exemption_reason 'hold'. False lifts the exemption. Cannot be combined with forgetting_exempt or exemption_reason.
+   */
+  hold?: boolean | null;
+  /**
+   * Retention State
+   *
+   * 'active' returns an archived memory to normal recall ('rank' or 'lifecycle' mode). A memory that is not archived is left as it is.
+   */
+  retention_state?: "active" | null;
 };
 
 /**

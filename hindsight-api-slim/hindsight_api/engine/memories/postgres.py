@@ -59,6 +59,7 @@ from .base import (
 )
 from .pg import adaptive as pg_adaptive
 from .pg import adaptive_claims as pg_claims
+from .pg import adaptive_maintenance as pg_adaptive_maintenance
 from .pg import adaptive_transfer as pg_adaptive_transfer
 from .pg import admin as pg_admin
 from .pg import banks as pg_banks
@@ -73,7 +74,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..adaptive.claims import CarryForwardResult, ReingestStash
     from ..adaptive.models import (
         AdaptiveState,
+        ArchiveResult,
         ClaimState,
+        Grounding,
+        PruneCursor,
+        PrunePage,
         ReinforcementEvent,
         ReinforcementResult,
         RetentionPolicy,
@@ -681,6 +686,47 @@ class PostgresMemories(MemoriesExtension):
     ) -> MemoryLifecycle | None:
         return await pg_adaptive.get_memory_lifecycle(
             conn, fq_table=fq_store_table, bank_id=bank_id, memory_id=memory_id, now=now, settings=settings
+        )
+
+    # -- maintenance (pg/adaptive_maintenance.py) --
+
+    async def grounding_status(self, conn, *, bank_id: str, ids: Sequence[str]) -> dict[str, Grounding]:
+        return await pg_adaptive_maintenance.grounding_status(conn, fq_table=fq_store_table, bank_id=bank_id, ids=ids)
+
+    async def archive_sweep(
+        self, conn, *, bank_id: str, now: datetime, settings: AdaptiveSettings, batch: int = 500
+    ) -> ArchiveResult:
+        return await pg_adaptive_maintenance.archive_sweep(
+            conn, fq_table=fq_store_table, bank_id=bank_id, now=now, settings=settings, batch=batch
+        )
+
+    async def prune_candidates(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        now: datetime,
+        settings: AdaptiveSettings,
+        limit: int = 500,
+        after: PruneCursor | None = None,
+    ) -> PrunePage:
+        return await pg_adaptive_maintenance.prune_candidates(
+            conn, fq_table=fq_store_table, bank_id=bank_id, now=now, settings=settings, limit=limit, after=after
+        )
+
+    async def lock_prunable(
+        self, conn, *, bank_id: str, memory_ids: Sequence[str], now: datetime, settings: AdaptiveSettings
+    ) -> list[str]:
+        return await pg_adaptive_maintenance.lock_prunable(
+            conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids, now=now, settings=settings
+        )
+
+    async def banks_with_retention_state(self, conn) -> list[str]:
+        return await pg_adaptive_maintenance.banks_with_retention_state(conn, fq_table=fq_store_table)
+
+    async def unarchive_memories(self, conn, *, bank_id: str, memory_ids: Sequence[str], now: datetime) -> list[str]:
+        return await pg_adaptive_maintenance.unarchive_memories(
+            conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids, now=now
         )
 
     # -- claim lifecycle (pg/adaptive_claims.py) --

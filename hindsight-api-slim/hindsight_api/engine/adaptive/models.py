@@ -194,3 +194,75 @@ class RetentionPolicy:
     importance: float | None = None
     forgetting_exempt: bool | None = None
     exemption_reason: str | None = None
+
+
+#: What a cited memory id is now, for a mental model's grounding check: ``absent`` (no live row in
+#: the bank — deleted, invalidated, swept, or never this bank's), ``live`` (a row whose claim is
+#: current: no claim row, ``active`` or ``uncertain``), ``retired`` (a live row whose claim is
+#: ``superseded`` or ``refuted``).
+GroundingState = Literal["absent", "live", "retired"]
+
+
+@dataclass(frozen=True)
+class Grounding:
+    """One cited id's grounding (``MemoriesExtension.grounding_status``).
+
+    ``truth_status`` and ``successor_id`` are set only when ``state`` is ``retired``: the claim's
+    status and the memory that replaced it (``superseded_by_id``, None for a refutation that named
+    no correction or a successor that is no longer live).
+    """
+
+    state: GroundingState
+    truth_status: TruthStatus | None = None
+    successor_id: str | None = None
+
+
+GROUNDING_ABSENT = Grounding(state="absent")
+GROUNDING_LIVE = Grounding(state="live")
+
+
+@dataclass(frozen=True)
+class ArchiveResult:
+    """What one ``MemoriesExtension.archive_sweep`` call did; the default is the no-op result.
+
+    ``scanned`` counts the active retention rows read; ``marked`` the rows whose
+    ``below_threshold_since`` was set (R fell below the threshold), ``cleared`` those whose mark was
+    removed (R is back at or above it), ``archived`` the rows moved to ``retention_state='archived'``,
+    and ``protected`` the rows that met the retrievability and grace conditions but were kept
+    (importance at or above the protection level, an exemption or hold, or evidence of a claim that
+    is not active). ``skipped_locked`` counts rows another transaction held while the sweep wanted
+    to change them; the next sweep sees them again.
+    """
+
+    scanned: int = 0
+    marked: int = 0
+    cleared: int = 0
+    archived: int = 0
+    protected: int = 0
+    skipped_locked: int = 0
+
+
+@dataclass(frozen=True)
+class PruneCursor:
+    """Where a ``MemoriesExtension.prune_candidates`` page ended: its last row's archive key."""
+
+    archived_at: datetime
+    memory_id: str
+
+
+@dataclass(frozen=True)
+class PrunePage:
+    """One page of ``MemoriesExtension.prune_candidates``; the default is the empty, final page.
+
+    ``memory_ids`` are the page's deletable memories (possibly none: every row on the page may be
+    protected). ``next_after`` is the cursor for the next page, None once the bank's old enough
+    archived rows are exhausted.
+    """
+
+    memory_ids: list[str] = field(default_factory=list)
+    next_after: PruneCursor | None = None
+
+
+#: ``exemption_reason`` of a hold (``PATCH .../lifecycle`` with ``hold: true``): an exemption from
+#: forgetting that also keeps the memory from being archived or pruned, like any exemption.
+HOLD_EXEMPTION_REASON = "hold"

@@ -211,6 +211,8 @@ class AdaptiveRecall:
     load_seconds: float = 0.0
     scoring_seconds: float = 0.0
     counterfactual: list[ScoredResult] | None = field(default=None)
+    archive_suppressed: list[str] = field(default_factory=list)
+    """Ids :meth:`suppress_archived` dropped, in score order."""
 
     def receive(self, load: AdaptiveStateLoad) -> None:
         self.states = load.states
@@ -236,6 +238,40 @@ class AdaptiveRecall:
                 lambda sr: sr.weight * (sr.adaptive_factor if sr.adaptive_factor is not None else 1.0),
             )
         return True
+
+    def suppress_archived(self, scored_results: list[ScoredResult]) -> list[ScoredResult]:
+        """Drop archived memories the query does not cue strongly (rank/lifecycle, archiving on).
+
+        Archived memories stay in the candidate pool and are scored like any other; after the sort,
+        one whose normalized reranker score is below ``archive_recall_min_score`` is removed. A
+        strong cue (at or above it) still brings it back. The dropped ids are kept on
+        ``archive_suppressed`` for the trace and the metric. Nothing happens when the state could
+        not be loaded (the recall then runs with factor 1 and no archive knowledge), in observe mode,
+        or with archiving off — a memory archived before the switch went off is then an ordinary
+        candidate. The counterfactual list keeps them: it answers what the factor-free order would
+        have returned.
+        """
+        settings = self.settings
+        if not (settings.archive_enabled and settings.effective_mode.applies_factor and self.states):
+            return scored_results
+        # An exempt row is never suppressed: a hold always ranks as fully retrievable, even on a
+        # row archived before the exemption was set.
+        archived = {
+            mid
+            for mid, state in self.states.items()
+            if state.retention is not None
+            and state.retention.retention_state == "archived"
+            and not state.retention.forgetting_exempt
+        }
+        if not archived:
+            return scored_results
+        kept: list[ScoredResult] = []
+        for sr in scored_results:
+            if sr.id in archived and sr.cross_encoder_score_normalized < settings.archive_recall_min_score:
+                self.archive_suppressed.append(sr.id)
+            else:
+                kept.append(sr)
+        return kept
 
     def counterfactual_window_observations(
         self, *, min_reranker: float | None, min_final: float | None, window: int

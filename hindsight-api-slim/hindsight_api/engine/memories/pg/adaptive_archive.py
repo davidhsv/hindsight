@@ -32,8 +32,10 @@ Decisions, each a deliberate trade:
   belong to another bank (an archive imported from elsewhere carries source-bank ids) are dropped
   and counted, like ``rematerialize_causal_links`` does for causal edges.
 
-PostgreSQL only for now (both functions are no-ops on Oracle, as before this feature): Oracle
-parity for invalidate/restore is planned with the rest of the Oracle archive work (P4).
+Oracle runs the same protocol through Oracle branches: it has no ``FOR KEY SHARE`` (peers are
+locked one row at a time ``FOR UPDATE``, in id order, like every Oracle adaptive writer), no
+``SELECT`` without ``FROM``, no ``UNION`` over CLOB columns and no ``unnest``; its driver returns
+``TIMESTAMP WITH TIME ZONE`` values without a zone, which are UTC here and read as such.
 
 Known gap: if a claim and its evidence fact are BOTH invalidated, evidence first, and restored in
 the same order, the edge is lost — the claim's snapshot was taken after the cascade had already
@@ -49,7 +51,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -65,6 +67,7 @@ from ...adaptive.views import (
     RelationView,
 )
 from ...db.ops import ReinforcementEventRow
+from .adaptive_claims import _chunks
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +192,15 @@ def _postgres(conn) -> bool:
     return getattr(conn, "backend_type", "postgresql") == "postgresql"
 
 
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None or value.utcoffset() is None else value
+
+
+def _utc_row(row: Any) -> dict[str, Any]:
+    """An Oracle row with its zone-less timestamps read as UTC (the zone the writers bind)."""
+    return {k: _utc(v) if isinstance(v, datetime) else v for k, v in dict(row).items()}
+
+
 def _parse(conn, raw: Any) -> AdaptiveSnapshot | None:
     """The stored snapshot, or None when the row has none. A malformed one raises: only this module
     writes the column, so it is a bug or a hand edit, and silently dropping it would lose the state."""
@@ -214,21 +226,42 @@ async def snapshot_adaptive_state(
     evidence_t = fq_table("memory_claim_evidence")
     events_t = fq_table("memory_reinforcement_events")
     relations_t = fq_table("memory_lifecycle_relations")
-    has_state = await conn.fetchval(
-        f"""
-        SELECT EXISTS (SELECT 1 FROM {retention_t} WHERE memory_id = $1 AND bank_id = $2)
-            OR EXISTS (SELECT 1 FROM {claim_t} WHERE memory_id = $1 AND bank_id = $2)
-            OR EXISTS (SELECT 1 FROM {events_t} WHERE memory_id = $1 AND bank_id = $2)
-            OR EXISTS (SELECT 1 FROM {evidence_t} WHERE memory_id = $1 AND bank_id = $2)
-            OR EXISTS (SELECT 1 FROM {evidence_t} WHERE evidence_memory_id = $1 AND bank_id = $2)
-            OR EXISTS (SELECT 1 FROM {claim_t} WHERE superseded_by_id = $1 AND bank_id = $2)
-            OR EXISTS (SELECT 1 FROM {claim_t} WHERE inherited_from_id = $1 AND bank_id = $2)
-            OR EXISTS (SELECT 1 FROM {relations_t} WHERE source_memory_id = $1 AND bank_id = $2)
-            OR EXISTS (SELECT 1 FROM {relations_t} WHERE target_memory_id = $1 AND bank_id = $2)
-        """,
-        memory_id,
-        bank_id,
-    )
+    postgres = _postgres(conn)
+    if postgres:
+        has_state = await conn.fetchval(
+            f"""
+            SELECT EXISTS (SELECT 1 FROM {retention_t} WHERE memory_id = $1 AND bank_id = $2)
+                OR EXISTS (SELECT 1 FROM {claim_t} WHERE memory_id = $1 AND bank_id = $2)
+                OR EXISTS (SELECT 1 FROM {events_t} WHERE memory_id = $1 AND bank_id = $2)
+                OR EXISTS (SELECT 1 FROM {evidence_t} WHERE memory_id = $1 AND bank_id = $2)
+                OR EXISTS (SELECT 1 FROM {evidence_t} WHERE evidence_memory_id = $1 AND bank_id = $2)
+                OR EXISTS (SELECT 1 FROM {claim_t} WHERE superseded_by_id = $1 AND bank_id = $2)
+                OR EXISTS (SELECT 1 FROM {claim_t} WHERE inherited_from_id = $1 AND bank_id = $2)
+                OR EXISTS (SELECT 1 FROM {relations_t} WHERE source_memory_id = $1 AND bank_id = $2)
+                OR EXISTS (SELECT 1 FROM {relations_t} WHERE target_memory_id = $1 AND bank_id = $2)
+            """,
+            memory_id,
+            bank_id,
+        )
+    else:
+        # Oracle has no boolean select list without FROM: the same indexed probes as one UNION ALL,
+        # first row only.
+        has_state = await conn.fetchval(
+            f"""
+            SELECT 1 FROM {retention_t} WHERE memory_id = $1 AND bank_id = $2
+            UNION ALL SELECT 1 FROM {claim_t} WHERE memory_id = $1 AND bank_id = $2
+            UNION ALL SELECT 1 FROM {events_t} WHERE memory_id = $1 AND bank_id = $2
+            UNION ALL SELECT 1 FROM {evidence_t} WHERE memory_id = $1 AND bank_id = $2
+            UNION ALL SELECT 1 FROM {evidence_t} WHERE evidence_memory_id = $1 AND bank_id = $2
+            UNION ALL SELECT 1 FROM {claim_t} WHERE superseded_by_id = $1 AND bank_id = $2
+            UNION ALL SELECT 1 FROM {claim_t} WHERE inherited_from_id = $1 AND bank_id = $2
+            UNION ALL SELECT 1 FROM {relations_t} WHERE source_memory_id = $1 AND bank_id = $2
+            UNION ALL SELECT 1 FROM {relations_t} WHERE target_memory_id = $1 AND bank_id = $2
+            LIMIT 1
+            """,
+            memory_id,
+            bank_id,
+        )
     if not has_state:
         return None
 
@@ -281,20 +314,40 @@ async def snapshot_adaptive_state(
         bank_id,
     )
     # Two single-column arms, so each endpoint index drives its own (as delete_unit_links does).
-    relations = await conn.fetch(
-        f"""
-        SELECT id, relation_type, source_memory_id, target_memory_id, source_snapshot, target_snapshot, origin,
-               reason, confidence, evidence, created_at
-        FROM {relations_t} WHERE source_memory_id = $1 AND bank_id = $2
-        UNION
-        SELECT id, relation_type, source_memory_id, target_memory_id, source_snapshot, target_snapshot, origin,
-               reason, confidence, evidence, created_at
-        FROM {relations_t} WHERE target_memory_id = $1 AND bank_id = $2
-        ORDER BY created_at, id
-        """,
-        memory_id,
-        bank_id,
-    )
+    if postgres:
+        relations = await conn.fetch(
+            f"""
+            SELECT id, relation_type, source_memory_id, target_memory_id, source_snapshot, target_snapshot, origin,
+                   reason, confidence, evidence, created_at
+            FROM {relations_t} WHERE source_memory_id = $1 AND bank_id = $2
+            UNION
+            SELECT id, relation_type, source_memory_id, target_memory_id, source_snapshot, target_snapshot, origin,
+                   reason, confidence, evidence, created_at
+            FROM {relations_t} WHERE target_memory_id = $1 AND bank_id = $2
+            ORDER BY created_at, id
+            """,
+            memory_id,
+            bank_id,
+        )
+    else:
+        # Oracle refuses UNION (a distinct) over the CLOB snapshot columns: the two arms are read
+        # separately and merged by relation id, in the same (created_at, id) order.
+        by_id: dict[str, Any] = {}
+        for column in ("source_memory_id", "target_memory_id"):
+            for row in await conn.fetch(
+                f"SELECT id, relation_type, source_memory_id, target_memory_id, source_snapshot, target_snapshot, "
+                f"origin, reason, confidence, evidence, created_at FROM {relations_t} "
+                f"WHERE {column} = $1 AND bank_id = $2",
+                memory_id,
+                bank_id,
+            ):
+                by_id[str(row["id"])] = _utc_row(row)
+        relations = sorted(by_id.values(), key=lambda r: (r["created_at"], str(r["id"])))
+        retention = _utc_row(retention) if retention is not None else None
+        claim = _utc_row(claim) if claim is not None else None
+        events = [_utc_row(row) for row in events]
+        evidence_out = [_utc_row(row) for row in evidence_out]
+        evidence_in = [_utc_row(row) for row in evidence_in]
 
     def _evidence(row: Any) -> _Evidence:
         return _Evidence(
@@ -349,10 +402,9 @@ async def park_adaptive_state(conn, *, fq_table: Callable[[str], str], bank_id: 
     ``memory_units`` DELETE. It first locks the parent row ``FOR UPDATE`` — the lock the DELETE
     takes anyway, at the same point in the lock order, so the move takes no new lock — which means
     no adaptive writer (they all hold ``FOR KEY SHARE`` on the parent while they write) can commit
-    between this snapshot and the delete, and the cascade drops nothing the snapshot missed.
+    between this snapshot and the delete, and the cascade drops nothing the snapshot missed. (On
+    Oracle the adaptive writers hold the parent ``FOR UPDATE`` instead; the argument is the same.)
     """
-    if not _postgres(conn):
-        return False
     from ....config import get_config
 
     memory_id = uuid.UUID(str(unit_id))
@@ -391,8 +443,7 @@ async def unpark_adaptive_state(
     first and the side rows second, the order every adaptive writer uses.
     """
     nothing = RematerializedState(restored=False, dropped=0, retired=False)
-    if not _postgres(conn):
-        return nothing
+    postgres = _postgres(conn)
     memory_id = uuid.UUID(str(unit_id))
     raw = await conn.fetchval(
         f"SELECT adaptive_state FROM {fq_table('invalidated_memory_units')} WHERE id = $1 AND bank_id = $2",
@@ -423,13 +474,20 @@ async def unpark_adaptive_state(
         peers.update(p for p in (relation.source_memory_id, relation.target_memory_id) if p)
     peers.discard(old_id)
     live: set[str] = set()
-    if peers:
+    if peers and postgres:
         rows = await conn.fetch(
             f"SELECT id FROM {mu} WHERE bank_id = $1 AND id = ANY($2::uuid[]) ORDER BY id FOR KEY SHARE",
             bank_id,
             sorted(uuid.UUID(p) for p in peers),
         )
         live = {str(r["id"]) for r in rows}
+    elif peers:
+        # Oracle has no FOR KEY SHARE, and its FOR UPDATE does not lock in ORDER BY order: one row
+        # at a time, in id order, as every Oracle adaptive writer locks its parents.
+        for peer in sorted(uuid.UUID(p) for p in peers):
+            row = await conn.fetchrow(f"SELECT id FROM {mu} WHERE id = $1 AND bank_id = $2 FOR UPDATE", peer, bank_id)
+            if row is not None:
+                live.add(str(peer))
     dropped = 0
 
     if snapshot.retention is not None:
@@ -450,7 +508,7 @@ async def unpark_adaptive_state(
             r.last_recalled_at,
             r.reinforcement_count,
             r.access_count,
-            r.forgetting_exempt,
+            r.forgetting_exempt if postgres else int(r.forgetting_exempt),  # NUMBER(1) on Oracle
             r.exemption_reason,
             r.retention_state,
             r.below_threshold_since,
@@ -526,7 +584,7 @@ async def unpark_adaptive_state(
         | set(snapshot.inherited_from_refs)
     ) & live
     eligible: dict[str, Any] = {}
-    if inbound:
+    if inbound and postgres:
         for row in await conn.fetch(
             f"SELECT memory_id, superseded_by_id, inherited_from_id, updated_at FROM {claim_t} "
             f"WHERE bank_id = $1 AND memory_id = ANY($2::uuid[]) ORDER BY memory_id FOR UPDATE",
@@ -535,12 +593,22 @@ async def unpark_adaptive_state(
         ):
             if row["updated_at"] <= snapshot.invalidated_at:
                 eligible[str(row["memory_id"])] = row
+    elif inbound:
+        for holder in sorted(uuid.UUID(m) for m in inbound):
+            row = await conn.fetchrow(
+                f"SELECT memory_id, superseded_by_id, inherited_from_id, updated_at FROM {claim_t} "
+                f"WHERE memory_id = $1 AND bank_id = $2 FOR UPDATE",
+                holder,
+                bank_id,
+            )
+            if row is not None and _utc(row["updated_at"]) <= snapshot.invalidated_at:
+                eligible[str(row["memory_id"])] = row
     for e in snapshot.evidence_in:
         if e.memory_id in eligible:
             evidence_rows.append(_Evidence(memory_id=e.memory_id, evidence_memory_id=self_id, created_at=e.created_at))
         else:
             dropped += 1
-    if evidence_rows:
+    if evidence_rows and postgres:
         await conn.execute(
             f"""
             INSERT INTO {evidence_t} (memory_id, evidence_memory_id, bank_id, created_at)
@@ -553,6 +621,16 @@ async def unpark_adaptive_state(
             [uuid.UUID(e.evidence_memory_id) for e in evidence_rows],
             [e.created_at for e in evidence_rows],
         )
+    elif evidence_rows:
+        # No unnest on Oracle, and a dup-stripped multi-row insert would lose the whole batch on
+        # one duplicate: one executemany that skips duplicate keys row by row.
+        await conn.executemany(
+            f"INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX({evidence_t}, pk_memory_claim_evidence) */ INTO {evidence_t} "
+            f"(memory_id, evidence_memory_id, bank_id, created_at) VALUES ($1, $2, $3, $4)",
+            sorted(
+                (uuid.UUID(e.memory_id), uuid.UUID(e.evidence_memory_id), bank_id, e.created_at) for e in evidence_rows
+            ),
+        )
     # Pointers are written back only where the FK's SET NULL left them empty, and without stamping
     # updated_at: this undoes the cascade, it is not a new decision about that claim.
     for column, refs in (
@@ -561,13 +639,14 @@ async def unpark_adaptive_state(
     ):
         targets = sorted(m for m in refs if m in eligible and eligible[m][column] is None)
         dropped += len(refs) - len(targets)
-        if targets:
+        # One statement on PG; IN-list sized pieces on Oracle (ORA-01795).
+        for chunk in _chunks(conn, [uuid.UUID(m) for m in targets]):
             await conn.execute(
                 f"UPDATE {claim_t} SET {column} = $1 WHERE bank_id = $2 AND memory_id = ANY($3::uuid[]) "
                 f"AND {column} IS NULL",
                 memory_id,
                 bank_id,
-                [uuid.UUID(m) for m in targets],
+                chunk,
             )
 
     dropped += await _restore_relations(conn, relations_t, bank_id, self_id, old_id, snapshot, live)

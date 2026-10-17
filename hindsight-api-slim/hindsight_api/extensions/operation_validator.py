@@ -448,6 +448,7 @@ class BankWriteOperation(StrEnum):
     RETRY_OPERATION = "retry_operation"
     RUN_CONSOLIDATION = "run_consolidation"
     SET_BANK_MISSION = "set_bank_mission"
+    SUBMIT_ASYNC_ADAPTIVE_MEMORY_MAINTENANCE = "submit_async_adaptive_memory_maintenance"
     SUBMIT_ASYNC_CONSOLIDATION = "submit_async_consolidation"
     SUBMIT_ASYNC_GRAPH_MAINTENANCE = "submit_async_graph_maintenance"
     SUBMIT_ASYNC_VECTOR_INDEX_MAINTENANCE = "submit_async_vector_index_maintenance"

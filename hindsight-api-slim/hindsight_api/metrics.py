@@ -436,6 +436,16 @@ class MetricsCollectorBase:
         (``engine/adaptive/cues.py::CUE_NAMES``). A no-op here, like the above.
         """
 
+    def record_adaptive_archive_suppressed(self, *, bank_id: str, count: int):
+        """Record archived memories one recall dropped after scoring because their normalized
+        reranker score was below ``archive_recall_min_score``. A no-op here, like the above.
+        """
+
+    def record_adaptive_archive_maintenance(self, *, bank_id: str, archived: int, pruned: int):
+        """Record one ``adaptive_memory_maintenance`` run: memories it archived and archived memories
+        it deleted (prune). A no-op here, like the above.
+        """
+
     def record_adaptive_lifecycle_dropped(self, *, reason: str, bank_id: str):
         """Record one lifecycle label (a supersede, refute, split, conflict, history attach or retire)
         that consolidation's deterministic validation dropped; ``reason`` names the rule it broke
@@ -572,6 +582,14 @@ class NoOpMetricsCollector(MetricsCollectorBase):
 
     def record_adaptive_historical_cue(self, *, bank_id: str, cue: str):
         """No-op historical-cue recording."""
+        pass
+
+    def record_adaptive_archive_suppressed(self, *, bank_id: str, count: int):
+        """No-op archive-suppression recording."""
+        pass
+
+    def record_adaptive_archive_maintenance(self, *, bank_id: str, archived: int, pruned: int):
+        """No-op archive-maintenance recording."""
         pass
 
     def record_adaptive_lifecycle_dropped(self, *, reason: str, bank_id: str):
@@ -874,6 +892,21 @@ class MetricsCollector(MetricsCollectorBase):
         self.adaptive_historical_cue_fired = self.meter.create_counter(
             name="hindsight.adaptive_memory.historical_cue_fired",
             description="External recalls the historical-cue detector turned historical, by cue",
+            unit="1",
+        )
+        self.adaptive_archive_suppressed = self.meter.create_counter(
+            name="hindsight.adaptive_memory.archive_suppressed",
+            description="Archived memories recall dropped after scoring (normalized reranker score below the cue bar)",
+            unit="1",
+        )
+        self.adaptive_archived = self.meter.create_counter(
+            name="hindsight.adaptive_memory.archived",
+            description="Memories the adaptive-memory maintenance job archived",
+            unit="1",
+        )
+        self.adaptive_pruned = self.meter.create_counter(
+            name="hindsight.adaptive_memory.pruned",
+            description="Archived memories the adaptive-memory maintenance job deleted (prune)",
             unit="1",
         )
         self.adaptive_lifecycle_dropped = self.meter.create_counter(
@@ -1297,6 +1330,25 @@ class MetricsCollector(MetricsCollectorBase):
         if self._include_bank_id:
             attrs["bank_id"] = bank_id
         self.adaptive_historical_cue_fired.add(1, attrs)
+
+    def record_adaptive_archive_suppressed(self, *, bank_id: str, count: int):
+        """Record archive suppression in one recall; see the base class."""
+        if count <= 0:
+            return
+        attrs: dict[str, str] = {**self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.adaptive_archive_suppressed.add(count, attrs)
+
+    def record_adaptive_archive_maintenance(self, *, bank_id: str, archived: int, pruned: int):
+        """Record one maintenance run; see the base class."""
+        attrs: dict[str, str] = {**self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        if archived > 0:
+            self.adaptive_archived.add(archived, attrs)
+        if pruned > 0:
+            self.adaptive_pruned.add(pruned, attrs)
 
     def record_adaptive_lifecycle_dropped(self, *, reason: str, bank_id: str):
         """Record a dropped lifecycle label; see the base class."""

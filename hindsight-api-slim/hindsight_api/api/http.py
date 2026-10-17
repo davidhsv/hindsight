@@ -3084,6 +3084,17 @@ class UpdateMemoryLifecycleRequest(BaseModel):
         max_length=500,
         description="Why the truth status changed; recorded on the claim and its lifecycle relation.",
     )
+    hold: bool | None = Field(
+        default=None,
+        description="Place the memory on hold ('rank' or 'lifecycle' mode): it is never archived or pruned "
+        "and always ranks as fully retrievable. Stored as forgetting_exempt with exemption_reason 'hold'. "
+        "False lifts the exemption. Cannot be combined with forgetting_exempt or exemption_reason.",
+    )
+    retention_state: Literal["active"] | None = Field(
+        default=None,
+        description="'active' returns an archived memory to normal recall ('rank' or 'lifecycle' mode). "
+        "A memory that is not archived is left as it is.",
+    )
 
     @model_validator(mode="after")
     def _require_a_change(self) -> "UpdateMemoryLifecycleRequest":
@@ -3092,8 +3103,12 @@ class UpdateMemoryLifecycleRequest(BaseModel):
             and self.forgetting_exempt is None
             and self.exemption_reason is None
             and self.truth_status is None
+            and self.hold is None
+            and self.retention_state is None
         ):
             raise ValueError("Provide at least one field to update.")
+        if self.hold is not None and (self.forgetting_exempt is not None or self.exemption_reason is not None):
+            raise ValueError("hold cannot be combined with forgetting_exempt or exemption_reason.")
         if self.exemption_reason is not None and self.forgetting_exempt is False:
             raise ValueError("exemption_reason cannot be set while turning forgetting_exempt off.")
         if self.superseded_by is not None and self.truth_status not in ("superseded", "refuted"):
@@ -6596,6 +6611,8 @@ def _register_routes(app: FastAPI):
                 truth_status=request.truth_status,
                 superseded_by=request.superseded_by,
                 reason=request.reason,
+                hold=request.hold,
+                retention_state=request.retention_state,
                 request_context=request_context,
             )
             if view is None:

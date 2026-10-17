@@ -210,6 +210,14 @@ class AdaptiveTraceInfo(BaseModel):
         exclude_if=lambda v: v is None,
         description="Exception type when the adaptive state could not be loaded (the recall then used factor 1)",
     )
+    archive_suppressed: list[str] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description=(
+            "Rank/lifecycle mode with archiving on: archived memories dropped after scoring because their "
+            "normalized reranker score was below adaptive_memory_archive_recall_min_score"
+        ),
+    )
 
 
 class SearchSummary(BaseModel):

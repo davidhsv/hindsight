@@ -57,7 +57,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..adaptive.claims import CarryForwardResult, ReingestStash
     from ..adaptive.models import (
         AdaptiveState,
+        ArchiveResult,
         ClaimState,
+        Grounding,
+        PruneCursor,
+        PrunePage,
         ReinforcementEvent,
         ReinforcementResult,
         RetentionPolicy,
@@ -2059,6 +2063,86 @@ class MemoriesExtension(Extension, ABC):
         events and the shadow record. ``stored`` says whether anything is stored at all. Default None.
         """
         return None
+
+    async def grounding_status(self, conn, *, bank_id: str, ids: Sequence[str]) -> dict[str, Grounding]:
+        """What each of ``ids`` is now, for a mental model's grounding check: absent, live or retired.
+
+        Every requested id is a key (unparseable ones read as absent). ``retired`` (with the claim's
+        status and successor) is a live memory whose claim is ``superseded`` or ``refuted``; an
+        ``uncertain`` claim is live. Default: :meth:`live_memory_ids` — a store without claims
+        reports no memory as retired.
+        """
+        from ..adaptive.models import GROUNDING_ABSENT, GROUNDING_LIVE
+        from ..schema import fq_table
+
+        wanted = list(dict.fromkeys(str(i) for i in ids))
+        live = await self.live_memory_ids(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=wanted)
+        return {i: GROUNDING_LIVE if i in live else GROUNDING_ABSENT for i in wanted}
+
+    async def archive_sweep(
+        self, conn, *, bank_id: str, now: datetime, settings: AdaptiveSettings, batch: int = 500
+    ) -> ArchiveResult:
+        """One archive pass over the bank's materialized retention rows (adaptive memory R25).
+
+        Tracks ``below_threshold_since`` (set when retrievability falls below
+        ``settings.archive_threshold``, cleared when it is back at or above it) and archives a row
+        that has stayed below for ``settings.archive_grace_days``, unless its importance is at least
+        ``settings.archive_protect_importance``, it is exempt (a hold is an exemption), or it is
+        evidence of a claim that is not active. Reads ``batch`` rows per page, each page in its own
+        transaction on ``conn``; rows another transaction holds are skipped until the next sweep.
+        Only rows that exist are swept: a memory still on its lazy defaults has no row and is never
+        archived. Default: nothing to sweep.
+        """
+        from ..adaptive.models import ArchiveResult
+
+        return ArchiveResult()
+
+    async def prune_candidates(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        now: datetime,
+        settings: AdaptiveSettings,
+        limit: int = 500,
+        after: PruneCursor | None = None,
+    ) -> PrunePage:
+        """One page of archived memories old enough to delete (archived at least
+        ``settings.prune_after_days`` ago), oldest archive first.
+
+        Never named: an exempt row (holds included), a memory that is evidence of any claim, and a raw
+        fact that is a source of an observation whose claim is still current (active, uncertain, or
+        no claim row) — deleting it would sweep that observation away. A page reads at most ``limit``
+        archived rows after the cursor ``after`` and names the deletable ones among them, which may be
+        none; ``next_after`` continues the scan and is None on the last page, so protected rows never
+        stop it. The caller deletes them through ``MemoryEngine.delete_memory_units``, re-checking
+        with :meth:`lock_prunable` inside that transaction. Default: the empty, final page.
+        """
+        from ..adaptive.models import PrunePage
+
+        return PrunePage()
+
+    async def lock_prunable(
+        self, conn, *, bank_id: str, memory_ids: Sequence[str], now: datetime, settings: AdaptiveSettings
+    ) -> list[str]:
+        """The ``memory_ids`` that are still prunable, row-locked in the caller's transaction.
+
+        The same rules as :meth:`prune_candidates`, read again under the retention rows' locks, so a
+        memory that got a hold, was unarchived or became claim evidence since the page was read is
+        not deleted. A row another transaction holds is left out (and pruned on a later run).
+        Default: none.
+        """
+        return []
+
+    async def banks_with_retention_state(self, conn) -> list[str]:
+        """The banks of the current schema that hold any retention row, for the maintenance loop's
+        archive discovery. Default: none."""
+        return []
+
+    async def unarchive_memories(self, conn, *, bank_id: str, memory_ids: Sequence[str], now: datetime) -> list[str]:
+        """Return archived memories to ``retention_state='active'`` (clearing ``archived_at`` and
+        ``below_threshold_since``); the ids that were archived. Default: none."""
+        return []
 
     # ------------------------------------------------------------------ claim lifecycle
     #

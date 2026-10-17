@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from ..causal_links import CausalLinkDescriptor
 from .base import DatabaseConnection
 from .result import ResultRow
 
@@ -153,7 +154,7 @@ def key_serialization_sql(table: str, alias: str) -> str:
     """
 
 
-_BANK_SERIALIZED_OPERATION_TYPES = ("graph_maintenance", "consolidation")
+_BANK_SERIALIZED_OPERATION_TYPES = ("graph_maintenance", "consolidation", "adaptive_memory_maintenance")
 
 
 def bank_serialization_sql(table: str, alias: str, operation_type: str | None = None) -> str:
@@ -171,6 +172,9 @@ def bank_serialization_sql(table: str, alias: str, operation_type: str | None = 
     * ``consolidation`` (#3700). Two runs claimed together read the same
       ``total_unconsolidated`` backlog and hand the same memories to the LLM
       twice — pure duplicated inference on the slowest path in the system.
+    * ``adaptive_memory_maintenance``. One run sweeps the bank's whole
+      retention table (archive, then prune); a concurrent one would sweep the
+      same rows and race it to delete the same archived memories.
 
     Ordering, not just exclusion, is the point, and both halves of the predicate
     are needed:
@@ -1293,6 +1297,82 @@ class DataAccessOps(ABC):
     ) -> bool:
         """Write the memory's observe-mode would-retire record (the latest decision replaces an older
         one). The parent is locked ``SKIP LOCKED``; False when it is not live (or being deleted)."""
+        ...
+
+    # -- Curation archive and observation folds ----------------------------
+
+    @abstractmethod
+    async def table_columns(self, conn: DatabaseConnection, table: str) -> list[str]:
+        """``table``'s columns in ordinal order, each quoted the way this dialect's SQL must name it.
+
+        The curation archive round trip copies ``memory_units`` rows column by column, so the list
+        comes from the catalog rather than code. PG reads ``pg_attribute`` (``table`` is the
+        schema-qualified name, resolved through ``regclass``). Oracle reads ``all_tab_columns`` in the
+        session's ``CURRENT_SCHEMA`` (``table`` is the bare name there) and quotes the upper-case
+        names, because Oracle folds unquoted DDL identifiers to upper case.
+        """
+        ...
+
+    @abstractmethod
+    def search_vector_expr(self, config, *, text_col: str = "text", context_col: str = "context") -> str | None:
+        """The SQL that rebuilds ``memory_units.search_vector`` from ``text_col`` / ``context_col``, or
+        None when nothing has to write it.
+
+        PG: :func:`~.ops_postgresql.pg_search_vector_expr` for the configured text-search backend.
+        Oracle: always None. Its ``CTXSYS.CONTEXT`` index on ``memory_units(text)`` syncs on commit
+        and the retain path never writes ``search_vector``, so a restored or edited row needs nothing.
+        """
+        ...
+
+    @abstractmethod
+    async def fetch_causal_link_descriptors(
+        self,
+        conn: DatabaseConnection,
+        *,
+        links_table: str,
+        archive_table: str,
+        bank_id: str,
+        unit_id: str,
+        link_types: Sequence[str],
+    ) -> list[CausalLinkDescriptor]:
+        """Every causal edge of ``unit_id``, deduplicated: the live
+        ``memory_links`` rows plus the descriptors parked in ``invalidated_memory_units.causal_links``
+        of archived peers that name it (an edge whose other endpoint was invalidated first survives
+        only there). Entries with a missing endpoint or a type outside ``link_types`` are skipped.
+
+        PG: one ``UNION`` with ``jsonb_to_recordset``. Oracle: the live edges, then ``JSON_TABLE`` over
+        the archive (endpoints compared as ``RAW``), merged in Python.
+        """
+        ...
+
+    @abstractmethod
+    async def fold_sources_into_observation(
+        self,
+        conn: DatabaseConnection,
+        *,
+        units_table: str,
+        sources_table: str,
+        observation_id: uuid.UUID,
+        expected_text: str,
+        merged_text: str,
+        source_memory_ids: Sequence[uuid.UUID],
+        event_date: datetime | None,
+        occurred_start: datetime | None,
+        occurred_end: datetime | None,
+        mentioned_at: datetime | None,
+        search_vector_clause: str,
+    ) -> bool:
+        """Fold ``source_memory_ids`` and ``merged_text`` into an observation, gated on its text still
+        being ``expected_text``; True when folded. The source list becomes the distinct union of the
+        stored one and the new ids, ``proof_count`` its length, and the dates widen (earliest
+        ``event_date`` / ``occurred_start``, latest ``occurred_end`` / ``mentioned_at``, a NULL on
+        either side ignored). The stored embedding is kept.
+
+        PG: one ``UPDATE ... RETURNING`` over the ``uuid[]`` column (``search_vector_clause`` is
+        appended to its SET list). Oracle: the row is locked and its text compared in Python (a CLOB
+        cannot be compared with ``=``), the JSON source list rewritten, and the new ids posted to the
+        ``observation_sources`` junction; ``search_vector_clause`` is empty there.
+        """
         ...
 
     # -- Shared helpers (concrete) -----------------------------------------

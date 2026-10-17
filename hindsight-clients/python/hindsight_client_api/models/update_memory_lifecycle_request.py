@@ -33,7 +33,9 @@ class UpdateMemoryLifecycleRequest(BaseModel):
     truth_status: Optional[StrictStr] = None
     superseded_by: Optional[StrictStr] = None
     reason: Optional[Annotated[str, Field(min_length=1, strict=True, max_length=500)]] = None
-    __properties: ClassVar[List[str]] = ["importance", "forgetting_exempt", "exemption_reason", "truth_status", "superseded_by", "reason"]
+    hold: Optional[StrictBool] = None
+    retention_state: Optional[StrictStr] = None
+    __properties: ClassVar[List[str]] = ["importance", "forgetting_exempt", "exemption_reason", "truth_status", "superseded_by", "reason", "hold", "retention_state"]
 
     @field_validator('truth_status')
     def truth_status_validate_enum(cls, value):
@@ -43,6 +45,16 @@ class UpdateMemoryLifecycleRequest(BaseModel):
 
         if value not in set(['active', 'uncertain', 'superseded', 'refuted']):
             raise ValueError("must be one of enum values ('active', 'uncertain', 'superseded', 'refuted')")
+        return value
+
+    @field_validator('retention_state')
+    def retention_state_validate_enum(cls, value):
+        """Validates the enum"""
+        if value is None:
+            return value
+
+        if value not in set(['active']):
+            raise ValueError("must be one of enum values ('active')")
         return value
 
     model_config = ConfigDict(
@@ -114,6 +126,16 @@ class UpdateMemoryLifecycleRequest(BaseModel):
         if self.reason is None and "reason" in self.model_fields_set:
             _dict['reason'] = None
 
+        # set to None if hold (nullable) is None
+        # and model_fields_set contains the field
+        if self.hold is None and "hold" in self.model_fields_set:
+            _dict['hold'] = None
+
+        # set to None if retention_state (nullable) is None
+        # and model_fields_set contains the field
+        if self.retention_state is None and "retention_state" in self.model_fields_set:
+            _dict['retention_state'] = None
+
         return _dict
 
     @classmethod
@@ -131,7 +153,9 @@ class UpdateMemoryLifecycleRequest(BaseModel):
             "exemption_reason": obj.get("exemption_reason"),
             "truth_status": obj.get("truth_status"),
             "superseded_by": obj.get("superseded_by"),
-            "reason": obj.get("reason")
+            "reason": obj.get("reason"),
+            "hold": obj.get("hold"),
+            "retention_state": obj.get("retention_state")
         })
         return _obj
 

@@ -1014,6 +1014,7 @@ WORKER_SLOT_TYPE_DEFAULTS: dict[str, int] = {
     "import_bank": 0,
     "export_bank": 0,
     "clone_bank": 0,
+    "adaptive_memory_maintenance": 0,
 }
 
 
@@ -1146,6 +1147,7 @@ ENV_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE = "HINDSIGHT_API_ADAPTIVE_MEMORY_AR
 ENV_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE = "HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE"
 ENV_ADAPTIVE_MEMORY_PRUNE_ENABLED = "HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_ENABLED"
 ENV_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS = "HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS"
+ENV_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS = "HINDSIGHT_API_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS"
 ENV_ADAPTIVE_MEMORY_SCOPE_KEYS = "HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS"
 
 # Audit log settings
@@ -1501,6 +1503,10 @@ DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE = 0.8
 DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE = 0.8
 DEFAULT_ADAPTIVE_MEMORY_PRUNE_ENABLED = False
 DEFAULT_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS = 180.0
+# How often the background maintenance loop (PostgreSQL) submits the per-bank archive/prune job for
+# banks with retention state, while archiving is on. 0 disables that discovery; the job still runs
+# after every consolidation.
+DEFAULT_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS = 3600
 # Metadata keys whose values scope a claim (its scope fingerprint): two claims whose cited facts
 # carry different values for one of these keys are about different scopes, so neither may retire
 # the other in lifecycle consolidation.
@@ -3666,6 +3672,7 @@ class HindsightConfig:
     adaptive_memory_archive_protect_importance: float
     adaptive_memory_prune_enabled: bool
     adaptive_memory_prune_after_days: float
+    adaptive_memory_maintenance_interval_seconds: int
     adaptive_memory_scope_keys: list[str]
     reranker_cohere_api_key: str | None
     reranker_cohere_model: str
@@ -5350,6 +5357,11 @@ class HindsightConfig:
                 ENV_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS,
                 os.getenv(ENV_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS),
                 DEFAULT_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS,
+            ),
+            adaptive_memory_maintenance_interval_seconds=_parse_non_negative_int(
+                ENV_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS,
+                os.getenv(ENV_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS),
+                DEFAULT_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS,
             ),
             # An unset or empty value means the default keys.
             adaptive_memory_scope_keys=_parse_str_list(os.getenv(ENV_ADAPTIVE_MEMORY_SCOPE_KEYS) or "")

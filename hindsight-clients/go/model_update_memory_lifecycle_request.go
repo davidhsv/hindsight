@@ -25,6 +25,8 @@ type UpdateMemoryLifecycleRequest struct {
 	TruthStatus NullableString `json:"truth_status,omitempty"`
 	SupersededBy NullableString `json:"superseded_by,omitempty"`
 	Reason NullableString `json:"reason,omitempty"`
+	Hold NullableBool `json:"hold,omitempty"`
+	RetentionState NullableString `json:"retention_state,omitempty"`
 }
 
 // NewUpdateMemoryLifecycleRequest instantiates a new UpdateMemoryLifecycleRequest object
@@ -296,6 +298,90 @@ func (o *UpdateMemoryLifecycleRequest) UnsetReason() {
 	o.Reason.Unset()
 }
 
+// GetHold returns the Hold field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *UpdateMemoryLifecycleRequest) GetHold() bool {
+	if o == nil || IsNil(o.Hold.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.Hold.Get()
+}
+
+// GetHoldOk returns a tuple with the Hold field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *UpdateMemoryLifecycleRequest) GetHoldOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Hold.Get(), o.Hold.IsSet()
+}
+
+// HasHold returns a boolean if a field has been set.
+func (o *UpdateMemoryLifecycleRequest) HasHold() bool {
+	if o != nil && o.Hold.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetHold gets a reference to the given NullableBool and assigns it to the Hold field.
+func (o *UpdateMemoryLifecycleRequest) SetHold(v bool) {
+	o.Hold.Set(&v)
+}
+// SetHoldNil sets the value for Hold to be an explicit nil
+func (o *UpdateMemoryLifecycleRequest) SetHoldNil() {
+	o.Hold.Set(nil)
+}
+
+// UnsetHold ensures that no value is present for Hold, not even an explicit nil
+func (o *UpdateMemoryLifecycleRequest) UnsetHold() {
+	o.Hold.Unset()
+}
+
+// GetRetentionState returns the RetentionState field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *UpdateMemoryLifecycleRequest) GetRetentionState() string {
+	if o == nil || IsNil(o.RetentionState.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.RetentionState.Get()
+}
+
+// GetRetentionStateOk returns a tuple with the RetentionState field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *UpdateMemoryLifecycleRequest) GetRetentionStateOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.RetentionState.Get(), o.RetentionState.IsSet()
+}
+
+// HasRetentionState returns a boolean if a field has been set.
+func (o *UpdateMemoryLifecycleRequest) HasRetentionState() bool {
+	if o != nil && o.RetentionState.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRetentionState gets a reference to the given NullableString and assigns it to the RetentionState field.
+func (o *UpdateMemoryLifecycleRequest) SetRetentionState(v string) {
+	o.RetentionState.Set(&v)
+}
+// SetRetentionStateNil sets the value for RetentionState to be an explicit nil
+func (o *UpdateMemoryLifecycleRequest) SetRetentionStateNil() {
+	o.RetentionState.Set(nil)
+}
+
+// UnsetRetentionState ensures that no value is present for RetentionState, not even an explicit nil
+func (o *UpdateMemoryLifecycleRequest) UnsetRetentionState() {
+	o.RetentionState.Unset()
+}
+
 func (o UpdateMemoryLifecycleRequest) MarshalJSON() ([]byte, error) {
 	toSerialize,err := o.ToMap()
 	if err != nil {
@@ -323,6 +409,12 @@ func (o UpdateMemoryLifecycleRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.Reason.IsSet() {
 		toSerialize["reason"] = o.Reason.Get()
+	}
+	if o.Hold.IsSet() {
+		toSerialize["hold"] = o.Hold.Get()
+	}
+	if o.RetentionState.IsSet() {
+		toSerialize["retention_state"] = o.RetentionState.Get()
 	}
 	return toSerialize, nil
 }

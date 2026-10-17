@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 
+from ..causal_links import DEFAULT_CAUSAL_LINK_WEIGHT, CausalLinkDescriptor
 from .base import DatabaseConnection
 from .ops import (
     RETENTION_STATE_COLUMNS,
@@ -2379,3 +2380,105 @@ class PostgreSQLOps(DataAccessOps):
             now,
         )
         return written is not None
+
+    # -- Curation archive and observation folds ----------------------------
+
+    async def table_columns(self, conn: DatabaseConnection, table: str) -> list[str]:
+        rows = await conn.fetch(
+            f"SELECT a.attname FROM pg_attribute a "
+            f"WHERE a.attrelid = '{table}'::regclass "
+            f"AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum"
+        )
+        return [f'"{r["attname"]}"' for r in rows]
+
+    def search_vector_expr(self, config, *, text_col: str = "text", context_col: str = "context") -> str | None:
+        return pg_search_vector_expr(config, text_col=text_col, context_col=context_col)
+
+    async def fetch_causal_link_descriptors(
+        self,
+        conn: DatabaseConnection,
+        *,
+        links_table: str,
+        archive_table: str,
+        bank_id: str,
+        unit_id: str,
+        link_types: Sequence[str],
+    ) -> list[CausalLinkDescriptor]:
+        rows = await conn.fetch(
+            f"""
+            SELECT from_unit_id, to_unit_id, link_type, weight
+            FROM {links_table}
+            WHERE (from_unit_id = $1 OR to_unit_id = $1)
+              AND bank_id = $2
+              AND link_type = ANY($3::text[])
+            UNION
+            SELECT d.from_unit_id, d.to_unit_id, d.link_type, d.weight
+            FROM {archive_table} a
+            CROSS JOIN LATERAL jsonb_to_recordset(a.causal_links)
+                AS d(from_unit_id uuid, to_unit_id uuid, link_type text, weight float8)
+            WHERE a.bank_id = $2
+              AND a.causal_links <> '[]'::jsonb
+              AND (d.from_unit_id = $1 OR d.to_unit_id = $1)
+              -- Same guard as CausalLinkDescriptor.from_json_dict: the column is
+              -- schemaless JSON, and a malformed entry would otherwise be copied
+              -- forward as a NULL-endpoint descriptor.
+              AND d.from_unit_id IS NOT NULL
+              AND d.to_unit_id IS NOT NULL
+              AND d.link_type = ANY($3::text[])
+            """,
+            unit_id,
+            bank_id,
+            list(link_types),
+        )
+        return [
+            CausalLinkDescriptor(
+                from_unit_id=str(r["from_unit_id"]),
+                to_unit_id=str(r["to_unit_id"]),
+                link_type=r["link_type"],
+                weight=float(r["weight"]) if r["weight"] is not None else DEFAULT_CAUSAL_LINK_WEIGHT,
+            )
+            for r in rows
+        ]
+
+    async def fold_sources_into_observation(
+        self,
+        conn: DatabaseConnection,
+        *,
+        units_table: str,
+        sources_table: str,
+        observation_id: uuid.UUID,
+        expected_text: str,
+        merged_text: str,
+        source_memory_ids: Sequence[uuid.UUID],
+        event_date: datetime | None,
+        occurred_start: datetime | None,
+        occurred_end: datetime | None,
+        mentioned_at: datetime | None,
+        search_vector_clause: str,
+    ) -> bool:
+        # RETURNING-gate on the probe-time text so a concurrent rewrite of the survivor during the
+        # connection-free LLM window can't be clobbered. PG has no junction table to keep.
+        folded = await conn.fetchval(
+            f"""
+                UPDATE {units_table}
+                SET text = $1,
+                    source_memory_ids = (SELECT array_agg(DISTINCT e) FROM unnest(source_memory_ids || $2::uuid[]) e),
+                    proof_count = (SELECT count(DISTINCT e) FROM unnest(source_memory_ids || $2::uuid[]) e),
+                    event_date = LEAST(event_date, COALESCE($5, event_date)),
+                    occurred_start = LEAST(occurred_start, COALESCE($6, occurred_start)),
+                    occurred_end = GREATEST(occurred_end, COALESCE($7, occurred_end)),
+                    mentioned_at = GREATEST(mentioned_at, COALESCE($8, mentioned_at)),
+                    updated_at = now(){search_vector_clause}
+                WHERE id = $3::uuid AND text = $4
+                RETURNING id
+                """,
+            merged_text,
+            list(source_memory_ids),
+            observation_id,
+            expected_text,
+            event_date,
+            occurred_start,
+            occurred_end,
+            mentioned_at,
+        )
+        return folded is not None

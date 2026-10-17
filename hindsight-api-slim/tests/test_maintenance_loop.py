@@ -36,6 +36,8 @@ def _tick_cfg(**overrides):
         "operation_cleanup_interval_seconds": 900,
         "operation_cleanup_batch_size": 1000,
         "maintenance_start_jitter_seconds": 0,
+        "adaptive_memory_maintenance_interval_seconds": 0,
+        "adaptive_memory_archive_enabled": False,
     }
     fields.update(overrides)
     return SimpleNamespace(**fields)
@@ -516,3 +518,83 @@ async def test_reconcile_finds_a_store_owned_banks_backlog(memory: MemoryEngine,
         set_memories(None)
 
     assert bank in submitted
+
+
+class TestAdaptiveMemoryMaintenanceJob:
+    @pytest.mark.asyncio
+    async def test_tick_runs_the_job_only_with_archiving_on_and_an_interval(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        import hindsight_api.engine.maintenance as maintenance_mod
+
+        cfg = _tick_cfg(adaptive_memory_maintenance_interval_seconds=3600)
+        monkeypatch.setattr(maintenance_mod, "get_config", lambda: cfg)
+        loop = MaintenanceLoop(engine=None)
+        loop._run_adaptive_memory_maintenance = AsyncMock()
+
+        await loop._tick()
+        loop._run_adaptive_memory_maintenance.assert_not_awaited()  # archiving off (the default)
+
+        cfg.adaptive_memory_archive_enabled = True
+        cfg.adaptive_memory_maintenance_interval_seconds = 0
+        await loop._tick()
+        loop._run_adaptive_memory_maintenance.assert_not_awaited()  # interval 0 disables it
+
+        cfg.adaptive_memory_maintenance_interval_seconds = 3600
+        await loop._tick()
+        loop._run_adaptive_memory_maintenance.assert_awaited_once()
+
+    def test_the_job_alone_starts_the_loop(self, monkeypatch):
+        import hindsight_api.engine.maintenance as maintenance_mod
+
+        cfg = _tick_cfg(
+            retention_sweep_interval_seconds=0,
+            operation_cleanup_interval_seconds=0,
+            adaptive_memory_maintenance_interval_seconds=3600,
+            adaptive_memory_archive_enabled=True,
+        )
+        monkeypatch.setattr(maintenance_mod, "get_config", lambda: cfg)
+        assert MaintenanceLoop._any_job_enabled()
+        cfg.adaptive_memory_archive_enabled = False
+        assert not MaintenanceLoop._any_job_enabled()
+
+    @pytest.mark.asyncio
+    async def test_discovery_submits_every_bank_with_retention_state_in_each_served_schema(self, monkeypatch):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        import hindsight_api.engine.maintenance as maintenance_mod
+        import hindsight_api.engine.memories as memories_mod
+        from hindsight_api.engine.memory_engine import _current_schema
+
+        seen: list[tuple[str, str]] = []
+        store = MagicMock()
+
+        async def banks(conn):
+            return {"public": ["a", "b"], "tenant_x": ["c"]}[_current_schema.get()]
+
+        store.banks_with_retention_state = banks
+        monkeypatch.setattr(memories_mod, "get_memories", lambda: store)
+
+        class _Acquire:
+            async def __aenter__(self):
+                return MagicMock()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(maintenance_mod, "acquire_with_retry", lambda *a, **k: _Acquire())
+        monkeypatch.setattr(maintenance_mod, "get_config", lambda: SimpleNamespace(database_schema="public"))
+
+        async def submit(*, bank_id, request_context):
+            seen.append((_current_schema.get(), bank_id))
+            return {"operation_id": f"op-{bank_id}"}
+
+        engine = MagicMock()
+        engine._tenant_extension.list_tenants = AsyncMock(
+            return_value=[SimpleNamespace(schema="tenant_x", tenant_id="tx")]
+        )
+        engine.submit_async_adaptive_memory_maintenance = submit
+        await MaintenanceLoop(engine)._run_adaptive_memory_maintenance()
+
+        assert seen == [("public", "a"), ("public", "b"), ("tenant_x", "c")]

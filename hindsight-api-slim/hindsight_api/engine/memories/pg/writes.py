@@ -394,20 +394,18 @@ async def _memory_unit_columns(conn, fq_table: Callable[[str], str]) -> str:
 
     Read from the catalog rather than hardcoded so a schema migration cannot make
     the archive round-trip drift from the live table (the archive is created via
-    ``LIKE memory_units``, so the lists line up).
+    ``LIKE memory_units``, so the lists line up). The catalog is per dialect
+    (``DataAccessOps.table_columns``); Oracle's names come back quoted upper case.
     """
-    rows = await conn.fetch(
-        f"SELECT a.attname FROM pg_attribute a "
-        f"WHERE a.attrelid = '{fq_table('memory_units')}'::regclass "
-        f"AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum"
-    )
-    return ", ".join(f'"{r["attname"]}"' for r in rows)
+    from .graph import _ops_for
+
+    return ", ".join(await _ops_for(conn).table_columns(conn, fq_table("memory_units")))
 
 
 async def _archive_columns(conn, fq_table: Callable[[str], str]) -> str:
     """`_memory_unit_columns` minus the two the archive does not carry."""
     collist = await _memory_unit_columns(conn, fq_table)
-    return ", ".join(c for c in (s.strip() for s in collist.split(",")) if c not in _ARCHIVE_OMITTED)
+    return ", ".join(c for c in (s.strip() for s in collist.split(",")) if c.lower() not in _ARCHIVE_OMITTED)
 
 
 _ARCHIVE_SELECT = (
@@ -415,6 +413,14 @@ _ARCHIVE_SELECT = (
     "document_id, chunk_id, tags, metadata, proof_count, event_date, created_at, "
     "consolidated_at, entity_ids"
 )
+
+
+def _archived_entity_ids(row: Any) -> list[str]:
+    """The archive row's entity-id snapshot: a ``uuid[]`` on PG, JSON text in a CLOB on Oracle."""
+    value = row["entity_ids"]
+    if isinstance(value, str):
+        value = json.loads(value)
+    return [str(e) for e in (value or [])]
 
 
 def _archived_stored(row: Any) -> StoredMemory:
@@ -435,7 +441,7 @@ def _archived_stored(row: Any) -> StoredMemory:
         mentioned_at=row["mentioned_at"],
         created_at=row["created_at"],
         consolidated_at=row["consolidated_at"],
-        entity_ids=[str(e) for e in (row["entity_ids"] or [])],
+        entity_ids=_archived_entity_ids(row),
     )
 
 
@@ -465,17 +471,17 @@ async def invalidate_memory(*, conn, fq_table, bank_id: str, unit_id: str, reaso
     from .links import snapshot_causal_links
 
     causal_links = await snapshot_causal_links(conn, bank_id, str(unit_id))
-    inserted = await conn.fetchval(
+    # The status line's row count, not RETURNING: Oracle has no RETURNING for INSERT ... SELECT.
+    status = await conn.execute(
         f"INSERT INTO {arch} ({arch_cols}, invalidation_reason, invalidated_at, entity_ids, causal_links) "
-        f"SELECT {arch_cols}, $2, now(), $3::uuid[], $5::jsonb FROM {mu} WHERE id = $1 AND bank_id = $4 "
-        f"RETURNING id",
+        f"SELECT {arch_cols}, $2, now(), $3::uuid[], $5::jsonb FROM {mu} WHERE id = $1 AND bank_id = $4",
         str(unit_id),
         reason,
         entity_ids,
         bank_id,
         json.dumps([descriptor.as_json_dict() for descriptor in causal_links]),
     )
-    if inserted is None:
+    if str(status).split()[-1] == "0":
         return False
     # Links in lock order (see delete_unit_links) — after the causal snapshot above reads them.
     from .graph import _ops_for
@@ -524,10 +530,11 @@ async def restore_memory(*, conn, fq_table, bank_id: str, unit_id: str) -> Store
     )
     # Rebuild search_vector with the *current* backend, so a backend change while
     # the fact sat archived cannot leave a stale/wrong-type vector (#2503). None
-    # means the backend indexes base columns directly and leaves it empty.
-    from ...db.ops_postgresql import pg_search_vector_expr
+    # means the backend indexes base columns directly and leaves it empty (every
+    # PG extension but native/vchord, and Oracle, whose text index syncs on commit).
+    from .graph import _ops_for
 
-    sv_expr = pg_search_vector_expr(get_config())
+    sv_expr = _ops_for(conn).search_vector_expr(get_config())
     if sv_expr is not None:
         await conn.execute(
             f"UPDATE {mu} SET search_vector = {sv_expr} WHERE id = $1 AND bank_id = $2", str(unit_id), bank_id
@@ -542,21 +549,20 @@ async def restore_memory(*, conn, fq_table, bank_id: str, unit_id: str) -> Store
     await requeue_units(
         conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[unit_id], reason="restore", clear_failed=True
     )
-    from .graph import _ops_for
-
     # Restore the entity postings for entities that still exist — some may have
     # been swept as orphans while the memory was archived — and give each one
     # back the mention invalidation took from it (#4291). One call: the credit
     # has to follow the postings actually written, so the two cannot be decided
     # separately.
-    if arch_row["entity_ids"]:
+    archived_entity_ids = _archived_entity_ids(arch_row)
+    if archived_entity_ids:
         await _ops_for(conn).restore_entity_postings(
             conn,
             ue,
             ent,
             bank_id,
             str(unit_id),
-            arch_row["entity_ids"],
+            [uuid.UUID(e) for e in archived_entity_ids],
         )
     # Rematerialize the causal edges parked at invalidation (#2864). Edges whose peer is still
     # archived or permanently deleted are skipped — the peer keeps its own copy and recreates the
@@ -618,7 +624,7 @@ async def apply_edit(
     # mention time. Both are on the signature for a store that carries entities on
     # the memory and rebuilds it wholesale.
     from ...causal_links import CAUSAL_LINK_TYPES
-    from ...db.ops_postgresql import pg_search_vector_expr
+    from .graph import _ops_for
 
     mu = fq_table("memory_units")
     ml = fq_table("memory_links")
@@ -629,7 +635,7 @@ async def apply_edit(
     # Reference the bind parameters, not the columns: PostgreSQL evaluates the
     # UPDATE's RHS before the sibling SET assignments land, so a column reference
     # would see the pre-edit values.
-    sv_expr = pg_search_vector_expr(get_config(), text_col="$3", context_col="$4")
+    sv_expr = _ops_for(conn).search_vector_expr(get_config(), text_col="$3", context_col="$4")
     sv_clause = f", search_vector = {sv_expr}" if sv_expr else ""
     # The re-embedded vector rides the edit's own UPDATE. It describes the text being written by
     # this statement, so writing it here is what keeps the two from ever disagreeing — and it
@@ -656,8 +662,6 @@ async def apply_edit(
     # Drop only the DERIVED links — graph maintenance recomputes temporal/semantic. Causal edges
     # are retain-time extraction output that nothing recreates, so an edit preserves them (#2864).
     # In lock order, like every other link delete (see delete_unit_links).
-    from .graph import _ops_for
-
     await _ops_for(conn).delete_unit_links(conn, ml, bank_id, [str(unit_id)], keep_link_types=list(CAUSAL_LINK_TYPES))
 
 

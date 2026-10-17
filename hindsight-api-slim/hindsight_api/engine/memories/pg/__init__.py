@@ -26,6 +26,7 @@ behind one object:
 * :mod:`adaptive_claims` — claim lifecycle: claim locks and CAS, evidence, relations, inheritance, the
   requeue choke point, delete repair, re-ingest carry-forward
 * :mod:`adaptive_transfer` — adaptive state across a bank or document transfer
+* :mod:`adaptive_maintenance` — mental-model grounding checks, the archive sweep, prune candidates
 
 Every function here takes the live connection and Hindsight's ``fq_table``
 resolver rather than reaching for globals, so each is callable from a
@@ -39,6 +40,7 @@ __all__ = [
     "adaptive",
     "adaptive_archive",
     "adaptive_claims",
+    "adaptive_maintenance",
     "adaptive_transfer",
     "admin",
     "banks",

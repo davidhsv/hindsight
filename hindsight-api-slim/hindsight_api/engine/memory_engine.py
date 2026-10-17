@@ -651,7 +651,7 @@ from enum import Enum
 from ..pg0 import EmbeddedPostgres, parse_pg0_url
 from .adaptive import clock as adaptive_clock
 from .adaptive.cues import detect_historical_cue
-from .adaptive.models import TruthStatus
+from .adaptive.models import HOLD_EXEMPTION_REASON, ArchiveResult, Grounding, PruneCursor, TruthStatus
 from .adaptive.producers import (
     BackgroundReinforcement,
     mode_settings,
@@ -712,6 +712,7 @@ from .reflect.retractions import (
     based_on_fact_ids,
     partition_retracted,
     prune_based_on,
+    retired_since_cited,
 )
 from .reflect.structured_doc import StructuredDocument
 from .reflect.tools import (
@@ -2484,6 +2485,25 @@ class MemoryConfirmation:
     outcome: str
     stability_days: float | None
     reinforcement_count: int | None
+
+
+#: Prune deletes at most this many archived memories per ``delete_memory_units`` call (one
+#: transaction), and keeps calling until a page comes back short.
+_PRUNE_PAGE_SIZE = 500
+
+
+@dataclass(frozen=True)
+class AdaptiveMaintenanceResult:
+    """What one ``adaptive_memory_maintenance`` run did for a bank.
+
+    ``ran`` is False when the bank does not archive (archiving off on the server, or its effective
+    mode is not rank/lifecycle); then nothing was read. ``pruned`` counts the archived memories
+    deleted (prune on).
+    """
+
+    ran: bool
+    archive: ArchiveResult = field(default_factory=ArchiveResult)
+    pruned: int = 0
 
 
 @dataclass
@@ -4501,7 +4521,93 @@ class MemoryEngine(MemoryEngineInterface):
         # observations crossed the threshold here would otherwise wait for an
         # unrelated retain to notice (issue #3485).
         await self._submit_vector_index_maintenance_quietly(bank_id, internal_context, after="consolidation", grew=True)
+        # Consolidation is when retention moves most (observations reinforced, claims retired), so
+        # the bank's archive pass follows it. Best effort: the consolidation already committed.
+        try:
+            await self.submit_async_adaptive_memory_maintenance(bank_id=bank_id, request_context=internal_context)
+        except Exception as e:
+            logger.warning(
+                f"[ADAPTIVE] Failed to submit adaptive memory maintenance after consolidation for {bank_id}: {e}"
+            )
         return result
+
+    async def _handle_adaptive_memory_maintenance(self, task_dict: dict[str, Any]) -> AdaptiveMaintenanceResult:
+        """Handler for adaptive_memory_maintenance tasks: the bank's archive sweep, then prune."""
+        bank_id = task_dict.get("bank_id")
+        if not bank_id:
+            raise ValueError("bank_id is required for adaptive_memory_maintenance task")
+
+        from hindsight_api.models import RequestContext
+
+        internal_context = RequestContext(
+            internal=True,
+            tenant_id=task_dict.get("_tenant_id"),
+            api_key_id=task_dict.get("_api_key_id"),
+            retry_count=task_dict.get("_retry_count", 0),
+        )
+        return await self.run_adaptive_memory_maintenance(bank_id, request_context=internal_context)
+
+    async def run_adaptive_memory_maintenance(
+        self, bank_id: str, *, request_context: "RequestContext"
+    ) -> AdaptiveMaintenanceResult:
+        """Archive the bank's long-unretrievable memories, then (prune on) delete the long-archived ones.
+
+        Runs only while ``adaptive_memory_archive_enabled`` is on and the bank's effective mode is
+        rank or lifecycle. The sweep is the store's (``archive_sweep``: batched, a transaction per
+        page, rows held by a writer skipped). Prune (``adaptive_memory_prune_enabled``) asks the store
+        for the archived memories old enough to delete and removes them through
+        :meth:`delete_memory_units`, the engine's one bulk-delete seam (observation sweep, graph
+        queues, delete repair, post-commit side effects), a page at a time. Logs counts only, never
+        memory content.
+        """
+        from .memories import get_memories
+
+        await self._authenticate_tenant(request_context)
+        settings = await self._adaptive_settings_for_bank(bank_id, request_context)
+        if not (settings.archive_enabled and settings.effective_mode.applies_factor):
+            return AdaptiveMaintenanceResult(ran=False)
+        store = get_memories()
+        backend = await self._get_backend()
+        now = adaptive_clock.utcnow()
+        async with acquire_with_retry(backend) as conn:
+            sweep = await store.archive_sweep(conn, bank_id=bank_id, now=now, settings=settings)
+
+        pruned = 0
+        if settings.prune_enabled:
+
+            async def _still_prunable(conn, unit_ids: list[str]) -> list[str]:
+                # Re-read under the rows' locks inside the delete: the page was read without any,
+                # so a hold, an unarchiving reinforcement or new claim evidence may have landed since.
+                return await store.lock_prunable(conn, bank_id=bank_id, memory_ids=unit_ids, now=now, settings=settings)
+
+            after: PruneCursor | None = None
+            while True:
+                async with acquire_with_retry(backend) as conn:
+                    page = await store.prune_candidates(
+                        conn, bank_id=bank_id, now=now, settings=settings, limit=_PRUNE_PAGE_SIZE, after=after
+                    )
+                if page.memory_ids:
+                    deleted = await self.delete_memory_units(
+                        page.memory_ids, bank_id=bank_id, request_context=request_context, _recheck=_still_prunable
+                    )
+                    pruned += deleted["deleted"]
+                # The cursor moves past protected rows too, so they never stall the scan.
+                if page.next_after is None:
+                    break
+                after = page.next_after
+            if pruned and not settings.effective_mode.lifecycle:
+                # delete_memory_units already nudges grounded documents in lifecycle mode.
+                await self._submit_refreshes_for_retracted_grounding(bank_id, request_context=request_context)
+
+        get_metrics_collector().record_adaptive_archive_maintenance(
+            bank_id=bank_id, archived=sweep.archived, pruned=pruned
+        )
+        logger.info(
+            f"[ADAPTIVE] Maintenance for {bank_id}: scanned={sweep.scanned} marked={sweep.marked} "
+            f"cleared={sweep.cleared} archived={sweep.archived} protected={sweep.protected} "
+            f"skipped_locked={sweep.skipped_locked} pruned={pruned}"
+        )
+        return AdaptiveMaintenanceResult(ran=True, archive=sweep, pruned=pruned)
 
     async def _handle_graph_maintenance(self, task_dict: dict[str, Any]):
         """Handler for graph_maintenance tasks. Drains graph_maintenance_queue for the bank."""
@@ -4865,6 +4971,8 @@ class MemoryEngine(MemoryEngineInterface):
                     consolidation_result = await self._handle_consolidation(task_dict)
                 elif task_type == "graph_maintenance":
                     await self._handle_graph_maintenance(task_dict)
+                elif task_type == "adaptive_memory_maintenance":
+                    await self._handle_adaptive_memory_maintenance(task_dict)
                 elif task_type == "vector_index_maintenance":
                     await self._handle_vector_index_maintenance(task_dict)
                 elif task_type == "refresh_mental_model":
@@ -9674,6 +9782,10 @@ class MemoryEngine(MemoryEngineInterface):
         )
         rerank_changed = outcome.changed if outcome is not None and mode.applies_factor else None
         top_k_changed = outcome.changed if outcome is not None and not mode.applies_factor else None
+        if adaptive.archive_suppressed:
+            get_metrics_collector().record_adaptive_archive_suppressed(
+                bank_id=bank_id, count=len(adaptive.archive_suppressed)
+            )
         if outcome is not None:
             get_metrics_collector().record_adaptive_recall(
                 mode=mode.value,
@@ -9695,6 +9807,7 @@ class MemoryEngine(MemoryEngineInterface):
                 top_k_changed=top_k_changed,
                 rerank_changed=rerank_changed,
                 state_load_error=type(adaptive.load_error).__name__ if adaptive.load_error is not None else None,
+                archive_suppressed=list(adaptive.archive_suppressed) or None,
             )
         adaptive.scoring_seconds += time.perf_counter() - start
 
@@ -10711,6 +10824,9 @@ class MemoryEngine(MemoryEngineInterface):
                     adaptive_scored = adaptive.score(scored_results)
                     adaptive.scoring_seconds += time.perf_counter() - _t0_adaptive
                 scored_results.sort(key=lambda x: x.weight, reverse=True)
+                if adaptive_scored and adaptive is not None:
+                    # Archived memories were scored with the rest; only a strong cue keeps them.
+                    scored_results = adaptive.suppress_archived(scored_results)
                 log_buffer.append("  [4.6] Combined scoring: ce * recency_boost(0.2) * temporal_boost(0.2)")
                 if strategy_boosts:
                     log_buffer.append(f"  [4.7] Strategy boosts applied: {strategy_boosts} {stage2}")
@@ -11968,6 +12084,7 @@ class MemoryEngine(MemoryEngineInterface):
         *,
         bank_id: str | None = None,
         request_context: "RequestContext",
+        _recheck: Callable[[Any, list[str]], Awaitable[list[str]]] | None = None,
     ) -> dict[str, Any]:
         """Bulk delete memory units, keeping the same lifecycle as the single-id path.
 
@@ -12017,6 +12134,10 @@ class MemoryEngine(MemoryEngineInterface):
                 any other bank are left alone.
             request_context: Request context for authentication (tenant
                 resolution runs before any writes).
+            _recheck: Internal. Called inside the delete transaction, before any
+                write, with the connection and the located ids; only the ids it
+                returns are deleted. Prune passes its eligibility check here, so
+                the decision and the delete see the same locked rows.
 
         Returns:
             Dict with:
@@ -12064,6 +12185,9 @@ class MemoryEngine(MemoryEngineInterface):
                 locations = await store.locate_memories(
                     conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=validated_ids
                 )
+                if _recheck is not None:
+                    keep = set(await _recheck(conn, [loc.unit_id for loc in locations]))
+                    locations = [loc for loc in locations if loc.unit_id in keep]
 
                 # Step 2 — group by bank.
                 by_bank: dict[str, list[str]] = {}
@@ -12151,6 +12275,13 @@ class MemoryEngine(MemoryEngineInterface):
             await self._submit_vector_index_maintenance_quietly(
                 target_bank, request_context, after="bulk memory deletion", grew=False
             )
+
+        # Lifecycle mode: the delete repair may have reverted claims and the deleted memories may
+        # ground documents, so nudge them the way the single-id delete does. Other modes keep the
+        # bulk path as it was (a later consolidation or the cron loop notices).
+        for target_bank, counts in per_bank.items():
+            if counts["deleted"] > 0 and await self._lifecycle_grounding_enabled(target_bank, request_context):
+                await self._submit_refreshes_for_retracted_grounding(target_bank, request_context=request_context)
 
         return {
             "requested": len(unit_ids),
@@ -13391,10 +13522,16 @@ class MemoryEngine(MemoryEngineInterface):
         truth_status: str | None = None,
         superseded_by: str | None = None,
         reason: str | None = None,
+        hold: bool | None = None,
+        retention_state: str | None = None,
         request_context: "RequestContext",
     ) -> "MemoryLifecycle | None":
         """Change a memory's retention policy and/or what should be believed about it; returns its
         lifecycle view after.
+
+        ``hold=True`` is an exemption whose reason is ``hold`` (never archived, never pruned);
+        ``hold=False`` lifts the exemption. ``retention_state='active'`` returns an archived memory
+        to normal recall. Both are retention changes.
 
         Retention (``rank`` or ``lifecycle`` mode): ``importance`` in [0, 1] (0.5 is neutral)
         rescales the stability the memory has learned by the ratio of the importance multipliers,
@@ -13427,9 +13564,20 @@ class MemoryEngine(MemoryEngineInterface):
             memory_uuid = uuid.UUID(memory_id)
         except ValueError:
             raise ValueError(f"Invalid memory_id: '{memory_id}' is not a valid UUID")
-        retention_change = importance is not None or forgetting_exempt is not None or exemption_reason is not None
+        if hold is not None:
+            if forgetting_exempt is not None or exemption_reason is not None:
+                raise ValueError("hold cannot be combined with forgetting_exempt or exemption_reason.")
+            forgetting_exempt = bool(hold)
+            exemption_reason = HOLD_EXEMPTION_REASON if hold else None
+        if retention_state not in (None, "active"):
+            raise ValueError(f"retention_state can only be set to 'active', got {retention_state!r}")
+        policy_change = importance is not None or forgetting_exempt is not None or exemption_reason is not None
+        retention_change = policy_change or retention_state is not None
         if not retention_change and truth_status is None:
-            raise ValueError("Set at least one of importance, forgetting_exempt, exemption_reason or truth_status.")
+            raise ValueError(
+                "Set at least one of importance, forgetting_exempt, exemption_reason, hold, retention_state "
+                "or truth_status."
+            )
         if importance is not None and (
             isinstance(importance, bool)
             or not isinstance(importance, (int, float))
@@ -13502,7 +13650,7 @@ class MemoryEngine(MemoryEngineInterface):
             # One transaction: a truth change that loses its compare-and-set (409) also undoes the
             # retention change sent with it.
             async with conn.transaction():
-                if retention_change:
+                if policy_change:
                     state = await store.set_retention_policy(
                         conn,
                         bank_id=bank_id,
@@ -13515,6 +13663,19 @@ class MemoryEngine(MemoryEngineInterface):
                     )
                     if state is None:
                         return None
+                    if state.retention_state == "archived" and (
+                        state.forgetting_exempt or state.importance >= settings.archive_protect_importance
+                    ):
+                        # Protected now (a hold, an exemption, or importance at the protection level),
+                        # so the sweep would not archive it again: bring it back rather than leave a
+                        # protected memory suppressed in recall.
+                        await store.unarchive_memories(conn, bank_id=bank_id, memory_ids=[unit_id], now=now)
+                if retention_state == "active":
+                    if not await store.live_memory_ids(
+                        conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[unit_id]
+                    ):
+                        return None
+                    await store.unarchive_memories(conn, bank_id=bank_id, memory_ids=[unit_id], now=now)
                 if status is not None:
                     change = await self._apply_explicit_truth(
                         conn,
@@ -18866,6 +19027,27 @@ class MemoryEngine(MemoryEngineInterface):
                 else:
                     stored_structured_content = raw_struct
 
+        # Lifecycle mode: a cited memory whose claim was superseded or refuted is still a row, so
+        # the live check below would read it as grounding the document still has. It is not a
+        # current answer any more, and the bank knows what replaced it — so instead of editing
+        # around it, this run regenerates over current recall, which no longer returns it. Asked
+        # for full runs too, so the trace says why the document changed. A memory the document
+        # already cited as history (retired when its reflect read it) is not one of these: it
+        # stays grounding, or no run on that page could ever be a delta again.
+        stored_based_on = (mental_model.get("reflect_response") or {}).get("based_on")
+        cited_ids = based_on_fact_ids(stored_based_on)
+        grounding: dict[str, Grounding] | None = None
+        newly_retired: dict[str, Grounding] = {}
+        if cited_ids and await self._lifecycle_grounding_enabled(bank_id, request_context):
+            from .memories import get_memories
+
+            async with self._store_read_conn(bank_id) as conn:
+                grounding = await get_memories().grounding_status(conn, bank_id=bank_id, ids=cited_ids)
+            newly_retired = retired_since_cited(stored_based_on, grounding)
+            if use_delta and newly_retired:
+                use_delta = False
+                mode_fallback_reason = "retired_grounding"
+
         tag_filtering = _resolve_refresh_tag_filtering(model_tags, trigger_data)
         exclude_ids = sorted({*stored_exclude_ids, mental_model_id})
         scope = MentalModelRefreshScope(
@@ -19010,14 +19192,19 @@ class MemoryEngine(MemoryEngineInterface):
                     )
                 else:
                     # MemoryFact object with .id, .text, .context attributes
-                    serialized_facts.append(
-                        {
-                            "id": str(fact.id),
-                            "text": fact.text,
-                            "type": fact_type,
-                            "context": fact.context,
-                        }
-                    )
+                    entry: dict[str, Any] = {
+                        "id": str(fact.id),
+                        "text": fact.text,
+                        "type": fact_type,
+                        "context": fact.context,
+                    }
+                    # Lifecycle mode: the claim state the reflect read the fact in, when it was
+                    # not plain active. A retired one is cited as history, which is what lets the
+                    # grounding check tell it from a memory retired after this page cited it
+                    # (``retired_since_cited``).
+                    if fact.lifecycle is not None:
+                        entry["truth_status"] = fact.lifecycle.truth_status
+                    serialized_facts.append(entry)
             based_on_serialized_payload[fact_type] = serialized_facts
 
         # Counted before the delta merge below, which folds in facts from
@@ -19056,17 +19243,29 @@ class MemoryEngine(MemoryEngineInterface):
         # pruning the retracted ids out of based_on below.
         retraction_handled = False
         retraction_operations: MentalModelDeltaOperations | None = None
+        if grounding is not None and not use_delta:
+            # Full run (asked for, or escalated above): the regeneration rebuilds based_on from
+            # current recall, so nothing is unsaid here; the partition is only reported.
+            retracted = partition_retracted(
+                stored_based_on,
+                {i for i, g in grounding.items() if g.state != "absent" and i not in newly_retired},
+                retired=newly_retired,
+            )
         if use_delta:
-            stored_based_on = (mental_model.get("reflect_response") or {}).get("based_on")
-            cited_ids = based_on_fact_ids(stored_based_on)
             if cited_ids:
                 from .memories import get_memories
 
                 store = get_memories()
                 async with self._store_read_conn(bank_id) as conn:
-                    live_ids = await store.live_memory_ids(
-                        conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=cited_ids
-                    )
+                    if grounding is not None:
+                        # Lifecycle mode reached delta, so nothing cited was retired since it was
+                        # cited (a memory cited as history is still grounding): the grounding read
+                        # above already answers the live check.
+                        live_ids = {i for i, g in grounding.items() if g.state != "absent"}
+                    else:
+                        live_ids = await store.live_memory_ids(
+                            conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=cited_ids
+                        )
                     retracted = partition_retracted(stored_based_on, live_ids)
                     if retracted:
                         # Re-ingesting a document deletes its facts and re-extracts them
@@ -19140,12 +19339,18 @@ class MemoryEngine(MemoryEngineInterface):
             outcome: RefreshOutcome,
         ) -> _MentalModelRefreshRun:
             """Close over everything the pipeline resolved before it branched."""
+            # Retired citations are handled by the full regeneration itself, so they count as applied
+            # when it produced the document (an unchanged one included).
+            regenerated = bool(retracted.retired) and outcome in ("content_written", "content_unchanged")
             retraction_record = (
                 MentalModelRetraction(
-                    fact_ids=sorted(retracted.ids),
-                    fact_texts=[(fact.get("text") or "") for fact in retracted.facts],
-                    applied=retraction_handled,
+                    fact_ids=sorted(retracted.ids | retracted.retired_ids),
+                    fact_texts=[(fact.get("text") or "") for fact in retracted.facts]
+                    + [(c.fact.get("text") or "") for c in retracted.retired],
+                    applied=retraction_handled or regenerated,
                     deferred_reason=retraction_deferred_reason,
+                    cause=retracted.cause,
+                    successor_ids=retracted.successor_ids,
                 )
                 if retracted
                 else None
@@ -21705,6 +21910,8 @@ class MemoryEngine(MemoryEngineInterface):
         conn,
         bank_id: str,
         mm_row: Any,
+        *,
+        lifecycle: bool | None = None,
     ) -> bool:
         """Check whether a mental model is out of date.
 
@@ -21721,6 +21928,10 @@ class MemoryEngine(MemoryEngineInterface):
 
         Use :meth:`compute_mental_models_are_stale` when asking about more than one
         model: it is the same question in one round-trip.
+
+        ``lifecycle`` is whether the bank runs adaptive memory ``lifecycle`` mode, where a cited
+        memory whose claim was retired counts as retracted grounding; None resolves it from the
+        bank's config when the grounding check is reached.
         """
         scope = _mental_model_stale_scope_from_row(mm_row, key="")
         if scope is None:
@@ -21763,9 +21974,23 @@ class MemoryEngine(MemoryEngineInterface):
         # triggers — the after-consolidation flush and the cron loop — both come
         # through here, so the refresh still fires; a page can briefly read
         # "up to date" in the list while a refresh for it is already queued.
-        return await self._has_retracted_grounding(conn, bank_id, _mm_row_field(mm_row, "id"))
+        return await self._has_retracted_grounding(conn, bank_id, _mm_row_field(mm_row, "id"), lifecycle=lifecycle)
 
-    async def _has_retracted_grounding(self, conn, bank_id: str, mental_model_id: Any) -> bool:
+    async def _lifecycle_grounding_enabled(self, bank_id: str, request_context: "RequestContext | None") -> bool:
+        """Whether retired claims count as retracted grounding for this bank: adaptive memory
+        ``lifecycle`` mode only. A config that cannot be read answers False (the pre-lifecycle check:
+        only absent memories are retracted), logged."""
+        try:
+            bank_config = await self._config_resolver.get_bank_config(bank_id, request_context)
+        except Exception as exc:
+            logger.warning(f"[MENTAL_MODELS] Could not resolve adaptive mode for {bank_id}: {exc}")
+            return False
+        settings = write_settings_from_bank_config(bank_config, bank_id=bank_id)
+        return settings is not None and settings.effective_mode.lifecycle
+
+    async def _has_retracted_grounding(
+        self, conn, bank_id: str, mental_model_id: Any, *, lifecycle: bool | None = None
+    ) -> bool:
         """Whether the model's stored grounding cites memories that no longer exist.
 
         ``reflect_response`` is read here rather than being required on the row the
@@ -21773,6 +21998,12 @@ class MemoryEngine(MemoryEngineInterface):
         model that already looks fresh pays for the extra fetch. Scope filters are
         irrelevant: a fact this document was actually built on is in scope by
         construction, whatever the model's tags say now.
+
+        In ``lifecycle`` mode a cited memory whose claim is superseded or refuted counts too
+        (``grounding_status``): the row is still there, but it is no longer a current answer.
+        Only when it was retired after the page cited it, though: one the page cited as history
+        (``retired_since_cited``) is what the page already says. ``lifecycle`` None resolves the
+        mode from the bank's config, only once there is grounding to check.
         """
         from .memories import get_memories
 
@@ -21791,9 +22022,17 @@ class MemoryEngine(MemoryEngineInterface):
                 reflect_response = json.loads(reflect_response)
             except json.JSONDecodeError:
                 return False
-        cited_ids = based_on_fact_ids((reflect_response or {}).get("based_on"))
+        based_on = (reflect_response or {}).get("based_on")
+        cited_ids = based_on_fact_ids(based_on)
         if not cited_ids:
             return False
+        if lifecycle is None:
+            lifecycle = await self._lifecycle_grounding_enabled(bank_id, None)
+        if lifecycle:
+            grounding = await get_memories().grounding_status(conn, bank_id=bank_id, ids=cited_ids)
+            return any(g.state == "absent" for g in grounding.values()) or bool(
+                retired_since_cited(based_on, grounding)
+            )
         live_ids = await get_memories().live_memory_ids(
             conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=cited_ids
         )
@@ -21830,6 +22069,7 @@ class MemoryEngine(MemoryEngineInterface):
         if self._llm_config.provider == "none":
             return 0
         try:
+            lifecycle = await self._lifecycle_grounding_enabled(bank_id, request_context)
             backend = await self._get_backend()
             async with acquire_with_retry(backend) as conn:
                 # Someone else is already going to notice. Consolidation is pending, and
@@ -21851,7 +22091,11 @@ class MemoryEngine(MemoryEngineInterface):
                     """,
                     bank_id,
                 )
-                affected = [row["id"] for row in rows if await self._has_retracted_grounding(conn, bank_id, row["id"])]
+                affected = [
+                    row["id"]
+                    for row in rows
+                    if await self._has_retracted_grounding(conn, bank_id, row["id"], lifecycle=lifecycle)
+                ]
         except Exception as exc:
             logger.warning(f"[MENTAL_MODELS] Could not scan {bank_id} for retracted grounding: {exc}")
             return 0
@@ -24448,6 +24692,54 @@ class MemoryEngine(MemoryEngineInterface):
             # Set by the job's own hand-off so it does not match its own
             # still-'processing' row and suppress its successor.
             dedupe_excludes_operation_id=dedupe_excludes_operation_id,
+        )
+
+    async def submit_async_adaptive_memory_maintenance(
+        self,
+        bank_id: str,
+        *,
+        request_context: "RequestContext",
+    ) -> dict[str, Any]:
+        """Submit the bank's adaptive-memory maintenance job (archive sweep, then prune).
+
+        A no-op (``no_work=True``, null operation_id) unless ``adaptive_memory_archive_enabled`` is on
+        and the bank's effective mode is rank or lifecycle, so the after-consolidation and
+        maintenance-loop callers can call it unconditionally. Deduplicates by bank against a job that
+        is pending or running: one run sweeps the whole retention table, and the next consolidation
+        or loop tick covers anything that changed after it passed.
+        """
+        # Archiving is a server-level switch: an off server (the default) does nothing at all here,
+        # which is what every consolidation pays for calling this.
+        if not get_config().adaptive_memory_archive_enabled:
+            return {"operation_id": None, "no_work": True}
+        await self._authenticate_tenant(request_context)
+        settings = await self._adaptive_settings_for_bank(bank_id, request_context)
+        if not (settings.archive_enabled and settings.effective_mode.applies_factor):
+            return {"operation_id": None, "no_work": True}
+
+        if self._operation_validator:
+            from hindsight_api.extensions import BankWriteContext, BankWriteOperation
+
+            ctx = BankWriteContext(
+                bank_id=bank_id,
+                operation=BankWriteOperation.SUBMIT_ASYNC_ADAPTIVE_MEMORY_MAINTENANCE,
+                request_context=request_context,
+            )
+            await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
+
+        task_payload: dict[str, Any] = {}
+        if request_context.tenant_id:
+            task_payload["_tenant_id"] = request_context.tenant_id
+        if request_context.api_key_id:
+            task_payload["_api_key_id"] = request_context.api_key_id
+
+        return await self._submit_async_operation(
+            bank_id=bank_id,
+            operation_type="adaptive_memory_maintenance",
+            task_type="adaptive_memory_maintenance",
+            task_payload=task_payload,
+            dedupe_by_bank=True,
+            dedupe_by_bank_includes_processing=True,
         )
 
     async def submit_async_vector_index_maintenance(

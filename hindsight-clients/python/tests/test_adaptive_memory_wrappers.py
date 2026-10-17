@@ -67,6 +67,17 @@ async def test_aupdate_memory_lifecycle_forwards_importance_and_reason(monkeypat
     assert request.to_dict() == {"importance": 0.9, "forgetting_exempt": True, "exemption_reason": "compliance"}
 
 
+def test_update_memory_lifecycle_forwards_hold_and_unarchive(monkeypatch):
+    client = Hindsight(base_url="http://example.invalid")
+    captured: dict = {}
+    _capture(monkeypatch, client, "update_memory_lifecycle", captured)
+
+    client.update_memory_lifecycle("bank", "mem-1", hold=True, retention_state="active")
+
+    [request] = captured["args"]
+    assert request.to_dict() == {"hold": True, "retention_state": "active"}
+
+
 def _capture_retain(monkeypatch, client, captured):
     async def fake_retain(bank_id, request_obj, _request_timeout=None):
         captured["request"] = request_obj
