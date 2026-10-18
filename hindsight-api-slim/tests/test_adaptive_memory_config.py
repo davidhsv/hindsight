@@ -10,6 +10,7 @@ wedge the bank.
 import dataclasses
 import math
 import uuid
+from pathlib import Path
 
 import httpx
 import pytest
@@ -25,6 +26,9 @@ from hindsight_api.config import (
     StaticConfigProxy,
 )
 from hindsight_api.config_resolver import ConfigResolver, _coerce_stored_bank_overrides
+from hindsight_api.engine.adaptive.models import AdaptiveMode
+from hindsight_api.engine.adaptive.settings import AdaptiveSettings
+from hindsight_api.engine.context_admission import AdmissionMode, ContextAdmissionSettings, ScorerKind
 
 from .test_hierarchical_config import FakeBankConfigBackend
 
@@ -257,6 +261,42 @@ def test_max_stability_equal_to_base_is_allowed(clean_env):
     clean_env.setenv("HINDSIGHT_API_ADAPTIVE_MEMORY_MAX_STABILITY_DAYS", "90")
     config = HindsightConfig.from_env()
     assert config.adaptive_memory_base_stability_days == config.adaptive_memory_max_stability_days == 90.0
+
+
+# --- The personal profile ----------------------------------------------------------
+
+
+def _personal_profile() -> dict[str, str]:
+    """The commented "Personal profile" block of the repo's env template, as env assignments."""
+    template = (Path(__file__).resolve().parents[2] / ".env.example").read_text(encoding="utf-8")
+    block = template.split("\n# Personal profile:", 1)[1].split("\n\n", 1)[0]
+    lines = [line.removeprefix("# ") for line in block.splitlines() if line.startswith("# HINDSIGHT_API_")]
+    return dict(line.split("=", 1) for line in lines)
+
+
+def test_the_personal_profile_starts_and_resolves_as_documented(clean_env):
+    """The env template's profile block, applied as-is: lifecycle mode with retention out of ranking,
+    observations on, and context admission observing with the deterministic scorer only."""
+    profile = _personal_profile()
+    assert profile == {
+        "HINDSIGHT_API_ENABLE_OBSERVATIONS": "true",
+        "HINDSIGHT_API_ADAPTIVE_MEMORY_MODE": "lifecycle",
+        "HINDSIGHT_API_ADAPTIVE_MEMORY_SCORE_ALPHA": "0",
+        "HINDSIGHT_API_CONTEXT_ADMISSION_MODE": "observe",
+        "HINDSIGHT_API_CONTEXT_ADMISSION_SCORER": "deterministic",
+        "HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL": "false",
+    }
+    for name, value in profile.items():
+        clean_env.setenv(name, value)
+    config = HindsightConfig.from_env()
+    config.validate()
+    resolved = {f.name: getattr(config, f.name) for f in dataclasses.fields(config)}
+
+    assert config.enable_observations is True
+    adaptive = AdaptiveSettings.resolve(resolved, config, store_supports=True)
+    assert (adaptive.effective_mode, adaptive.score_alpha) == (AdaptiveMode.LIFECYCLE, 0.0)
+    admission = ContextAdmissionSettings.resolve(resolved, config)
+    assert (admission.mode, admission.scorer) == (AdmissionMode.OBSERVE, ScorerKind.DETERMINISTIC)
 
 
 # --- Bank config API: validation -----------------------------------------------------
