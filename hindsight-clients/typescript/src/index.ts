@@ -48,6 +48,7 @@ import type {
   ConfirmMemoryResponse,
   MemoryLifecycle,
   RecallLifecycle,
+  RecallTaskContext,
   BankTemplateManifest,
   BankTemplateConfig,
   BankTemplateMentalModel,
@@ -606,6 +607,10 @@ export class HindsightClient {
       lifecycleView?: "current" | "historical";
       /** Show memories as they stood at this instant (ISO 8601; no offset means UTC), lifecycle mode only: a memory is returned only if its claim was valid then. Takes precedence over lifecycleView; does not change ranking. */
       asOf?: string;
+      /** Why you recall, used by context admission when the bank's context_admission_mode is not 'off': 'auto_context' (memories injected into an agent's context nobody asked for; the stricter threshold), 'explicit_search' (someone asked; the server's default when omitted) or 'historical_search' (superseded memories are admissible, and in lifecycle mode the view is historical unless lifecycleView or asOf is given). In filter and strict modes the results may be empty. */
+      purpose?: "auto_context" | "explicit_search" | "historical_search";
+      /** Where you are working, compared with memory metadata by context admission, e.g. { repository: "github.com/acme/payments", branch: "main" }. */
+      context?: RecallTaskContext;
       signal?: AbortSignal;
     }
   ): Promise<RecallResponse> {
@@ -643,6 +648,8 @@ export class HindsightClient {
             temporal_window: options?.temporalWindow,
             lifecycle_view: options?.lifecycleView,
             as_of: options?.asOf,
+            purpose: options?.purpose,
+            context: options?.context,
           },
           signal: options?.signal,
         }),
@@ -1143,6 +1150,24 @@ export class HindsightClient {
       adaptiveMemoryDefaultView?: string;
       /** Detect historical phrasing in external recall queries that name no view and answer them from the historical view (or as of the date). Lifecycle mode only. */
       adaptiveMemoryHistoricalCues?: boolean;
+      /** Context admission for external recalls: 'off' (default; recall is unchanged), 'observe' (decisions go to traces and metrics only), 'filter' (rejected memories are dropped and recall may return none) or 'strict' (filter plus hard scope, near-duplicate suppression and the memory/token budget). */
+      contextAdmissionMode?: string;
+      /** Admission score a memory needs when the recall's purpose is 'auto_context', in [0, 1]. */
+      contextAdmissionThresholdAuto?: number;
+      /** Admission score a memory needs when the purpose is 'explicit_search' or 'historical_search', in [0, 1]. */
+      contextAdmissionThresholdExplicit?: number;
+      /** Subtracted from the auto threshold when the query refers to shared history ('last time', 'what did we decide'), in [0, 1]. */
+      contextAdmissionReferenceBonus?: number;
+      /** Top-ranked recall results the gate judges (>= 1). */
+      contextAdmissionCandidates?: number;
+      /** Most memories admitted per recall (strict mode, >= 1). */
+      contextAdmissionMaxMemories?: number;
+      /** Most memory tokens admitted per recall (strict mode, >= 1). */
+      contextAdmissionMaxTokens?: number;
+      /** MMR trade-off between score and novelty, in [0, 1] (1 = score only; strict mode). */
+      contextAdmissionMmrLambda?: number;
+      /** Embedding cosine above which a memory is a near-duplicate of one already admitted, in [0, 1] (strict mode). */
+      contextAdmissionDupSimilarity?: number;
       signal?: AbortSignal;
     }
   ): Promise<BankConfigResponse> {
@@ -1264,6 +1289,24 @@ export class HindsightClient {
       updates.adaptive_memory_default_view = options.adaptiveMemoryDefaultView;
     if (options.adaptiveMemoryHistoricalCues !== undefined)
       updates.adaptive_memory_historical_cues = options.adaptiveMemoryHistoricalCues;
+    if (options.contextAdmissionMode !== undefined)
+      updates.context_admission_mode = options.contextAdmissionMode;
+    if (options.contextAdmissionThresholdAuto !== undefined)
+      updates.context_admission_threshold_auto = options.contextAdmissionThresholdAuto;
+    if (options.contextAdmissionThresholdExplicit !== undefined)
+      updates.context_admission_threshold_explicit = options.contextAdmissionThresholdExplicit;
+    if (options.contextAdmissionReferenceBonus !== undefined)
+      updates.context_admission_reference_bonus = options.contextAdmissionReferenceBonus;
+    if (options.contextAdmissionCandidates !== undefined)
+      updates.context_admission_candidates = options.contextAdmissionCandidates;
+    if (options.contextAdmissionMaxMemories !== undefined)
+      updates.context_admission_max_memories = options.contextAdmissionMaxMemories;
+    if (options.contextAdmissionMaxTokens !== undefined)
+      updates.context_admission_max_tokens = options.contextAdmissionMaxTokens;
+    if (options.contextAdmissionMmrLambda !== undefined)
+      updates.context_admission_mmr_lambda = options.contextAdmissionMmrLambda;
+    if (options.contextAdmissionDupSimilarity !== undefined)
+      updates.context_admission_dup_similarity = options.contextAdmissionDupSimilarity;
 
     const response = await sdk.updateBankConfig({
       client: this.client,
@@ -2254,6 +2297,7 @@ export type {
   ConfirmMemoryResponse,
   MemoryLifecycle,
   RecallLifecycle,
+  RecallTaskContext,
   BankTemplateManifest,
   BankTemplateConfig,
   BankTemplateMentalModel,

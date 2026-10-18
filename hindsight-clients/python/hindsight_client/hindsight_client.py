@@ -669,6 +669,8 @@ class Hindsight:
         temporal_window: dict[str, Any] | None = None,
         lifecycle_view: Literal["current", "historical"] | None = None,
         as_of: datetime | None = None,
+        purpose: Literal["auto_context", "explicit_search", "historical_search"] | None = None,
+        context: dict[str, str] | None = None,
     ) -> RecallResponse:
         """
         Recall memories using semantic similarity (sync wrapper — prefer :meth:`arecall` in async code).
@@ -714,6 +716,17 @@ class Hindsight:
             as_of: Show memories as they stood at this instant (a naive datetime means UTC),
                 lifecycle mode only: a memory is returned only if its claim was valid then.
                 Takes precedence over ``lifecycle_view``; does not change ranking.
+            purpose: Why you recall, used by context admission when the bank's
+                ``context_admission_mode`` is not ``off``: ``"auto_context"`` (memories injected
+                into an agent's context nobody asked for; the stricter threshold),
+                ``"explicit_search"`` (someone asked; the default when ``None``) or
+                ``"historical_search"`` (superseded memories are admissible, and in lifecycle mode
+                the view is historical unless ``lifecycle_view`` or ``as_of`` is given). In filter
+                and strict modes the results may be empty.
+            context: Where you are working, compared with memory metadata by context admission,
+                e.g. ``{"repository": "github.com/acme/payments", "branch": "main"}``. Keys:
+                repository, branch, module, environment, service, task_intent, workspace; any
+                other key raises ``ValueError``.
 
         Returns:
             RecallResponse with results, optional entities, optional chunks, optional source_facts, and optional trace
@@ -741,6 +754,8 @@ class Hindsight:
                 temporal_window=temporal_window,
                 lifecycle_view=lifecycle_view,
                 as_of=as_of,
+                purpose=purpose,
+                context=context,
             )
         )
 
@@ -1542,6 +1557,8 @@ class Hindsight:
         temporal_window: dict[str, Any] | None = None,
         lifecycle_view: Literal["current", "historical"] | None = None,
         as_of: datetime | None = None,
+        purpose: Literal["auto_context", "explicit_search", "historical_search"] | None = None,
+        context: dict[str, str] | None = None,
     ) -> RecallResponse:
         """
         Recall memories using semantic similarity (async — preferred over :meth:`recall`).
@@ -1592,6 +1609,17 @@ class Hindsight:
             as_of: Show memories as they stood at this instant (a naive datetime means UTC),
                 lifecycle mode only: a memory is returned only if its claim was valid then.
                 Takes precedence over ``lifecycle_view``; does not change ranking.
+            purpose: Why you recall, used by context admission when the bank's
+                ``context_admission_mode`` is not ``off``: ``"auto_context"`` (memories injected
+                into an agent's context nobody asked for; the stricter threshold),
+                ``"explicit_search"`` (someone asked; the default when ``None``) or
+                ``"historical_search"`` (superseded memories are admissible, and in lifecycle mode
+                the view is historical unless ``lifecycle_view`` or ``as_of`` is given). In filter
+                and strict modes the results may be empty.
+            context: Where you are working, compared with memory metadata by context admission,
+                e.g. ``{"repository": "github.com/acme/payments", "branch": "main"}``. Keys:
+                repository, branch, module, environment, service, task_intent, workspace; any
+                other key raises ``ValueError``.
 
         Returns:
             RecallResponse with results, optional entities, optional chunks, optional source_facts, and optional trace
@@ -1644,6 +1672,20 @@ class Hindsight:
 
             temporal_window_obj = TemporalWindow.from_dict(temporal_window)
 
+        context_obj = None
+        if context is not None:
+            from hindsight_client_api.models.recall_task_context import RecallTaskContext
+
+            unknown_context = set(context) - set(RecallTaskContext.model_fields)
+            if unknown_context:
+                # The generated model drops keys it does not know, which would send the recall
+                # without the scope the caller meant to give it.
+                raise ValueError(
+                    f"Unknown context keys: {sorted(unknown_context)}. "
+                    f"Allowed keys: {sorted(RecallTaskContext.model_fields)}."
+                )
+            context_obj = RecallTaskContext(**context)
+
         request_obj = recall_request.RecallRequest(
             query=query,
             types=types,
@@ -1660,6 +1702,9 @@ class Hindsight:
             temporal_window=temporal_window_obj,
             lifecycle_view=lifecycle_view,
             as_of=as_of,
+            # Left out entirely when unset, so a server that predates context admission never
+            # sees (and reports as unknown) a null it would have ignored anyway.
+            **{k: v for k, v in {"purpose": purpose, "context": context_obj}.items() if v is not None},
         )
 
         return await _retry_on_capacity(
@@ -3171,6 +3216,16 @@ class Hindsight:
         adaptive_memory_max_stability_days: float | None = None,
         adaptive_memory_default_view: str | None = None,
         adaptive_memory_historical_cues: bool | None = None,
+        # Context admission settings
+        context_admission_mode: str | None = None,
+        context_admission_threshold_auto: float | None = None,
+        context_admission_threshold_explicit: float | None = None,
+        context_admission_reference_bonus: float | None = None,
+        context_admission_candidates: int | None = None,
+        context_admission_max_memories: int | None = None,
+        context_admission_max_tokens: int | None = None,
+        context_admission_mmr_lambda: float | None = None,
+        context_admission_dup_similarity: float | None = None,
     ) -> dict[str, Any]:
         """
         Update configuration overrides for a bank (sync wrapper — prefer :meth:`aupdate_bank_config` in async code).
@@ -3243,6 +3298,15 @@ class Hindsight:
                 adaptive_memory_max_stability_days=adaptive_memory_max_stability_days,
                 adaptive_memory_default_view=adaptive_memory_default_view,
                 adaptive_memory_historical_cues=adaptive_memory_historical_cues,
+                context_admission_mode=context_admission_mode,
+                context_admission_threshold_auto=context_admission_threshold_auto,
+                context_admission_threshold_explicit=context_admission_threshold_explicit,
+                context_admission_reference_bonus=context_admission_reference_bonus,
+                context_admission_candidates=context_admission_candidates,
+                context_admission_max_memories=context_admission_max_memories,
+                context_admission_max_tokens=context_admission_max_tokens,
+                context_admission_mmr_lambda=context_admission_mmr_lambda,
+                context_admission_dup_similarity=context_admission_dup_similarity,
             )
         )
 
@@ -3323,6 +3387,16 @@ class Hindsight:
         adaptive_memory_max_stability_days: float | None = None,
         adaptive_memory_default_view: str | None = None,
         adaptive_memory_historical_cues: bool | None = None,
+        # Context admission settings
+        context_admission_mode: str | None = None,
+        context_admission_threshold_auto: float | None = None,
+        context_admission_threshold_explicit: float | None = None,
+        context_admission_reference_bonus: float | None = None,
+        context_admission_candidates: int | None = None,
+        context_admission_max_memories: int | None = None,
+        context_admission_max_tokens: int | None = None,
+        context_admission_mmr_lambda: float | None = None,
+        context_admission_dup_similarity: float | None = None,
     ) -> dict[str, Any]:
         """
         Update configuration overrides for a bank (async — preferred over :meth:`update_bank_config`).
@@ -3426,6 +3500,23 @@ class Hindsight:
             adaptive_memory_historical_cues: Detect historical phrasing in external recall queries
                 that name no view and answer them from the historical view (or as of the date).
                 Lifecycle mode only.
+            context_admission_mode: Context admission for external recalls: 'off' (default;
+                recall is unchanged), 'observe' (decisions go to traces and metrics only), 'filter'
+                (rejected memories are dropped and recall may return none) or 'strict' (filter plus
+                hard scope, near-duplicate suppression and the memory/token budget).
+            context_admission_threshold_auto: Admission score a memory needs when the recall's
+                purpose is 'auto_context', in [0, 1].
+            context_admission_threshold_explicit: Admission score a memory needs when the purpose is
+                'explicit_search' or 'historical_search', in [0, 1].
+            context_admission_reference_bonus: Subtracted from the auto threshold when the query
+                refers to shared history ('last time', 'what did we decide'), in [0, 1].
+            context_admission_candidates: Top-ranked recall results the gate judges (>= 1).
+            context_admission_max_memories: Most memories admitted per recall (strict mode, >= 1).
+            context_admission_max_tokens: Most memory tokens admitted per recall (strict mode, >= 1).
+            context_admission_mmr_lambda: MMR trade-off between score and novelty, in [0, 1]
+                (1 = score only; strict mode).
+            context_admission_dup_similarity: Embedding cosine above which a memory is a
+                near-duplicate of one already admitted, in [0, 1] (strict mode).
 
         Returns:
             dict with ``bank_id``, ``config`` (fully resolved), and ``overrides`` (bank-level only)
@@ -3496,6 +3587,15 @@ class Hindsight:
                 "adaptive_memory_max_stability_days": adaptive_memory_max_stability_days,
                 "adaptive_memory_default_view": adaptive_memory_default_view,
                 "adaptive_memory_historical_cues": adaptive_memory_historical_cues,
+                "context_admission_mode": context_admission_mode,
+                "context_admission_threshold_auto": context_admission_threshold_auto,
+                "context_admission_threshold_explicit": context_admission_threshold_explicit,
+                "context_admission_reference_bonus": context_admission_reference_bonus,
+                "context_admission_candidates": context_admission_candidates,
+                "context_admission_max_memories": context_admission_max_memories,
+                "context_admission_max_tokens": context_admission_max_tokens,
+                "context_admission_mmr_lambda": context_admission_mmr_lambda,
+                "context_admission_dup_similarity": context_admission_dup_similarity,
             }.items()
             if v is not None
         }

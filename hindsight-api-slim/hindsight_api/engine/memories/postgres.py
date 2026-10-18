@@ -570,6 +570,11 @@ class PostgresMemories(MemoriesExtension):
         # Both SQL dialects carry the adaptive tables (migration a7d3e91c5f42).
         return True
 
+    async def load_embeddings(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, list[float]]:
+        return await reads.memory_embeddings(
+            conn=conn, fq_table=fq_store_table, bank_id=bank_id, unit_ids=list(memory_ids)
+        )
+
     async def load_adaptive_state(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, AdaptiveState]:
         return await pg_adaptive.load_adaptive_state(
             conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids

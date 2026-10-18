@@ -12,6 +12,7 @@ import type {
   ConfirmMemoryResponse,
   MemoryLifecycle,
   RecallLifecycle,
+  RecallTaskContext,
 } from "@vectorize-io/hindsight-client";
 
 // Adaptive memory shapes come from the generated client, so they cannot drift from
@@ -633,6 +634,10 @@ export class ControlPlaneClient {
     lifecycle_view?: "current" | "historical";
     /** Adaptive memory lifecycle mode only: show memories as they stood at this instant (ISO 8601). Wins over lifecycle_view. */
     as_of?: string;
+    /** Context admission (bank context_admission_mode not 'off'): why the caller recalls. Omitted: 'explicit_search'. */
+    purpose?: "auto_context" | "explicit_search" | "historical_search";
+    /** Context admission: where the caller is working, compared with memory metadata. */
+    context?: RecallTaskContext;
   }) {
     return this.fetchApi("/api/recall", {
       method: "POST",

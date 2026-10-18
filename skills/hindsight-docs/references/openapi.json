@@ -10018,6 +10018,127 @@
             "title": "Adaptive Memory Historical Cues",
             "description": "Detect historical phrasing ('used to', 'before the migration', 'before <date>', ...) in external recall queries that name no lifecycle_view, and answer them from the historical view (or as of the date). Lifecycle mode only"
           },
+          "context_admission_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Mode",
+            "description": "Context admission mode for external recalls: 'off' (default; recall is unchanged), 'observe' (decisions and the would-be admitted set go to traces and metrics only), 'filter' (rejected memories are dropped and recall may return none) or 'strict' (filter plus hard scope, near-duplicate suppression and the memory/token budget)"
+          },
+          "context_admission_threshold_auto": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Threshold Auto",
+            "description": "Admission score a memory needs on a recall with purpose 'auto_context'"
+          },
+          "context_admission_threshold_explicit": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Threshold Explicit",
+            "description": "Admission score a memory needs on a recall with purpose 'explicit_search' or 'historical_search'"
+          },
+          "context_admission_reference_bonus": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Reference Bonus",
+            "description": "Subtracted from the auto_context threshold when the query refers to shared history ('last time', 'what did we decide')"
+          },
+          "context_admission_candidates": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Candidates",
+            "description": "Top-ranked recall results the admission gate judges; the rest are never admitted"
+          },
+          "context_admission_max_memories": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Max Memories",
+            "description": "Most memories admitted per recall (strict mode)"
+          },
+          "context_admission_max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Max Tokens",
+            "description": "Most memory tokens admitted per recall (strict mode)"
+          },
+          "context_admission_mmr_lambda": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Mmr Lambda",
+            "description": "MMR trade-off between a memory's score and its novelty against those already admitted (1 = score only; strict mode)"
+          },
+          "context_admission_dup_similarity": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Dup Similarity",
+            "description": "Embedding cosine above which a memory counts as a near-duplicate of one already admitted (strict mode)"
+          },
           "memory_defense": {
             "anyOf": [
               {
@@ -11153,6 +11274,33 @@
         ],
         "title": "Content",
         "description": "The raw content to retain or extract from. Either a plain string or an ordered list of content blocks."
+      },
+      "ContextAdmissionSummary": {
+        "properties": {
+          "abstained": {
+            "type": "boolean",
+            "title": "Abstained",
+            "description": "Candidates were judged and none was admitted: the empty results are the answer (nothing relevant), not an empty bank or a too-narrow filter"
+          },
+          "candidates": {
+            "type": "integer",
+            "title": "Candidates",
+            "description": "Candidates judged (0 when retrieval found nothing to judge)"
+          },
+          "admitted": {
+            "type": "integer",
+            "title": "Admitted",
+            "description": "Candidates admitted (the results can be fewer, after the token budget)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "abstained",
+          "candidates",
+          "admitted"
+        ],
+        "title": "ContextAdmissionSummary",
+        "description": "What context admission decided on a recall whose results it filters (filter or strict mode).\n\nPresent only then: with the mode off or observe the results are what retrieval returned, and\nthe payload carries nothing new. The reasons per candidate are in the trace only."
       },
       "CreateBankAliasRequest": {
         "properties": {
@@ -17957,6 +18105,34 @@
             ],
             "title": "As Of",
             "description": "Show memories as they stood at this instant (ISO 8601; a time without an offset is UTC), when the bank's adaptive memory mode is 'lifecycle': a memory is returned only if its claim was valid then. Refuted memories never are. Takes precedence over `lifecycle_view`. It does not change ranking: `query_timestamp` stays the clock recency is scored against."
+          },
+          "purpose": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "auto_context",
+                  "explicit_search",
+                  "historical_search"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Purpose",
+            "description": "Why the caller recalls, which sets the trade-off context admission makes when the bank's `context_admission_mode` is not 'off'. 'auto_context': memories injected into an agent's context that nobody asked for, judged against the stricter `context_admission_threshold_auto`; 'explicit_search' (the default when omitted): someone asked, judged against `context_admission_threshold_explicit`; 'historical_search': the caller wants how things were, so superseded memories are admissible, and in lifecycle mode the claim view is 'historical' unless `lifecycle_view` or `as_of` is given (whatever the admission mode). In filter and strict modes the result may be empty when no memory is worth injecting."
+          },
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecallTaskContext"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the caller is working (repository, branch, module, ...), compared with memory metadata by context admission. Ignored when the bank's `context_admission_mode` is 'off'."
           }
         },
         "type": "object",
@@ -18067,6 +18243,17 @@
             ],
             "title": "Source Facts Truncated",
             "description": "Whether the source_facts map was cut short by the token budget. When true, some IDs in results[].source_fact_ids have no entry in source_facts \u2014 the budget ran out, the references are not dangling. Only set when source facts were requested."
+          },
+          "context_admission": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContextAdmissionSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set only when context admission filtered this recall (bank context_admission_mode filter or strict). abstained=true means the empty results are the answer: candidates were judged and none was relevant to the task."
           }
         },
         "type": "object",
@@ -18377,6 +18564,97 @@
         ],
         "title": "RecallScores",
         "description": "Per-result recall scores from different stages of the pipeline.\n\n``final`` is the value results are ranked by. The others are diagnostic and\ncan be filtered on via the recall ``min_scores`` request parameter. ``semantic``\nand ``keyword`` are the raw per-strategy retrieval scores (``None`` when that\nstrategy did not surface this result); ``reranker`` is the cross-encoder's\nnormalized relevance."
+      },
+      "RecallTaskContext": {
+        "properties": {
+          "repository": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repository",
+            "description": "Stable repository identity, e.g. the normalized git remote 'github.com/acme/payments'"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch",
+            "description": "Current branch"
+          },
+          "module": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Module",
+            "description": "Subsystem or top-level folder the task is in"
+          },
+          "environment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment",
+            "description": "Deployment environment, e.g. 'prod' or 'staging'"
+          },
+          "service": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service",
+            "description": "Service the task concerns"
+          },
+          "task_intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Intent",
+            "description": "Free-text kind of task, e.g. 'debug', 'implementation', 'code review'"
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace",
+            "description": "Workspace or session label"
+          }
+        },
+        "type": "object",
+        "title": "RecallTaskContext",
+        "description": "Where the caller is working, compared with memory metadata by context admission.\n\nEvery key is optional. With the bank's ``context_admission_mode`` at ``off`` the whole object is\nignored. Otherwise each key the server lists in ``HINDSIGHT_API_CONTEXT_ADMISSION_SCOPE_KEYS``\nis compared with the memory metadata key of the same name (match, mismatch or unknown), and a\nmismatch on a key in ``HINDSIGHT_API_CONTEXT_ADMISSION_HARD_SCOPE_KEYS`` rejects the memory in\nstrict mode. ``task_intent`` and ``workspace`` only reach the decision-model scorer."
       },
       "RecoverConsolidationResponse": {
         "properties": {

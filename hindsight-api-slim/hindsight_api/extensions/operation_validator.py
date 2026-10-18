@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from hindsight_api.extensions.base import Extension
 
@@ -202,6 +202,10 @@ class RecallContext:
     # view) and the validity instant. A validator can refuse a historical recall from them.
     lifecycle_view: str | None = None
     as_of: datetime | None = None
+    # Context admission: why the caller recalls (auto_context, explicit_search, historical_search;
+    # None = explicit_search) and what the task is about (repository, branch, module, ...).
+    purpose: str | None = None
+    task_context: dict[str, Any] | None = None
 
 
 @dataclass

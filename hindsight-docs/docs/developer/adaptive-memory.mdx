@@ -260,10 +260,46 @@ Prefer not to downgrade a bank that holds claims. `rank`, `observe` and `off` ke
 - **Transfer.** Export, import and clone carry retention, claims, claim evidence and lifecycle relations, re-keyed onto the target's ids. See [Memory banks](./api/memory-banks#bank-transfer-export--import).
 - **Deletes.** Deleting memories removes their retention rows, events and evidence. A claim whose evidence is all gone reverts to active. Relations stay as tombstones with their snapshots.
 
+## Context admission
+
+The two axes above decide what is believed and what is remembered. A third question is separate from both: what should enter an agent's context for the task in front of it. A memory can be current and well remembered and still be the wrong thing to inject: a joke that shares words with a deploy question, another project's deployment, a debugging session from a different subsystem. Recall returns the best candidates it has, and the best of a bad set is still irrelevant. Context admission is a gate after recall's ranking that judges each top candidate for the task and may admit none. It has its own setting, `context_admission_mode` (off by default, listed under [Context admission](./configuration#context-admission) in the configuration reference), and works with or without adaptive memory.
+
+When lifecycle state is there, the gate uses it without letting it stand in for relevance: a refuted memory is never admitted, a superseded one only for a historical recall, an uncertain one only with a margin above the threshold, and retrievability and importance are two inputs among many. A memory with high stability and no bearing on the task is rejected; a faded memory that answers the question exactly is admitted.
+
+### Purpose and context
+
+A recall request says why it is made (`purpose`) and where the caller works (`context`). See [`purpose` and `context`](./api/recall#purpose-and-context) for the request fields.
+
+| `purpose` | For | Threshold |
+|---|---|---|
+| `auto_context` | Memories injected that nobody asked for, such as a coding agent's first-prompt recall | `context_admission_threshold_auto` (0.6). A query that refers to shared history ("what did we decide", "last time", "do you remember") lowers it by `context_admission_reference_bonus` |
+| `explicit_search` (default) | A person or an agent that asked for memories | `context_admission_threshold_explicit` (0.35) |
+| `historical_search` | How things were | The explicit threshold. Superseded memories are admissible, and in `lifecycle` mode the view is historical unless the request names one |
+
+`context` keys are compared with memory metadata of the same name, each a match, a mismatch or unknown. Soft keys (module, branch, environment, service) move the score and never filter on their own: a decision made on `main` usually still holds on a feature branch. `repository` is a hard key in `strict` mode: when the request and the memory both name one and they differ, the memory is rejected, so another project's memories never reach the context. Any key in `HINDSIGHT_API_CONTEXT_ADMISSION_HARD_SCOPE_KEYS` is compared, whether or not it is also a soft key. An observation carries no metadata of its own, so it is compared on the values of the facts it was consolidated from: it matches when the request's value is among them and mismatches when none of them is it, which keeps another repository's observations out of `strict` recalls too. The keys only work if the same values are written at retain as `metadata` and sent at recall; the [coding-agents integration](/sdks/integrations/coding-agents) stamps `repository`, `branch` and `module` on what it retains and sends them with its automatic recall. MCP recall takes no purpose or context and is judged as `explicit_search`, because an MCP recall is the agent searching on purpose.
+
+### Empty is an answer
+
+In `filter` and `strict`, a recall can come back with `results: []` because no candidate cleared the threshold. That is the gate working, not a failure: injecting the least bad memory is how a joke ends up in a deployment answer. To tell an abstention from an empty bank, read the response's `context_admission` object, present only in these two modes: `abstained` is true when candidates were judged and none was admitted, and `candidates` is 0 when retrieval found nothing to judge. With `"trace": true`, `trace.context_admission` also has `reasons`, which counts the rejections (`wrong_scope`, `below_threshold`, `superseded`, `refuted`, `redundant`, `budget`). `strict` also suppresses near-duplicates (the kept memory's `decisions[]` entry counts them in `duplicates`) and stops at `context_admission_max_memories` memories or `context_admission_max_tokens` tokens. The token budget is filled by value per token; when the memory count is what binds, the most valuable memories are kept first, and a near-duplicate takes the place of its longer twin when only the twin fits.
+
+The deterministic scorer leans on the cross-encoder's score. When recall's reranker scores by rank instead (`reranking: "rrf"`, an `rrf` reranker or a failover onto one, the `typesafe` and `decision_model` rerankers), those scores are positions, which would admit the top of any pool, so the scorer reads the semantic similarity in their place and drops the rank feature; `trace.context_admission.relevance_source` is then `semantic`.
+
+### Rolling it out
+
+1. `PATCH /v1/default/banks/{bank_id}/config` with `{"updates": {"context_admission_mode": "observe"}}`. Nothing a caller sees changes.
+2. Recall with `"trace": true` and the `purpose` and `context` your callers will send, and read `trace.context_admission`:
+   - `decisions[]`: one per judged candidate, with `base_retrieval_score`, `scope_score`, `task_relevance`, `expected_utility`, `truth_status`, `retrievability`, `admission_score`, `admitted`, `reason`, the per-key `scope` result and the scorer's input `features`;
+   - `shadow_final_ids`, `would_drop` and `would_change_top_k`: what `strict` would have returned, and how it differs.
+3. Watch the [metrics](./monitoring#context-admission-metrics): `would_drop_count`, `would_abstain_count`, `would_change_top_k` and `cross_scope_candidates_detected`. Observe simulates `strict`, so it counts hard scope, duplicates and the budget too; `filter` drops fewer.
+4. Move automatic injection to `filter` (or `strict` for hard scope and the budget) once the would-drop memories look right. Keep `purpose: "explicit_search"` where people search, which uses the lower threshold.
+
+While a bank is in `filter` or `strict`, the recalls it gates never count as reinforcement, so a memory cannot earn its own admission by being admitted.
+
 ## Known limitations
 
 - **Oracle is verified statically only.** The Oracle paths (claim CAS, inheritance, archiving, transfer) are covered by SQL-rewriter and fake-connection tests, not yet by runs against a live Oracle 23ai. The periodic maintenance loop does not run on Oracle, so there archiving happens only after consolidations.
 - **Lifecycle classification is only as good as the consolidation model.** The labels come from the consolidation LLM call. A weaker model misses changes (the stale memory stays current) or mislabels them, and the lifecycle prompt and response schema make each consolidation call larger. Track `hindsight_adaptive_memory_lifecycle_transitions_dropped_total` and try `lifecycle` on a representative bank before enabling it widely.
 - **A wrong supersession hides more than one memory.** When an observation is wrongly superseded or refuted, the raw facts it stood on inherit the status and leave current recall too. `GET` the memory to see what retired it, and `PATCH …/lifecycle` with `truth_status: "active"` on the observation to restore it together with the facts that inherited from it.
 - **Bulk deletes cost more, in every mode.** The adaptive tables hold foreign keys to `memory_units`, so each deleted memory is checked against them even when they are empty. Measured on embedded PostgreSQL, deleting 50,000 memories took 1.9 s instead of 0.4 s, about 29 µs more per row. This affects bank deletes, document deletes and chunk replacement on servers with the feature off as well.
+- **Context admission is not calibrated yet.** The deterministic scorer's weights and the two thresholds are hand-set starting values, not fitted to labelled data. Run `observe` first, and fit `HINDSIGHT_API_CONTEXT_ADMISSION_WEIGHTS` on your own recalls from the trace's `features` before relying on `filter`. The deterministic scorer has no signal for humor or casual memories; routing those relies on the `jev` or `hybrid` scorer.
 - **Reinforcement events are not exported.** A transfer carries each memory's resulting state, not the event ledger, so after an import a confirmation re-sent with an old `source_key` reinforces the memory again.

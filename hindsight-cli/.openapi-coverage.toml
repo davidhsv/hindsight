@@ -173,6 +173,8 @@ min_scores = "Complex nested per-stage score floors (semantic/keyword/reranker/f
 temporal_window = "Flattened into --window-start / --window-end on `memory recall`."
 lifecycle_view = "Adaptive memory lifecycle view (current/historical); not exposed in the CLI yet, use the API or the SDKs."
 as_of = "Adaptive memory lifecycle instant; not exposed in the CLI yet, use the API or the SDKs."
+purpose = "Context admission purpose (auto_context/explicit_search/historical_search); not exposed in the CLI yet, use the API or the SDKs."
+context = "Context admission task context (repository, branch, module, ...); not exposed in the CLI yet, use the API or the SDKs."
 
 [fields.reflect]
 include = "Flattened into --include-facts and related flags."

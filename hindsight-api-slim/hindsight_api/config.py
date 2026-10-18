@@ -699,7 +699,7 @@ ENV_RERANKER_GOOGLE_SERVICE_ACCOUNT_KEY = "HINDSIGHT_API_RERANKER_GOOGLE_SERVICE
 
 # Decision model (TypeSafe System One): set up once, shared by every operation that supports
 # one. Separate from the typesafe reranker above, which keeps its own settings. Each operation may override provider/key/model/URL with
-# HINDSIGHT_API_{RECALL,REFLECT,CONSOLIDATION}_DECISION_MODEL_* (see _decision_model_env).
+# HINDSIGHT_API_{RECALL,REFLECT,CONSOLIDATION,CONTEXT_ADMISSION}_DECISION_MODEL_* (see _decision_model_env).
 ENV_DECISION_MODEL_PROVIDER = "HINDSIGHT_API_DECISION_MODEL_PROVIDER"
 ENV_DECISION_MODEL_API_KEY = "HINDSIGHT_API_DECISION_MODEL_API_KEY"
 ENV_DECISION_MODEL_MODEL = "HINDSIGHT_API_DECISION_MODEL_MODEL"
@@ -1150,6 +1150,27 @@ ENV_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS = "HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_AFTE
 ENV_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS = "HINDSIGHT_API_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS"
 ENV_ADAPTIVE_MEMORY_SCOPE_KEYS = "HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS"
 
+# Context admission: the stage that decides which recalled memories enter an agent's
+# context (and may admit none), after retrieval, ranking and the lifecycle view. Prefixed
+# CONTEXT_ADMISSION_ because ADMISSION_* already names HTTP admission control. The first
+# block is hierarchical (overridable per bank), the second static. The scorer's decision
+# model is configured like every operation's: HINDSIGHT_API_CONTEXT_ADMISSION_DECISION_MODEL_*.
+ENV_CONTEXT_ADMISSION_MODE = "HINDSIGHT_API_CONTEXT_ADMISSION_MODE"
+ENV_CONTEXT_ADMISSION_THRESHOLD_AUTO = "HINDSIGHT_API_CONTEXT_ADMISSION_THRESHOLD_AUTO"
+ENV_CONTEXT_ADMISSION_THRESHOLD_EXPLICIT = "HINDSIGHT_API_CONTEXT_ADMISSION_THRESHOLD_EXPLICIT"
+ENV_CONTEXT_ADMISSION_REFERENCE_BONUS = "HINDSIGHT_API_CONTEXT_ADMISSION_REFERENCE_BONUS"
+ENV_CONTEXT_ADMISSION_CANDIDATES = "HINDSIGHT_API_CONTEXT_ADMISSION_CANDIDATES"
+ENV_CONTEXT_ADMISSION_MAX_MEMORIES = "HINDSIGHT_API_CONTEXT_ADMISSION_MAX_MEMORIES"
+ENV_CONTEXT_ADMISSION_MAX_TOKENS = "HINDSIGHT_API_CONTEXT_ADMISSION_MAX_TOKENS"
+ENV_CONTEXT_ADMISSION_MMR_LAMBDA = "HINDSIGHT_API_CONTEXT_ADMISSION_MMR_LAMBDA"
+ENV_CONTEXT_ADMISSION_DUP_SIMILARITY = "HINDSIGHT_API_CONTEXT_ADMISSION_DUP_SIMILARITY"
+ENV_CONTEXT_ADMISSION_SCORER = "HINDSIGHT_API_CONTEXT_ADMISSION_SCORER"
+ENV_CONTEXT_ADMISSION_WEIGHTS = "HINDSIGHT_API_CONTEXT_ADMISSION_WEIGHTS"
+ENV_CONTEXT_ADMISSION_SCOPE_KEYS = "HINDSIGHT_API_CONTEXT_ADMISSION_SCOPE_KEYS"
+ENV_CONTEXT_ADMISSION_HARD_SCOPE_KEYS = "HINDSIGHT_API_CONTEXT_ADMISSION_HARD_SCOPE_KEYS"
+ENV_CONTEXT_ADMISSION_UNCERTAIN_MARGIN = "HINDSIGHT_API_CONTEXT_ADMISSION_UNCERTAIN_MARGIN"
+ENV_CONTEXT_ADMISSION_JEV_WEIGHT = "HINDSIGHT_API_CONTEXT_ADMISSION_JEV_WEIGHT"
+
 # Audit log settings
 # AUDIT_LOG_ENABLED is the deployment-wide default and is overridable per bank
 # (and per tenant) through the bank config API, so auditing can be turned on for
@@ -1511,6 +1532,84 @@ DEFAULT_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS = 3600
 # carry different values for one of these keys are about different scopes, so neither may retire
 # the other in lifecycle consolidation.
 DEFAULT_ADAPTIVE_MEMORY_SCOPE_KEYS: tuple[str, ...] = ("environment", "service", "module")
+# Context admission. Kept in sync with engine.context_admission.models by a guard test;
+# defined here so config stays free of the engine import graph. "off" is the default and
+# must stay byte-identical to a server without the feature; never default to strict.
+CONTEXT_ADMISSION_MODES = ("off", "observe", "filter", "strict")
+DEFAULT_CONTEXT_ADMISSION_MODE = "off"
+CONTEXT_ADMISSION_SCORERS = ("deterministic", "jev", "hybrid")
+DEFAULT_CONTEXT_ADMISSION_SCORER = "deterministic"
+# Admission-score thresholds per request purpose. Automatic injection favours precision
+# (a wrong memory in an unrequested context costs more than a missing one); an explicit
+# search favours recall. historical_search uses the explicit threshold.
+DEFAULT_CONTEXT_ADMISSION_THRESHOLD_AUTO = 0.6
+DEFAULT_CONTEXT_ADMISSION_THRESHOLD_EXPLICIT = 0.35
+# Subtracted from the auto threshold when the query says it is asking about something the
+# user and agent shared before ("last time", "what did we decide", ...).
+DEFAULT_CONTEXT_ADMISSION_REFERENCE_BONUS = 0.15
+# How many of the top-ranked recall results the gate judges; the rest are never admitted.
+DEFAULT_CONTEXT_ADMISSION_CANDIDATES = 30
+DEFAULT_CONTEXT_ADMISSION_MAX_MEMORIES = 10
+DEFAULT_CONTEXT_ADMISSION_MAX_TOKENS = 2000
+# MMR trade-off between a candidate's admission score (1.0) and its novelty against what is
+# already admitted (0.0); and the cosine above which a candidate is a near-duplicate.
+DEFAULT_CONTEXT_ADMISSION_MMR_LAMBDA = 0.7
+DEFAULT_CONTEXT_ADMISSION_DUP_SIMILARITY = 0.92
+# Memory metadata keys compared with the request context (match / mismatch / unknown), and
+# the ones whose mismatch, when both sides are known, rejects a candidate in strict mode.
+DEFAULT_CONTEXT_ADMISSION_SCOPE_KEYS: tuple[str, ...] = ("repository", "module", "environment", "branch", "service")
+DEFAULT_CONTEXT_ADMISSION_HARD_SCOPE_KEYS: tuple[str, ...] = ("repository",)
+# An uncertain claim is admitted only at threshold + this margin.
+DEFAULT_CONTEXT_ADMISSION_UNCERTAIN_MARGIN = 0.1
+# Hybrid scorer: admission = jev_weight * decision-model probability + (1 - jev_weight) * deterministic.
+DEFAULT_CONTEXT_ADMISSION_JEV_WEIGHT = 0.5
+# The deterministic scorer: admission_score = sigmoid(sum(weight * feature)). Flat keys:
+# "bias"; "reranker" (normalized cross-encoder score); "semantic" (cosine); "bm25" (1 when the
+# keyword arm found it); "arm_agreement" ((arms that found it - 1) / 3); "rank" (1 / (1 + rank));
+# "retrievability" / "importance" (value - 0.5 when adaptive memory scored the candidate, else
+# 0); "uncertain" (1 for an uncertain claim); "token_cost" (tokens / 100);
+# "scope_match.<key>" / "scope_mismatch.<key>" (1 when the request context and the memory's
+# metadata agree / disagree on <key>, both known); "fact_type.<type>" (one-hot). A key the map
+# does not name weighs 0. These are hand-set starting values, not a fit; an operator replaces
+# them with constants fitted offline on labelled recalls (the trace carries every feature).
+DEFAULT_CONTEXT_ADMISSION_WEIGHTS: dict[str, float] = {
+    "bias": -3.0,
+    "reranker": 4.0,
+    "semantic": 2.0,
+    "bm25": 0.3,
+    "arm_agreement": 0.4,
+    "rank": 0.6,
+    "retrievability": 0.4,
+    "importance": 0.4,
+    "uncertain": -0.4,
+    "token_cost": -0.1,
+    "scope_match.repository": 0.8,
+    "scope_match.module": 0.6,
+    "scope_match.environment": 0.3,
+    "scope_match.branch": 0.1,
+    "scope_match.service": 0.3,
+    "scope_mismatch.repository": -3.0,
+    "scope_mismatch.module": -1.2,
+    "scope_mismatch.environment": -0.8,
+    "scope_mismatch.branch": -0.2,
+    "scope_mismatch.service": -0.8,
+    "fact_type.world": 0.0,
+    "fact_type.experience": 0.0,
+    "fact_type.observation": 0.0,
+}
+#: The feature names a weights key may use besides the per-key scope and fact-type families.
+CONTEXT_ADMISSION_WEIGHT_FEATURES = (
+    "bias",
+    "reranker",
+    "semantic",
+    "bm25",
+    "arm_agreement",
+    "rank",
+    "retrievability",
+    "importance",
+    "uncertain",
+    "token_cost",
+)
 # Retrieval arms that can be boosted; mirrors fusion.py source_names.
 RECALL_STRATEGY_NAMES = ("semantic", "bm25", "graph", "temporal")
 # User-facing priority levels. Kept in sync with recall_boost.BOOST_LEVELS by a
@@ -1617,8 +1716,13 @@ DEFAULT_RERANKER_ALIBABA_MODEL = "qwen3-rerank"
 
 DEFAULT_RERANKER_GOOGLE_MODEL = "semantic-ranker-default-004"
 
-DecisionModelOperation = Literal["recall", "reflect", "consolidation"]
-DECISION_MODEL_OPERATIONS: tuple[DecisionModelOperation, ...] = ("recall", "reflect", "consolidation")
+DecisionModelOperation = Literal["recall", "reflect", "consolidation", "context_admission"]
+DECISION_MODEL_OPERATIONS: tuple[DecisionModelOperation, ...] = (
+    "recall",
+    "reflect",
+    "consolidation",
+    "context_admission",
+)
 
 
 @dataclass(frozen=True)
@@ -2653,6 +2757,64 @@ def normalize_adaptive_memory_value(field_name: str, value: Any, *, name: str | 
     return value
 
 
+_CONTEXT_ADMISSION_CHOICE_FIELDS: dict[str, tuple[str, ...]] = {"context_admission_mode": CONTEXT_ADMISSION_MODES}
+_CONTEXT_ADMISSION_UNIT_INTERVAL_FIELDS = frozenset(
+    {
+        "context_admission_threshold_auto",
+        "context_admission_threshold_explicit",
+        "context_admission_reference_bonus",
+        "context_admission_mmr_lambda",
+        "context_admission_dup_similarity",
+    }
+)
+_CONTEXT_ADMISSION_POSITIVE_INT_FIELDS = frozenset(
+    {"context_admission_candidates", "context_admission_max_memories", "context_admission_max_tokens"}
+)
+#: The hierarchical context-admission fields; every one carries a value constraint.
+CONTEXT_ADMISSION_CONSTRAINED_FIELDS = frozenset(
+    _CONTEXT_ADMISSION_CHOICE_FIELDS.keys()
+    | _CONTEXT_ADMISSION_UNIT_INTERVAL_FIELDS
+    | _CONTEXT_ADMISSION_POSITIVE_INT_FIELDS
+)
+
+
+def normalize_context_admission_value(field_name: str, value: Any, *, name: str | None = None) -> Any:
+    """Validate one hierarchical context-admission value and return its normalized form.
+
+    One rule set for both doors, like :func:`normalize_adaptive_memory_value`: the env
+    (``HindsightConfig.validate``, reported by env name) and the bank-config API (by field name).
+    """
+    label = name or field_name
+    choices = _CONTEXT_ADMISSION_CHOICE_FIELDS.get(field_name)
+    if choices is not None:
+        normalized = value.strip().lower() if isinstance(value, str) else value
+        if normalized not in choices:
+            raise ValueError(f"{label} must be one of {', '.join(choices)}, got {value!r}")
+        return normalized
+    if field_name in _CONTEXT_ADMISSION_UNIT_INTERVAL_FIELDS:
+        _require_number_in_range(label, value, minimum=0.0, maximum=1.0)
+    elif field_name in _CONTEXT_ADMISSION_POSITIVE_INT_FIELDS:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{label} must be an integer >= 1, got {value!r}")
+    return value
+
+
+def context_admission_weight_keys(scope_keys: Any) -> frozenset[str]:
+    """Every key ``context_admission_weights`` may name, given the configured scope keys."""
+    keys = [k for k in (scope_keys or ()) if isinstance(k, str)]
+    return frozenset(
+        {
+            # The defaults' own keys stay valid when the scope keys are narrowed: weights are
+            # merged over the defaults, and a weight for a key nobody compares is simply unused.
+            *DEFAULT_CONTEXT_ADMISSION_WEIGHTS,
+            *CONTEXT_ADMISSION_WEIGHT_FEATURES,
+            *(f"scope_match.{k}" for k in keys),
+            *(f"scope_mismatch.{k}" for k in keys),
+            *(f"fact_type.{t}" for t in ("world", "experience", "observation")),
+        }
+    )
+
+
 def validate_adaptive_memory_stability_bounds(
     base_stability_days: Any,
     max_stability_days: Any,
@@ -3674,6 +3836,21 @@ class HindsightConfig:
     adaptive_memory_prune_after_days: float
     adaptive_memory_maintenance_interval_seconds: int
     adaptive_memory_scope_keys: list[str]
+    context_admission_mode: str
+    context_admission_threshold_auto: float
+    context_admission_threshold_explicit: float
+    context_admission_reference_bonus: float
+    context_admission_candidates: int
+    context_admission_max_memories: int
+    context_admission_max_tokens: int
+    context_admission_mmr_lambda: float
+    context_admission_dup_similarity: float
+    context_admission_scorer: str
+    context_admission_weights: dict[str, float]
+    context_admission_scope_keys: list[str]
+    context_admission_hard_scope_keys: list[str]
+    context_admission_uncertain_margin: float
+    context_admission_jev_weight: float
     reranker_cohere_api_key: str | None
     reranker_cohere_model: str
     reranker_cohere_base_url: str | None
@@ -4129,6 +4306,10 @@ class HindsightConfig:
     consolidation_decision_model_api_key: str | None = None
     consolidation_decision_model_model: str | None = None
     consolidation_decision_model_base_url: str | None = None
+    context_admission_decision_model_provider: str | None = None
+    context_admission_decision_model_api_key: str | None = None
+    context_admission_decision_model_model: str | None = None
+    context_admission_decision_model_base_url: str | None = None
 
     # Class-level sets for configuration categorization
 
@@ -4207,6 +4388,8 @@ class HindsightConfig:
         "reflect_decision_model_base_url",
         "consolidation_decision_model_api_key",
         "consolidation_decision_model_base_url",
+        "context_admission_decision_model_api_key",
+        "context_admission_decision_model_base_url",
         # chatgpt: points at a directory holding an OAuth grant.
         "llm_chatgpt_home",
     }
@@ -4293,6 +4476,18 @@ class HindsightConfig:
         "adaptive_memory_max_stability_days",
         "adaptive_memory_default_view",
         "adaptive_memory_historical_cues",
+        # Context admission. Per bank so one bank can observe or filter while the rest stay
+        # off, with its own thresholds and budget; the scorer, its weights and the scope keys
+        # stay server-level.
+        "context_admission_mode",
+        "context_admission_threshold_auto",
+        "context_admission_threshold_explicit",
+        "context_admission_reference_bonus",
+        "context_admission_candidates",
+        "context_admission_max_memories",
+        "context_admission_max_tokens",
+        "context_admission_mmr_lambda",
+        "context_admission_dup_similarity",
         # Disposition settings
         "disposition_skepticism",
         "disposition_literalism",
@@ -4544,6 +4739,7 @@ class HindsightConfig:
             raise ValueError(f"Invalid bm25_max_query_terms: {self.bm25_max_query_terms}. Must be >= 0")
 
         self._validate_adaptive_memory()
+        self._validate_context_admission()
 
         # Validate bedrock_service_tier
         valid_bedrock_tiers = (None, "flex", "priority", "reserved")
@@ -4642,6 +4838,46 @@ class HindsightConfig:
             raise ValueError(
                 f"{ENV_OPERATION_CLEANUP_BATCH_SIZE} must be >= 1, got {self.operation_cleanup_batch_size}"
             )
+
+    def _validate_context_admission(self) -> None:
+        """Range-check the context-admission settings, strictly (a typo in the mode fails start-up).
+
+        Per-bank values are held to the same rules by ``normalize_context_admission_value`` in
+        the bank-config API.
+        """
+        for field_name in sorted(CONTEXT_ADMISSION_CONSTRAINED_FIELDS):
+            setattr(
+                self,
+                field_name,
+                normalize_context_admission_value(
+                    field_name, getattr(self, field_name), name=f"HINDSIGHT_API_{field_name.upper()}"
+                ),
+            )
+        scorer = (self.context_admission_scorer or "").strip().lower()
+        if scorer not in CONTEXT_ADMISSION_SCORERS:
+            raise ValueError(
+                f"{ENV_CONTEXT_ADMISSION_SCORER} must be one of {', '.join(CONTEXT_ADMISSION_SCORERS)}, "
+                f"got {self.context_admission_scorer!r}"
+            )
+        self.context_admission_scorer = scorer
+        for env_name, value in (
+            (ENV_CONTEXT_ADMISSION_UNCERTAIN_MARGIN, self.context_admission_uncertain_margin),
+            (ENV_CONTEXT_ADMISSION_JEV_WEIGHT, self.context_admission_jev_weight),
+        ):
+            _require_number_in_range(env_name, value, minimum=0.0, maximum=1.0)
+        weights = self.context_admission_weights
+        if not isinstance(weights, dict):
+            raise ValueError(f"{ENV_CONTEXT_ADMISSION_WEIGHTS} must be a JSON object, got {type(weights).__name__}")
+        # Closed vocabulary: a misspelt feature would be accepted and then weigh nothing.
+        # Hard-scope keys are compared too (they gate even when they are not soft-scope keys), so
+        # a weight may name them.
+        allowed = context_admission_weight_keys(
+            [*(self.context_admission_scope_keys or ()), *(self.context_admission_hard_scope_keys or ())]
+        )
+        if unknown := sorted(set(weights) - allowed):
+            raise ValueError(f"{ENV_CONTEXT_ADMISSION_WEIGHTS} has unknown keys {unknown}; allowed: {sorted(allowed)}")
+        for key, value in weights.items():
+            _require_number_in_range(f"{ENV_CONTEXT_ADMISSION_WEIGHTS}[{key!r}]", value, minimum=-math.inf)
 
     def _validate_adaptive_memory(self) -> None:
         """Range-check the adaptive-memory settings, strictly.
@@ -5366,6 +5602,69 @@ class HindsightConfig:
             # An unset or empty value means the default keys.
             adaptive_memory_scope_keys=_parse_str_list(os.getenv(ENV_ADAPTIVE_MEMORY_SCOPE_KEYS) or "")
             or list(DEFAULT_ADAPTIVE_MEMORY_SCOPE_KEYS),
+            context_admission_mode=(
+                (os.getenv(ENV_CONTEXT_ADMISSION_MODE) or DEFAULT_CONTEXT_ADMISSION_MODE).strip().lower()
+            ),
+            context_admission_threshold_auto=_parse_non_negative_float(
+                ENV_CONTEXT_ADMISSION_THRESHOLD_AUTO,
+                os.getenv(ENV_CONTEXT_ADMISSION_THRESHOLD_AUTO),
+                DEFAULT_CONTEXT_ADMISSION_THRESHOLD_AUTO,
+            ),
+            context_admission_threshold_explicit=_parse_non_negative_float(
+                ENV_CONTEXT_ADMISSION_THRESHOLD_EXPLICIT,
+                os.getenv(ENV_CONTEXT_ADMISSION_THRESHOLD_EXPLICIT),
+                DEFAULT_CONTEXT_ADMISSION_THRESHOLD_EXPLICIT,
+            ),
+            context_admission_reference_bonus=_parse_non_negative_float(
+                ENV_CONTEXT_ADMISSION_REFERENCE_BONUS,
+                os.getenv(ENV_CONTEXT_ADMISSION_REFERENCE_BONUS),
+                DEFAULT_CONTEXT_ADMISSION_REFERENCE_BONUS,
+            ),
+            context_admission_candidates=_parse_positive_int(
+                ENV_CONTEXT_ADMISSION_CANDIDATES,
+                os.getenv(ENV_CONTEXT_ADMISSION_CANDIDATES),
+                DEFAULT_CONTEXT_ADMISSION_CANDIDATES,
+            ),
+            context_admission_max_memories=_parse_positive_int(
+                ENV_CONTEXT_ADMISSION_MAX_MEMORIES,
+                os.getenv(ENV_CONTEXT_ADMISSION_MAX_MEMORIES),
+                DEFAULT_CONTEXT_ADMISSION_MAX_MEMORIES,
+            ),
+            context_admission_max_tokens=_parse_positive_int(
+                ENV_CONTEXT_ADMISSION_MAX_TOKENS,
+                os.getenv(ENV_CONTEXT_ADMISSION_MAX_TOKENS),
+                DEFAULT_CONTEXT_ADMISSION_MAX_TOKENS,
+            ),
+            context_admission_mmr_lambda=_parse_non_negative_float(
+                ENV_CONTEXT_ADMISSION_MMR_LAMBDA,
+                os.getenv(ENV_CONTEXT_ADMISSION_MMR_LAMBDA),
+                DEFAULT_CONTEXT_ADMISSION_MMR_LAMBDA,
+            ),
+            context_admission_dup_similarity=_parse_non_negative_float(
+                ENV_CONTEXT_ADMISSION_DUP_SIMILARITY,
+                os.getenv(ENV_CONTEXT_ADMISSION_DUP_SIMILARITY),
+                DEFAULT_CONTEXT_ADMISSION_DUP_SIMILARITY,
+            ),
+            context_admission_scorer=(
+                (os.getenv(ENV_CONTEXT_ADMISSION_SCORER) or DEFAULT_CONTEXT_ADMISSION_SCORER).strip().lower()
+            ),
+            context_admission_weights=_parse_json_number_map(
+                ENV_CONTEXT_ADMISSION_WEIGHTS, DEFAULT_CONTEXT_ADMISSION_WEIGHTS
+            ),
+            context_admission_scope_keys=_parse_str_list(os.getenv(ENV_CONTEXT_ADMISSION_SCOPE_KEYS) or "")
+            or list(DEFAULT_CONTEXT_ADMISSION_SCOPE_KEYS),
+            context_admission_hard_scope_keys=_parse_str_list(os.getenv(ENV_CONTEXT_ADMISSION_HARD_SCOPE_KEYS) or "")
+            or list(DEFAULT_CONTEXT_ADMISSION_HARD_SCOPE_KEYS),
+            context_admission_uncertain_margin=_parse_non_negative_float(
+                ENV_CONTEXT_ADMISSION_UNCERTAIN_MARGIN,
+                os.getenv(ENV_CONTEXT_ADMISSION_UNCERTAIN_MARGIN),
+                DEFAULT_CONTEXT_ADMISSION_UNCERTAIN_MARGIN,
+            ),
+            context_admission_jev_weight=_parse_non_negative_float(
+                ENV_CONTEXT_ADMISSION_JEV_WEIGHT,
+                os.getenv(ENV_CONTEXT_ADMISSION_JEV_WEIGHT),
+                DEFAULT_CONTEXT_ADMISSION_JEV_WEIGHT,
+            ),
             # Cohere reranker (with backward-compatible fallback to shared API key)
             reranker_cohere_api_key=os.getenv(ENV_RERANKER_COHERE_API_KEY) or os.getenv(ENV_COHERE_API_KEY),
             reranker_cohere_model=os.getenv(ENV_RERANKER_COHERE_MODEL, DEFAULT_RERANKER_COHERE_MODEL),

@@ -671,6 +671,18 @@ from .adaptive.scoring import (
     superseded_source_ids,
 )
 from .adaptive.settings import AdaptiveSettings
+from .context_admission import (
+    PURPOSES,
+    AdmissionMode,
+    ContextAdmissionRecall,
+    ContextAdmissionSettings,
+    Purpose,
+    ScorerKind,
+    clean_task_context,
+    detect_reference_signal,
+    jev_client,
+    memory_metadata,
+)
 from .fact_budget import select_facts_within_budget
 from .llm_wrapper import (
     ConfiguredLLMProvider,
@@ -727,6 +739,7 @@ from .remote_retry import is_transient_remote_error
 from .response_models import (
     VALID_RECALL_FACT_TYPES,
     ConsolidationStrategiesPreview,
+    ContextAdmissionSummary,
     DryRunExtractionResult,
     EntityState,
     LLMCallTrace,
@@ -778,7 +791,13 @@ from .search.tags import (
     tags_satisfy_groups,
     tags_writable,
 )
-from .search.trace import AdaptiveTraceInfo, LifecycleFilteredResult, LifecycleTraceInfo
+from .search.trace import (
+    AdaptiveTraceInfo,
+    ContextAdmissionCandidateTrace,
+    ContextAdmissionTraceInfo,
+    LifecycleFilteredResult,
+    LifecycleTraceInfo,
+)
 from .search.types import MergedCandidate, ScoredResult
 from .source_facts import select_source_facts_within_budget
 from .source_scope import visible_document_ids
@@ -9170,6 +9189,8 @@ class MemoryEngine(MemoryEngineInterface):
         reranking: RecallReranking = "cross_encoder",
         lifecycle_view: str | None = None,
         as_of: datetime | None = None,
+        purpose: str | None = None,
+        task_context: Mapping[str, Any] | None = None,
         _external: bool = False,
         _exclude_retired: bool = False,
     ) -> RecallResultModel:
@@ -9229,6 +9250,17 @@ class MemoryEngine(MemoryEngineInterface):
                   kept iff its claim's validity interval contains it; refuted and merge-retired
                   memories never are. Wins over ``lifecycle_view``. Lifecycle mode only. It does
                   not move the ranking clock, which stays ``question_date``.
+            purpose: Why the caller recalls: ``"auto_context"`` (memories injected into an agent's
+                  context unasked; the context-admission gate favours precision), ``"explicit_search"``
+                  (the default; someone asked, so it favours recall) or ``"historical_search"`` (how
+                  things were: superseded memories are admissible, and in lifecycle mode the claim
+                  view is ``historical`` unless ``lifecycle_view`` or ``as_of`` names another).
+                  Anything else is a 422.
+            task_context: What the task is about: ``repository``, ``branch``, ``module``,
+                  ``environment`` (compared with the memories' metadata keys of the same names),
+                  ``task_intent`` and ``workspace``. Non-string and empty values are ignored. Read
+                  only by the context-admission gate, which runs only for an external recall in a
+                  bank whose ``context_admission_mode`` is not ``off``.
             _external: This is a final, external recall (the HTTP and MCP recall endpoints pass
                   True; nothing else may). Its returned memories may be reinforced as
                   ``final_external_recall`` evidence, in the background, when the bank
@@ -9316,6 +9348,17 @@ class MemoryEngine(MemoryEngineInterface):
             )
         if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
             as_of = as_of.replace(tzinfo=UTC)
+        if purpose is not None and purpose not in PURPOSES:
+            from hindsight_api.extensions.operation_validator import OperationValidationError
+
+            raise OperationValidationError(
+                f"Invalid purpose '{purpose}'. Must be one of: {', '.join(PURPOSES)}",
+                status_code=422,
+            )
+        request_purpose = Purpose(purpose) if purpose is not None else Purpose.EXPLICIT_SEARCH
+        # A historical search reads the claims' history unless the request names a view itself.
+        if request_purpose is Purpose.HISTORICAL_SEARCH and lifecycle_view is None and as_of is None:
+            lifecycle_view = "historical"
 
         if (
             min_scores is not None
@@ -9355,6 +9398,8 @@ class MemoryEngine(MemoryEngineInterface):
                 tag_groups=tag_groups,
                 lifecycle_view=lifecycle_view,
                 as_of=as_of,
+                purpose=purpose,
+                task_context=dict(task_context) if task_context is not None else None,
             )
             _t0 = time.perf_counter()
             result = await self._validate_operation(self._operation_validator.validate_recall(ctx))
@@ -9432,6 +9477,22 @@ class MemoryEngine(MemoryEngineInterface):
             )
             if _adaptive.effective_mode.loads_state:
                 adaptive_settings = _adaptive
+        # Context admission, likewise from the config dict in hand: only for an external recall,
+        # and None unless the bank's mode is not off, so a mode-off recall pays one lookup.
+        context_admission: ContextAdmissionRecall | None = None
+        if _external and budget_config_dict.get("context_admission_mode") not in (None, "off"):
+            _admission_settings = ContextAdmissionSettings.resolve(budget_config_dict, static_config)
+            if _admission_settings.mode is not AdmissionMode.OFF:
+                context_admission = ContextAdmissionRecall(
+                    settings=_admission_settings,
+                    purpose=request_purpose,
+                    task_context=clean_task_context(task_context),
+                    query=query,
+                    reference_signal=(
+                        detect_reference_signal(query) if request_purpose is Purpose.AUTO_CONTEXT else None
+                    ),
+                    count_tokens=CachedTokenCounter(count_tokens),
+                )
         # The historical-cue detector runs only for an external lifecycle-mode recall that named
         # no view of its own, in a bank that switched it on (adaptive_memory_historical_cues).
         detect_historical_cues = bool(
@@ -9519,6 +9580,7 @@ class MemoryEngine(MemoryEngineInterface):
                                 and adaptive_settings.effective_mode.lifecycle
                                 else {}
                             ),
+                            **({"context_admission": context_admission} if context_admission is not None else {}),
                         )
                         get_metrics_collector().record_recall_phase(
                             "search_with_retries", time.perf_counter() - _t0_swr2, diagnostic=True
@@ -9617,6 +9679,16 @@ class MemoryEngine(MemoryEngineInterface):
                             logger.warning(f"Post-recall hook error (non-fatal): {hook_err}")
                     raise Exception(error_msg)
 
+            # Filter and strict say what the gate decided, so an abstention reads differently from
+            # an empty bank; off and observe leave the payload as it was.
+            if result is not None and context_admission is not None and context_admission.mode.changes_results:
+                admission_outcome = context_admission.outcome
+                result.context_admission = ContextAdmissionSummary(
+                    abstained=admission_outcome.abstained if admission_outcome is not None else False,
+                    candidates=len(admission_outcome.decisions) if admission_outcome is not None else 0,
+                    admitted=len(admission_outcome.admitted_ids) if admission_outcome is not None else 0,
+                )
+
             # The SQL-store half of the failure-path re-check above. A bank deleted by another
             # process within the cache TTL does not FAIL here -- its rows are gone, so the recall
             # answers empty, indistinguishable from a healthy empty bank. Only an empty SQL recall
@@ -9631,7 +9703,13 @@ class MemoryEngine(MemoryEngineInterface):
 
             # Once, after the retry loop, for what the caller actually receives.
             if _external and adaptive_settings is not None and result is not None and result.results:
-                self._submit_recall_reinforcement(bank_id, result.results, adaptive_settings, question_date)
+                self._submit_recall_reinforcement(
+                    bank_id,
+                    result.results,
+                    adaptive_settings,
+                    question_date,
+                    context_admission_mode=context_admission.mode.value if context_admission is not None else None,
+                )
 
             # Call post-operation hook for success
             if self._operation_validator and result is not None:
@@ -9671,15 +9749,17 @@ class MemoryEngine(MemoryEngineInterface):
         results: list[MemoryFact],
         settings: AdaptiveSettings,
         question_date: datetime | None,
+        *,
+        context_admission_mode: str | None = None,
     ) -> None:
         """Schedule ``final_external_recall`` events for a final recall's results; never raises.
 
         Timed at the recall's scoring clock, capped at the wall clock: a historical
         ``query_timestamp`` dates the evidence when the question was asked, and a future one cannot
-        reinforce a memory ahead of now.
+        reinforce a memory ahead of now. Never while context admission filters the recall.
         """
         try:
-            if not recall_reinforcement_allowed(settings):
+            if not recall_reinforcement_allowed(settings, context_admission_mode=context_admission_mode):
                 return
             event_time = min(_recall_scoring_now(question_date), adaptive_clock.utcnow())
             events = usage_events(
@@ -9810,6 +9890,176 @@ class MemoryEngine(MemoryEngineInterface):
                 archive_suppressed=list(adaptive.archive_suppressed) or None,
             )
         adaptive.scoring_seconds += time.perf_counter() - start
+
+    async def _apply_context_admission(
+        self,
+        admission: ContextAdmissionRecall,
+        bank_id: str,
+        backend,
+        tracer: "SearchTracer",
+        scored_results: list[ScoredResult],
+        *,
+        historical: bool,
+        rank_based_relevance: bool,
+        adaptive: AdaptiveRecall | None,
+        log_buffer: list[str],
+    ) -> list[ScoredResult]:
+        """Judge the top candidates and return the list the recall tail continues with.
+
+        Filter and strict return the admitted candidates (possibly none); observe returns
+        ``scored_results`` unchanged and keeps the admitted ones as its shadow. The embeddings for
+        redundancy suppression, and the source facts an observation's scope is derived from, are
+        read on their own connections, outside the budgeted retrieval block, and only for the
+        candidates that need them. Timed as the ``context_admission`` phase.
+        """
+        from .memories import get_memories
+
+        start = time.perf_counter()
+        store = get_memories()
+
+        async def load_embeddings(memory_ids: list[str]) -> dict[str, list[float]]:
+            async with acquire_with_retry(backend) as conn:
+                return await store.load_embeddings(conn, bank_id=bank_id, memory_ids=memory_ids)
+
+        async def load_source_metadata(observations: list[ScoredResult]) -> dict[str, list[dict]]:
+            # Source ids a backend already carried on the result are used as they are; the rest
+            # come from one read of the observations, and every source's metadata from one more.
+            sources_by_obs = {
+                sr.id: [str(s) for s in sr.retrieval.source_memory_ids]
+                for sr in observations
+                if sr.retrieval.source_memory_ids is not None
+            }
+            async with self._store_read_conn(bank_id) as conn:
+                missing = [str(uuid.UUID(sr.id)) for sr in observations if sr.id not in sources_by_obs]
+                if missing:
+                    for m in await store.get_memories(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=missing):
+                        if m.fact_type == "observation":
+                            sources_by_obs[m.unit_id] = [str(s) for s in m.source_memory_ids or []]
+                source_ids = sorted({s for ids in sources_by_obs.values() for s in ids})
+                metadata_by_id = (
+                    {
+                        m.unit_id: memory_metadata(m.metadata)
+                        for m in await store.get_memories(
+                            conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=source_ids
+                        )
+                    }
+                    if source_ids
+                    else {}
+                )
+            return {
+                obs_id: [dict(metadata_by_id[s]) for s in ids if s in metadata_by_id]
+                for obs_id, ids in sources_by_obs.items()
+            }
+
+        settings = admission.settings
+        outcome = await admission.decide(
+            scored_results,
+            historical=historical,
+            load_embeddings=load_embeddings,
+            jev=jev_client() if settings.scorer is not ScorerKind.DETERMINISTIC else None,
+            load_source_metadata=load_source_metadata,
+            rank_based_relevance=rank_based_relevance,
+        )
+        kept = admission.apply(scored_results)
+        if admission.mode.changes_results and adaptive is not None and adaptive.counterfactual is not None:
+            # The factor-free replay is compared over the same admitted set the recall returns.
+            admitted = set(outcome.admitted_ids)
+            adaptive.counterfactual = [sr for sr in adaptive.counterfactual if sr.id in admitted]
+        tracer.add_phase_metric(
+            "context_admission",
+            time.perf_counter() - start,
+            {
+                "mode": admission.mode.value,
+                "scorer": settings.scorer.value,
+                "candidates": len(outcome.decisions),
+                "admitted": len(outcome.admitted_ids),
+                "abstained": outcome.abstained,
+            },
+        )
+        log_buffer.append(
+            f"  [4.95] Context admission [{admission.mode.value}, {settings.scorer.value}"
+            f"{', relevance from semantic' if rank_based_relevance else ''}"
+            f"{', jev failed: ' + outcome.jev_error if outcome.jev_error else ''}]: admitted "
+            f"{len(outcome.admitted_ids)} of {len(outcome.decisions)} (threshold {outcome.threshold:.2f}"
+            f"{', abstained' if outcome.abstained else ''})"
+        )
+        return kept
+
+    def _finish_context_admission(
+        self,
+        admission: ContextAdmissionRecall,
+        tracer: "SearchTracer",
+        *,
+        enable_trace: bool,
+        bank_id: str,
+        final_ids: list[str],
+        prefer_observations: bool,
+        rerank_limit: int,
+        max_tokens: int,
+    ) -> None:
+        """Record the gate's metrics (and, observe mode, its replayed tail) and the trace summary."""
+        outcome = admission.outcome
+        if outcome is None:
+            return
+        observed = admission.finish(
+            final_ids, prefer_observations=prefer_observations, rerank_limit=rerank_limit, max_tokens=max_tokens
+        )
+        reasons = outcome.reason_counts()
+        cross_scope = outcome.cross_scope_candidates(admission.settings.hard_scope_keys)
+        get_metrics_collector().record_context_admission(
+            mode=admission.mode.value,
+            scorer=outcome.scorer.value,
+            bank_id=bank_id,
+            candidates=len(outcome.decisions),
+            admitted=len(outcome.admitted_ids),
+            abstained=outcome.abstained,
+            rejected=reasons,
+            cross_scope_candidates=cross_scope,
+            would_drop=observed.would_drop if observed is not None else None,
+            would_abstain=observed.would_abstain if observed is not None else None,
+            would_change_top_k=observed.would_change_top_k if observed is not None else None,
+        )
+        # `enable_trace`, NOT `if tracer`: see the tracer construction in _search_with_retries.
+        if enable_trace:
+            tracer.context_admission = ContextAdmissionTraceInfo(
+                mode=admission.mode.value,
+                scorer=outcome.scorer.value,
+                purpose=admission.purpose.value,
+                threshold=outcome.threshold,
+                historical=admission.historical,
+                reference_signal=outcome.reference_signal,
+                candidates=len(outcome.decisions),
+                admitted=len(outcome.admitted_ids),
+                abstained=outcome.abstained,
+                reasons=reasons,
+                cross_scope_candidates=cross_scope,
+                decisions=[
+                    ContextAdmissionCandidateTrace(
+                        memory_id=d.memory_id,
+                        base_retrieval_score=d.base_retrieval_score,
+                        scope_score=d.scope_score,
+                        task_relevance=d.task_relevance,
+                        expected_utility=d.expected_utility,
+                        truth_status=d.truth_status,
+                        retrievability=d.retrievability,
+                        admission_score=d.admission_score,
+                        admitted=d.admitted,
+                        reason=d.reason.value,
+                        tokens=d.tokens,
+                        duplicates=d.duplicates,
+                        scope={k: v.value for k, v in d.scope.items()},
+                        features=dict(d.features),
+                    )
+                    for d in outcome.decisions
+                ],
+                shadow_final_ids=observed.shadow_ids if observed is not None else None,
+                would_change_top_k=observed.would_change_top_k if observed is not None else None,
+                would_drop=observed.would_drop if observed is not None else None,
+                jev_error=outcome.jev_error,
+                embeddings_error=outcome.embeddings_error,
+                relevance_source=outcome.relevance_source,
+                scope_error=outcome.scope_error,
+            )
 
     async def _apply_lifecycle_view(
         self,
@@ -9952,6 +10202,7 @@ class MemoryEngine(MemoryEngineInterface):
         as_of: datetime | None = None,
         detect_historical_cues: bool = False,
         exclude_retired: bool = False,
+        context_admission: ContextAdmissionRecall | None = None,
     ) -> RecallResultModel:
         """
         Search implementation with modular retrieval and reranking.
@@ -9988,6 +10239,8 @@ class MemoryEngine(MemoryEngineInterface):
             exclude_retired: Drop superseded and refuted memories inside the store's retrieval
                 arms, before their limits (lifecycle mode; consolidation's live pool), so retired
                 near-twins cannot take the slots of live ones
+            context_admission: The recall's context-admission gate, or None when it does not run
+                (an internal recall, or a bank whose context_admission_mode is off)
 
         Returns:
             RecallResultModel with results, trace, optional entities, and optional chunks
@@ -10019,6 +10272,8 @@ class MemoryEngine(MemoryEngineInterface):
         )
         tracer.phases_only = not enable_trace
         tracer.start()
+        if context_admission is not None:
+            context_admission.reset()
 
         backend_acquire_start = time.perf_counter()
         backend = await self._get_read_backend()
@@ -10094,72 +10349,80 @@ class MemoryEngine(MemoryEngineInterface):
             from .memories import get_memories as _get_memories_for_full_recall
 
             _full_start = time.perf_counter()
-            _store_result = await _get_memories_for_full_recall().full_recall(
-                FullRecallRequest(
-                    bank_id=bank_id,
-                    fact_types=list(fact_type),
-                    query_embedding=str(query_embedding),
-                    query_text=query,
-                    limit=thinking_budget,
-                    # The field is declared `tuple[datetime, datetime] | None`, and a store that
-                    # claims the recall reads it as one. `temporal_window` is a `TemporalWindow`
-                    # here, so it is unpacked at the boundary rather than handed over as the model
-                    # -- the same conversion the pipeline below does for `recall_unified`.
-                    # `FullRecallRequest` does not validate at construction, so passing the model
-                    # through surfaces only inside the store, as a TypeError on the first index.
-                    temporal_window=(
-                        (temporal_window.start, temporal_window.end) if temporal_window is not None else None
-                    ),
-                    tags=tags,
-                    tags_match=tags_match,
-                    tag_groups=tag_groups,
-                    created_after=created_after,
-                    created_before=created_before,
-                    min_semantic=min_scores.semantic if min_scores else None,
-                    min_keyword=min_scores.keyword if min_scores else None,
-                    enable_text_search=enable_text_search,
-                    enable_graph=enable_graph_retrieval,
-                    reranking=reranking,
-                    reranker_provider=getattr(self._cross_encoder_reranker.cross_encoder, "primary_provider_name", ""),
-                    reranker_max_candidates=(
-                        reranker_max_candidates
-                        if reranker_max_candidates is not None
-                        else get_config().reranker_max_candidates
-                    ),
-                    per_source_cap=get_config().recall_max_candidates_per_source,
-                    strategy_boosts=get_config().recall_strategy_boosts,
-                    recency_decay_function=get_config().recency_decay_function,
-                    recency_decay_linear_window_days=get_config().recency_decay_linear_window_days,
-                    recency_decay_halflife_days=get_config().recency_decay_halflife_days,
-                    # Resolved here, not in the store: `question_date` overrides "now", and two
-                    # clocks would make an identical request score differently on the two paths.
-                    now=_recall_scoring_now(question_date),
-                    min_reranker=min_scores.reranker if min_scores else None,
-                    min_final=min_scores.final if min_scores else None,
-                    truncate_to=thinking_budget * 2,
-                    max_tokens=max_tokens,
-                    tokenizer_encoding=get_config().tokenizer_encoding,
-                    include_entities=include_entities,
-                    include_chunks=include_chunks,
-                    max_chunk_tokens=max_chunk_tokens,
-                    # An observation carries its source ids, so the store answers all three of
-                    # these itself: the dedup, the provenance, and the chunks an observation has
-                    # none of and inherits from its sources.
-                    prefer_observations=prefer_observations,
-                    include_source_facts=include_source_facts,
-                    max_source_facts_tokens=max_source_facts_tokens,
-                    max_source_facts_tokens_per_observation=max_source_facts_tokens_per_observation,
-                    # Lifecycle mode only (None/False otherwise, so every other request is the one
-                    # a store already answers). A store that cannot apply the claim view declines.
-                    lifecycle_view=(
-                        (lifecycle_view or adaptive_settings.default_view)
+            # A gated recall is never offered: the admission gate judges the candidates this
+            # pipeline holds, so a store answering the whole recall would skip it.
+            _store_result = (
+                None
+                if context_admission is not None
+                else await _get_memories_for_full_recall().full_recall(
+                    FullRecallRequest(
+                        bank_id=bank_id,
+                        fact_types=list(fact_type),
+                        query_embedding=str(query_embedding),
+                        query_text=query,
+                        limit=thinking_budget,
+                        # The field is declared `tuple[datetime, datetime] | None`, and a store that
+                        # claims the recall reads it as one. `temporal_window` is a `TemporalWindow`
+                        # here, so it is unpacked at the boundary rather than handed over as the model
+                        # -- the same conversion the pipeline below does for `recall_unified`.
+                        # `FullRecallRequest` does not validate at construction, so passing the model
+                        # through surfaces only inside the store, as a TypeError on the first index.
+                        temporal_window=(
+                            (temporal_window.start, temporal_window.end) if temporal_window is not None else None
+                        ),
+                        tags=tags,
+                        tags_match=tags_match,
+                        tag_groups=tag_groups,
+                        created_after=created_after,
+                        created_before=created_before,
+                        min_semantic=min_scores.semantic if min_scores else None,
+                        min_keyword=min_scores.keyword if min_scores else None,
+                        enable_text_search=enable_text_search,
+                        enable_graph=enable_graph_retrieval,
+                        reranking=reranking,
+                        reranker_provider=getattr(
+                            self._cross_encoder_reranker.cross_encoder, "primary_provider_name", ""
+                        ),
+                        reranker_max_candidates=(
+                            reranker_max_candidates
+                            if reranker_max_candidates is not None
+                            else get_config().reranker_max_candidates
+                        ),
+                        per_source_cap=get_config().recall_max_candidates_per_source,
+                        strategy_boosts=get_config().recall_strategy_boosts,
+                        recency_decay_function=get_config().recency_decay_function,
+                        recency_decay_linear_window_days=get_config().recency_decay_linear_window_days,
+                        recency_decay_halflife_days=get_config().recency_decay_halflife_days,
+                        # Resolved here, not in the store: `question_date` overrides "now", and two
+                        # clocks would make an identical request score differently on the two paths.
+                        now=_recall_scoring_now(question_date),
+                        min_reranker=min_scores.reranker if min_scores else None,
+                        min_final=min_scores.final if min_scores else None,
+                        truncate_to=thinking_budget * 2,
+                        max_tokens=max_tokens,
+                        tokenizer_encoding=get_config().tokenizer_encoding,
+                        include_entities=include_entities,
+                        include_chunks=include_chunks,
+                        max_chunk_tokens=max_chunk_tokens,
+                        # An observation carries its source ids, so the store answers all three of
+                        # these itself: the dedup, the provenance, and the chunks an observation has
+                        # none of and inherits from its sources.
+                        prefer_observations=prefer_observations,
+                        include_source_facts=include_source_facts,
+                        max_source_facts_tokens=max_source_facts_tokens,
+                        max_source_facts_tokens_per_observation=max_source_facts_tokens_per_observation,
+                        # Lifecycle mode only (None/False otherwise, so every other request is the one
+                        # a store already answers). A store that cannot apply the claim view declines.
+                        lifecycle_view=(
+                            (lifecycle_view or adaptive_settings.default_view)
+                            if adaptive_settings is not None and adaptive_settings.effective_mode.lifecycle
+                            else None
+                        ),
+                        as_of=as_of
                         if adaptive_settings is not None and adaptive_settings.effective_mode.lifecycle
-                        else None
-                    ),
-                    as_of=as_of
-                    if adaptive_settings is not None and adaptive_settings.effective_mode.lifecycle
-                    else None,
-                    historical_cues=detect_historical_cues,
+                        else None,
+                        historical_cues=detect_historical_cues,
+                    )
                 )
             )
             if _store_result is not None:
@@ -10884,6 +11147,42 @@ class MemoryEngine(MemoryEngineInterface):
                 {"candidates_scored": len(scored_results)},
             )
 
+            # True when the reranker is a passthrough (rrf / interleave modes, or the
+            # RRFPassthroughCrossEncoder) or scores by rank position (RANK_SCORE_PROVIDERS, #4901): its
+            # cross_encoder_score_normalized is then a rank-derived placeholder, not a true
+            # relevance score. Read by context admission below and by the result scores.
+            reranker_passthrough = (
+                (reranking != "cross_encoder") or served_provider == "rrf" or served_provider in RANK_SCORE_PROVIDERS
+            )
+
+            # Step 4.95: context admission. After the min_scores floors and before the
+            # prefer-observations dedup, so the dedup, the truncation and the token budget run on
+            # the admitted set (filter, strict) and the observe-mode shadow replays that same tail.
+            if context_admission is not None and scored_results:
+                scored_results = await self._apply_context_admission(
+                    context_admission,
+                    bank_id,
+                    backend,
+                    tracer,
+                    scored_results,
+                    historical=(
+                        context_admission.purpose is Purpose.HISTORICAL_SEARCH
+                        or lifecycle_view in ("historical", "all-with-status")
+                        or as_of is not None
+                        or (
+                            detect_historical_cues
+                            and detect_historical_cue(
+                                query,
+                                detected_temporal_constraint[0] if detected_temporal_constraint is not None else None,
+                            )
+                            is not None
+                        )
+                    ),
+                    rank_based_relevance=reranker_passthrough,
+                    adaptive=adaptive,
+                    log_buffer=log_buffer,
+                )
+
             # Cancellation checkpoint: reranking is done; skip the remaining
             # enrichment (chunk/entity/source-fact fetches, each its own DB work)
             # if the client disconnected while we were reranking (issue #2122).
@@ -10920,6 +11219,14 @@ class MemoryEngine(MemoryEngineInterface):
                     if adaptive is not None
                     else []
                 )
+                # The observe-mode admission shadow replays the dedup too; same rule.
+                if context_admission is not None and context_admission.shadow is not None:
+                    _read_ids = in_window | {sr.id for sr in counterfactual_srs}
+                    counterfactual_srs += [
+                        sr
+                        for sr in observations_in_window(context_admission.shadow, thinking_budget * 2)
+                        if sr.id not in _read_ids
+                    ]
                 if observation_ids or counterfactual_srs:
                     dedup_start = time.perf_counter()
                     from .memories import get_memories
@@ -11100,8 +11407,14 @@ class MemoryEngine(MemoryEngineInterface):
                 fact_ids_ordered=[sr.id for sr in top_scored],
                 text_by_id={sr.id: sr.retrieval.text for sr in top_scored},
                 max_tokens=max_tokens,
-                # The memoised counter only when adaptive memory will replay this budget.
-                count_tokens=adaptive.count_tokens if adaptive is not None else count_tokens,
+                # The memoised counter only when adaptive memory or admission will replay this budget.
+                count_tokens=(
+                    adaptive.count_tokens
+                    if adaptive is not None
+                    else context_admission.count_tokens
+                    if context_admission is not None
+                    else count_tokens
+                ),
             )
             total_tokens = selection.total_tokens
             selected_ids = set(selection.ids)
@@ -11115,6 +11428,17 @@ class MemoryEngine(MemoryEngineInterface):
                     top_scored=top_scored,
                     min_reranker=min_reranker,
                     min_final=min_final,
+                    prefer_observations=dedup_observations,
+                    rerank_limit=rerank_limit,
+                    max_tokens=max_tokens,
+                )
+            if context_admission is not None:
+                self._finish_context_admission(
+                    context_admission,
+                    tracer,
+                    enable_trace=enable_trace,
+                    bank_id=bank_id,
+                    final_ids=[sr.id for sr in top_scored],
                     prefer_observations=dedup_observations,
                     rerank_limit=rerank_limit,
                     max_tokens=max_tokens,
@@ -11330,14 +11654,8 @@ class MemoryEngine(MemoryEngineInterface):
 
             # Convert results to MemoryFact objects
             # Build per-result scores (final/reranker/semantic/text) keyed by id.
-            # reranker is None when the configured reranker is a passthrough (rrf /
-            # interleave modes, or the RRFPassthroughCrossEncoder) or scores by rank
-            # position (RANK_SCORE_PROVIDERS, #4901), since its
-            # cross_encoder_score_normalized is then a rank-derived placeholder, not a
-            # true relevance score.
-            reranker_passthrough = (
-                (reranking != "cross_encoder") or served_provider == "rrf" or served_provider in RANK_SCORE_PROVIDERS
-            )
+            # reranker is None when the reranker is a passthrough or scores by rank
+            # (reranker_passthrough, at Step 4.95).
             scores_by_id: dict[str, RecallScores] = {
                 sr.id: RecallScores(
                     final=sr.weight,

@@ -147,6 +147,33 @@ describe("full bank config surface mapping", () => {
     });
   });
 
+  test("maps the context admission group onto the updates map", async () => {
+    await client.updateBankConfig("bank", {
+      contextAdmissionMode: "strict",
+      contextAdmissionThresholdAuto: 0.7,
+      contextAdmissionThresholdExplicit: 0.3,
+      contextAdmissionReferenceBonus: 0.1,
+      contextAdmissionCandidates: 20,
+      contextAdmissionMaxMemories: 5,
+      contextAdmissionMaxTokens: 1500,
+      contextAdmissionMmrLambda: 0.6,
+      contextAdmissionDupSimilarity: 0.9,
+    });
+
+    const body = mockedUpdateConfig.mock.calls[0][0].body as any;
+    expect(body.updates).toEqual({
+      context_admission_mode: "strict",
+      context_admission_threshold_auto: 0.7,
+      context_admission_threshold_explicit: 0.3,
+      context_admission_reference_bonus: 0.1,
+      context_admission_candidates: 20,
+      context_admission_max_memories: 5,
+      context_admission_max_tokens: 1500,
+      context_admission_mmr_lambda: 0.6,
+      context_admission_dup_similarity: 0.9,
+    });
+  });
+
   test("sends only the fields that were set", async () => {
     await client.updateBankConfig("bank", { recallMaxTokens: 100 });
 

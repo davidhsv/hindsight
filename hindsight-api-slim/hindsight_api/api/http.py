@@ -242,6 +242,7 @@ from hindsight_api.engine.response_models import (
     VALID_RECALL_FACT_TYPES,
     ConsolidationStrategiesPreview,
     ConsolidationStrategySpec,
+    ContextAdmissionSummary,
     DryRunExtractionResult,
     MemoryFact,
     MinScores,
@@ -554,6 +555,41 @@ class IncludeOptions(BaseModel):
     )
 
 
+class RecallTaskContext(BaseModel):
+    """Where the caller is working, compared with memory metadata by context admission.
+
+    Every key is optional. With the bank's ``context_admission_mode`` at ``off`` the whole object is
+    ignored. Otherwise each key the server lists in ``HINDSIGHT_API_CONTEXT_ADMISSION_SCOPE_KEYS``
+    is compared with the memory metadata key of the same name (match, mismatch or unknown), and a
+    mismatch on a key in ``HINDSIGHT_API_CONTEXT_ADMISSION_HARD_SCOPE_KEYS`` rejects the memory in
+    strict mode. ``task_intent`` and ``workspace`` only reach the decision-model scorer.
+    """
+
+    repository: str | None = Field(
+        default=None,
+        description="Stable repository identity, e.g. the normalized git remote 'github.com/acme/payments'",
+    )
+    branch: str | None = Field(default=None, description="Current branch")
+    module: str | None = Field(default=None, description="Subsystem or top-level folder the task is in")
+    environment: str | None = Field(default=None, description="Deployment environment, e.g. 'prod' or 'staging'")
+    service: str | None = Field(default=None, description="Service the task concerns")
+    task_intent: str | None = Field(
+        default=None, description="Free-text kind of task, e.g. 'debug', 'implementation', 'code review'"
+    )
+    workspace: str | None = Field(default=None, description="Workspace or session label")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _known_keys_only(cls, value: Any) -> Any:
+        # A misspelled key ('repo') would otherwise be dropped and the recall judged as if the
+        # caller had sent no scope at all.
+        if isinstance(value, dict):
+            unknown = sorted(set(value) - set(cls.model_fields))
+            if unknown:
+                raise ValueError(f"Unknown context keys: {unknown}. Allowed keys: {sorted(cls.model_fields)}")
+        return value
+
+
 class RecallRequest(BaseModel):
     """Request model for recall endpoint."""
 
@@ -658,6 +694,24 @@ class RecallRequest(BaseModel):
         "UTC), when the bank's adaptive memory mode is 'lifecycle': a memory is returned only if its claim "
         "was valid then. Refuted memories never are. Takes precedence over `lifecycle_view`. It does not "
         "change ranking: `query_timestamp` stays the clock recency is scored against.",
+    )
+    purpose: Literal["auto_context", "explicit_search", "historical_search"] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Why the caller recalls, which sets the trade-off context admission makes when the bank's "
+        "`context_admission_mode` is not 'off'. 'auto_context': memories injected into an agent's context "
+        "that nobody asked for, judged against the stricter `context_admission_threshold_auto`; "
+        "'explicit_search' (the default when omitted): someone asked, judged against "
+        "`context_admission_threshold_explicit`; 'historical_search': the caller wants how things were, so "
+        "superseded memories are admissible, and in lifecycle mode the claim view is 'historical' unless "
+        "`lifecycle_view` or `as_of` is given (whatever the admission mode). In filter and strict modes the result may be empty when no "
+        "memory is worth injecting.",
+    )
+    context: RecallTaskContext | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Where the caller is working (repository, branch, module, ...), compared with memory "
+        "metadata by context admission. Ignored when the bank's `context_admission_mode` is 'off'.",
     )
 
     @field_validator("as_of")
@@ -998,6 +1052,13 @@ class RecallResponse(BaseModel):
             "results[].source_fact_ids have no entry in source_facts — the budget ran out, the "
             "references are not dangling. Only set when source facts were requested."
         ),
+    )
+    context_admission: ContextAdmissionSummary | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Set only when context admission filtered this recall (bank context_admission_mode filter "
+        "or strict). abstained=true means the empty results are the answer: candidates were judged and none "
+        "was relevant to the task.",
     )
 
 
@@ -4354,6 +4415,57 @@ class BankTemplateConfig(BaseModel):
         "external recall queries that name no lifecycle_view, and answer them from the historical view (or as of "
         "the date). Lifecycle mode only",
     )
+    context_admission_mode: str | None = Field(
+        default=None,
+        description="Context admission mode for external recalls: 'off' (default; recall is unchanged), 'observe' "
+        "(decisions and the would-be admitted set go to traces and metrics only), 'filter' (rejected memories "
+        "are dropped and recall may return none) or 'strict' (filter plus hard scope, near-duplicate "
+        "suppression and the memory/token budget)",
+    )
+    context_admission_threshold_auto: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Admission score a memory needs on a recall with purpose 'auto_context'",
+    )
+    context_admission_threshold_explicit: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Admission score a memory needs on a recall with purpose 'explicit_search' or 'historical_search'",
+    )
+    context_admission_reference_bonus: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Subtracted from the auto_context threshold when the query refers to shared history "
+        "('last time', 'what did we decide')",
+    )
+    context_admission_candidates: int | None = Field(
+        default=None,
+        ge=1,
+        description="Top-ranked recall results the admission gate judges; the rest are never admitted",
+    )
+    context_admission_max_memories: int | None = Field(
+        default=None, ge=1, description="Most memories admitted per recall (strict mode)"
+    )
+    context_admission_max_tokens: int | None = Field(
+        default=None, ge=1, description="Most memory tokens admitted per recall (strict mode)"
+    )
+    context_admission_mmr_lambda: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="MMR trade-off between a memory's score and its novelty against those already admitted "
+        "(1 = score only; strict mode)",
+    )
+    context_admission_dup_similarity: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Embedding cosine above which a memory counts as a near-duplicate of one already admitted "
+        "(strict mode)",
+    )
     memory_defense: dict | None = Field(
         default=None,
         description="Memory Defense policy for this bank (validated against the DefensePolicy schema on write)",
@@ -6739,6 +6851,8 @@ def _register_routes(app: FastAPI):
                         temporal_window=request.temporal_window,
                         lifecycle_view=request.lifecycle_view,
                         as_of=request.as_of,
+                        purpose=request.purpose,
+                        task_context=request.context.model_dump(exclude_none=True) if request.context else None,
                         # A final, external recall: the one kind that may reinforce what it returns
                         # (and the one the historical-cue detector looks at).
                         _external=True,
@@ -6833,6 +6947,7 @@ def _register_routes(app: FastAPI):
                 chunks=chunks_response,
                 source_facts=source_facts_response,
                 source_facts_truncated=core_result.source_facts_truncated,
+                context_admission=core_result.context_admission,
             )
 
             handler_duration = time.perf_counter() - handler_start

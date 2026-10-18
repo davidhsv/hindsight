@@ -246,6 +246,27 @@ Recorded only for banks whose [adaptive memory](./adaptive-memory.mdx) mode is n
 
 A recall in `lifecycle` mode whose claim state cannot be read fails with HTTP 503 rather than return unchecked memories; those show up in the HTTP metrics below as `status_code="503"` on the recall endpoint.
 
+### Context Admission Metrics
+
+Recorded only for external recalls in banks whose [context admission](./configuration.mdx#context-admission) mode is not `off`; a server with the feature off exports none of them. They carry ids and counts only, never memory text, and `bank_id` only when bank ids are enabled on metrics. The gate's latency is the `context_admission` phase of the recall phase histogram.
+
+| Exported (Prometheus) | OTel instrument | Type | Labels | Recorded when |
+|-----------------------|-----------------|------|--------|---------------|
+| `hindsight_context_admission_recalls_total` | `hindsight.context_admission.recalls` | Counter | mode, scorer | An external recall was judged by the gate |
+| `hindsight_context_admission_candidates_total` | `hindsight.context_admission.candidates` | Counter | mode | Candidates judged, summed over recalls |
+| `hindsight_context_admission_admitted_total` | `hindsight.context_admission.admitted` | Counter | mode | Candidates admitted |
+| `hindsight_context_admission_rejected_total` | `hindsight.context_admission.rejected` | Counter | mode, reason | Candidates rejected (`wrong_scope`, `below_threshold`, `superseded`, `refuted`, `redundant`, `budget`) |
+| `hindsight_context_admission_abstained_total` | `hindsight.context_admission.abstained` | Counter | mode | A recall judged candidates and admitted none (`filter`/`strict` return no results) |
+| `hindsight_context_admission_cross_scope_candidates_detected_total` | `hindsight.context_admission.cross_scope_candidates_detected` | Counter | mode | Candidates whose metadata disagreed with the request on a hard scope key |
+| `hindsight_context_admission_would_drop_count_total` | `hindsight.context_admission.would_drop_count` | Counter | mode | `observe`: returned memories the simulated gate would have left out |
+| `hindsight_context_admission_would_abstain_count_total` | `hindsight.context_admission.would_abstain_count` | Counter | mode | `observe`: recalls the simulated gate would have answered with no memories |
+| `hindsight_context_admission_would_change_top_k_total` | `hindsight.context_admission.would_change_top_k` | Counter | mode | `observe`: recalls whose returned ids the simulated gate would have changed |
+
+**Labels:**
+- `mode`: The bank's context admission mode (`observe`, `filter`, `strict`)
+- `scorer`: The server's scorer (`deterministic`, `jev`, `hybrid`)
+- `reason`: Why a candidate was rejected, from the fixed list above
+
 ### HTTP Request Metrics
 
 | Metric | Type | Labels | Description |

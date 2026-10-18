@@ -20,7 +20,7 @@ import random
 _resource_mod = importlib.import_module("resource") if importlib.util.find_spec("resource") else None
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Callable, Literal, NamedTuple
@@ -444,6 +444,28 @@ class MetricsCollectorBase:
     def record_adaptive_archive_maintenance(self, *, bank_id: str, archived: int, pruned: int):
         """Record one ``adaptive_memory_maintenance`` run: memories it archived and archived memories
         it deleted (prune). A no-op here, like the above.
+        """
+
+    def record_context_admission(
+        self,
+        *,
+        mode: str,
+        scorer: str,
+        bank_id: str,
+        candidates: int,
+        admitted: int,
+        abstained: bool,
+        rejected: Mapping[str, int],
+        cross_scope_candidates: int,
+        would_drop: int | None = None,
+        would_abstain: bool | None = None,
+        would_change_top_k: bool | None = None,
+    ):
+        """Record one recall the context-admission gate judged (counts only, never content).
+
+        ``rejected`` counts the rejected candidates per reason. The ``would_*`` values are the
+        observe-mode comparison with what the recall returned (None in filter and strict). A no-op
+        here, like the above.
         """
 
     def record_adaptive_lifecycle_dropped(self, *, reason: str, bank_id: str):
@@ -914,6 +936,52 @@ class MetricsCollector(MetricsCollectorBase):
             description="Consolidation lifecycle labels dropped by validation, by reason",
             unit="1",
         )
+        # Context admission (engine/context_admission). Emitted only for recalls the gate judged.
+        self.context_admission_recalls = self.meter.create_counter(
+            name="hindsight.context_admission.recalls",
+            description="External recalls the context-admission gate judged, by mode and scorer",
+            unit="1",
+        )
+        self.context_admission_candidates = self.meter.create_counter(
+            name="hindsight.context_admission.candidates",
+            description="Candidates the context-admission gate judged",
+            unit="1",
+        )
+        self.context_admission_admitted = self.meter.create_counter(
+            name="hindsight.context_admission.admitted",
+            description="Candidates the context-admission gate admitted",
+            unit="1",
+        )
+        self.context_admission_rejected = self.meter.create_counter(
+            name="hindsight.context_admission.rejected",
+            description="Candidates the context-admission gate rejected, by reason",
+            unit="1",
+        )
+        self.context_admission_abstained = self.meter.create_counter(
+            name="hindsight.context_admission.abstained",
+            description="Recalls where the gate judged candidates and admitted none",
+            unit="1",
+        )
+        self.context_admission_cross_scope = self.meter.create_counter(
+            name="hindsight.context_admission.cross_scope_candidates_detected",
+            description="Candidates whose metadata disagreed with the request on a hard scope key",
+            unit="1",
+        )
+        self.context_admission_would_drop = self.meter.create_counter(
+            name="hindsight.context_admission.would_drop_count",
+            description="Observe mode: returned memories the gate would have left out",
+            unit="1",
+        )
+        self.context_admission_would_abstain = self.meter.create_counter(
+            name="hindsight.context_admission.would_abstain_count",
+            description="Observe mode: recalls the gate would have answered with no memories",
+            unit="1",
+        )
+        self.context_admission_would_change_top_k = self.meter.create_counter(
+            name="hindsight.context_admission.would_change_top_k",
+            description="Observe mode: recalls whose returned ids the gate would have changed",
+            unit="1",
+        )
 
         # Process metrics (observable gauges - collected on scrape)
         self._setup_process_metrics()
@@ -1349,6 +1417,44 @@ class MetricsCollector(MetricsCollectorBase):
             self.adaptive_archived.add(archived, attrs)
         if pruned > 0:
             self.adaptive_pruned.add(pruned, attrs)
+
+    def record_context_admission(
+        self,
+        *,
+        mode: str,
+        scorer: str,
+        bank_id: str,
+        candidates: int,
+        admitted: int,
+        abstained: bool,
+        rejected: Mapping[str, int],
+        cross_scope_candidates: int,
+        would_drop: int | None = None,
+        would_abstain: bool | None = None,
+        would_change_top_k: bool | None = None,
+    ):
+        """Record one gated recall; see the base class."""
+        attrs: dict[str, str] = {"mode": mode, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.context_admission_recalls.add(1, {**attrs, "scorer": scorer})
+        if candidates:
+            self.context_admission_candidates.add(candidates, attrs)
+        if admitted:
+            self.context_admission_admitted.add(admitted, attrs)
+        for reason, count in rejected.items():
+            if count:
+                self.context_admission_rejected.add(count, {**attrs, "reason": reason})
+        if abstained:
+            self.context_admission_abstained.add(1, attrs)
+        if cross_scope_candidates:
+            self.context_admission_cross_scope.add(cross_scope_candidates, attrs)
+        if would_drop:
+            self.context_admission_would_drop.add(would_drop, attrs)
+        if would_abstain:
+            self.context_admission_would_abstain.add(1, attrs)
+        if would_change_top_k:
+            self.context_admission_would_change_top_k.add(1, attrs)
 
     def record_adaptive_lifecycle_dropped(self, *, reason: str, bank_id: str):
         """Record a dropped lifecycle label; see the base class."""

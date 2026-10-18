@@ -897,6 +897,60 @@ export type BankTemplateConfig = {
    */
   adaptive_memory_historical_cues?: boolean | null;
   /**
+   * Context Admission Mode
+   *
+   * Context admission mode for external recalls: 'off' (default; recall is unchanged), 'observe' (decisions and the would-be admitted set go to traces and metrics only), 'filter' (rejected memories are dropped and recall may return none) or 'strict' (filter plus hard scope, near-duplicate suppression and the memory/token budget)
+   */
+  context_admission_mode?: string | null;
+  /**
+   * Context Admission Threshold Auto
+   *
+   * Admission score a memory needs on a recall with purpose 'auto_context'
+   */
+  context_admission_threshold_auto?: number | null;
+  /**
+   * Context Admission Threshold Explicit
+   *
+   * Admission score a memory needs on a recall with purpose 'explicit_search' or 'historical_search'
+   */
+  context_admission_threshold_explicit?: number | null;
+  /**
+   * Context Admission Reference Bonus
+   *
+   * Subtracted from the auto_context threshold when the query refers to shared history ('last time', 'what did we decide')
+   */
+  context_admission_reference_bonus?: number | null;
+  /**
+   * Context Admission Candidates
+   *
+   * Top-ranked recall results the admission gate judges; the rest are never admitted
+   */
+  context_admission_candidates?: number | null;
+  /**
+   * Context Admission Max Memories
+   *
+   * Most memories admitted per recall (strict mode)
+   */
+  context_admission_max_memories?: number | null;
+  /**
+   * Context Admission Max Tokens
+   *
+   * Most memory tokens admitted per recall (strict mode)
+   */
+  context_admission_max_tokens?: number | null;
+  /**
+   * Context Admission Mmr Lambda
+   *
+   * MMR trade-off between a memory's score and its novelty against those already admitted (1 = score only; strict mode)
+   */
+  context_admission_mmr_lambda?: number | null;
+  /**
+   * Context Admission Dup Similarity
+   *
+   * Embedding cosine above which a memory counts as a near-duplicate of one already admitted (strict mode)
+   */
+  context_admission_dup_similarity?: number | null;
+  /**
    * Memory Defense
    *
    * Memory Defense policy for this bank (validated against the DefensePolicy schema on write)
@@ -1675,6 +1729,35 @@ export type Content =
           type: "file";
         } & FileContentBlock)
     >;
+
+/**
+ * ContextAdmissionSummary
+ *
+ * What context admission decided on a recall whose results it filters (filter or strict mode).
+ *
+ * Present only then: with the mode off or observe the results are what retrieval returned, and
+ * the payload carries nothing new. The reasons per candidate are in the trace only.
+ */
+export type ContextAdmissionSummary = {
+  /**
+   * Abstained
+   *
+   * Candidates were judged and none was admitted: the empty results are the answer (nothing relevant), not an empty bank or a too-narrow filter
+   */
+  abstained: boolean;
+  /**
+   * Candidates
+   *
+   * Candidates judged (0 when retrieval found nothing to judge)
+   */
+  candidates: number;
+  /**
+   * Admitted
+   *
+   * Candidates admitted (the results can be fewer, after the token budget)
+   */
+  admitted: number;
+};
 
 /**
  * CreateBankAliasRequest
@@ -5925,6 +6008,16 @@ export type RecallRequest = {
    * Show memories as they stood at this instant (ISO 8601; a time without an offset is UTC), when the bank's adaptive memory mode is 'lifecycle': a memory is returned only if its claim was valid then. Refuted memories never are. Takes precedence over `lifecycle_view`. It does not change ranking: `query_timestamp` stays the clock recency is scored against.
    */
   as_of?: string | null;
+  /**
+   * Purpose
+   *
+   * Why the caller recalls, which sets the trade-off context admission makes when the bank's `context_admission_mode` is not 'off'. 'auto_context': memories injected into an agent's context that nobody asked for, judged against the stricter `context_admission_threshold_auto`; 'explicit_search' (the default when omitted): someone asked, judged against `context_admission_threshold_explicit`; 'historical_search': the caller wants how things were, so superseded memories are admissible, and in lifecycle mode the claim view is 'historical' unless `lifecycle_view` or `as_of` is given (whatever the admission mode). In filter and strict modes the result may be empty when no memory is worth injecting.
+   */
+  purpose?: "auto_context" | "explicit_search" | "historical_search" | null;
+  /**
+   * Where the caller is working (repository, branch, module, ...), compared with memory metadata by context admission. Ignored when the bank's `context_admission_mode` is 'off'.
+   */
+  context?: RecallTaskContext | null;
 };
 
 /**
@@ -5973,6 +6066,10 @@ export type RecallResponse = {
    * Whether the source_facts map was cut short by the token budget. When true, some IDs in results[].source_fact_ids have no entry in source_facts — the budget ran out, the references are not dangling. Only set when source facts were requested.
    */
   source_facts_truncated?: boolean | null;
+  /**
+   * Set only when context admission filtered this recall (bank context_admission_mode filter or strict). abstained=true means the empty results are the answer: candidates were judged and none was relevant to the task.
+   */
+  context_admission?: ContextAdmissionSummary | null;
 };
 
 /**
@@ -6084,6 +6181,62 @@ export type RecallScores = {
    * Keyword/full-text (BM25) score (>= 0, unbounded). None if this result was not surfaced by keyword search.
    */
   keyword?: number | null;
+};
+
+/**
+ * RecallTaskContext
+ *
+ * Where the caller is working, compared with memory metadata by context admission.
+ *
+ * Every key is optional. With the bank's ``context_admission_mode`` at ``off`` the whole object is
+ * ignored. Otherwise each key the server lists in ``HINDSIGHT_API_CONTEXT_ADMISSION_SCOPE_KEYS``
+ * is compared with the memory metadata key of the same name (match, mismatch or unknown), and a
+ * mismatch on a key in ``HINDSIGHT_API_CONTEXT_ADMISSION_HARD_SCOPE_KEYS`` rejects the memory in
+ * strict mode. ``task_intent`` and ``workspace`` only reach the decision-model scorer.
+ */
+export type RecallTaskContext = {
+  /**
+   * Repository
+   *
+   * Stable repository identity, e.g. the normalized git remote 'github.com/acme/payments'
+   */
+  repository?: string | null;
+  /**
+   * Branch
+   *
+   * Current branch
+   */
+  branch?: string | null;
+  /**
+   * Module
+   *
+   * Subsystem or top-level folder the task is in
+   */
+  module?: string | null;
+  /**
+   * Environment
+   *
+   * Deployment environment, e.g. 'prod' or 'staging'
+   */
+  environment?: string | null;
+  /**
+   * Service
+   *
+   * Service the task concerns
+   */
+  service?: string | null;
+  /**
+   * Task Intent
+   *
+   * Free-text kind of task, e.g. 'debug', 'implementation', 'code review'
+   */
+  task_intent?: string | null;
+  /**
+   * Workspace
+   *
+   * Workspace or session label
+   */
+  workspace?: string | null;
 };
 
 /**

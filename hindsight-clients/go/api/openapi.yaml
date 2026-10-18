@@ -6664,6 +6664,46 @@ components:
         adaptive_memory_historical_cues:
           nullable: true
           type: boolean
+        context_admission_mode:
+          nullable: true
+          type: string
+        context_admission_threshold_auto:
+          maximum: 1.0
+          minimum: 0.0
+          nullable: true
+          type: number
+        context_admission_threshold_explicit:
+          maximum: 1.0
+          minimum: 0.0
+          nullable: true
+          type: number
+        context_admission_reference_bonus:
+          maximum: 1.0
+          minimum: 0.0
+          nullable: true
+          type: number
+        context_admission_candidates:
+          minimum: 1.0
+          nullable: true
+          type: integer
+        context_admission_max_memories:
+          minimum: 1.0
+          nullable: true
+          type: integer
+        context_admission_max_tokens:
+          minimum: 1.0
+          nullable: true
+          type: integer
+        context_admission_mmr_lambda:
+          maximum: 1.0
+          minimum: 0.0
+          nullable: true
+          type: number
+        context_admission_dup_similarity:
+          maximum: 1.0
+          minimum: 0.0
+          nullable: true
+          type: number
         memory_defense:
           additionalProperties: {}
           nullable: true
@@ -7530,6 +7570,33 @@ components:
       description: The raw content to retain or extract from. Either a plain string
         or an ordered list of content blocks.
       title: Content
+    ContextAdmissionSummary:
+      description: |-
+        What context admission decided on a recall whose results it filters (filter or strict mode).
+
+        Present only then: with the mode off or observe the results are what retrieval returned, and
+        the payload carries nothing new. The reasons per candidate are in the trace only.
+      properties:
+        abstained:
+          description: "Candidates were judged and none was admitted: the empty results\
+            \ are the answer (nothing relevant), not an empty bank or a too-narrow\
+            \ filter"
+          title: Abstained
+          type: boolean
+        candidates:
+          description: Candidates judged (0 when retrieval found nothing to judge)
+          title: Candidates
+          type: integer
+        admitted:
+          description: "Candidates admitted (the results can be fewer, after the token\
+            \ budget)"
+          title: Admitted
+          type: integer
+      required:
+      - abstained
+      - admitted
+      - candidates
+      title: ContextAdmissionSummary
     CreateBankAliasRequest:
       description: Request model for adding an alias to a bank.
       example:
@@ -12360,6 +12427,15 @@ components:
           format: date-time
           nullable: true
           type: string
+        purpose:
+          enum:
+          - auto_context
+          - explicit_search
+          - historical_search
+          nullable: true
+          type: string
+        context:
+          $ref: '#/components/schemas/RecallTaskContext'
       required:
       - query
       title: RecallRequest
@@ -12416,6 +12492,8 @@ components:
         source_facts_truncated:
           nullable: true
           type: boolean
+        context_admission:
+          $ref: '#/components/schemas/ContextAdmissionSummary'
       required:
       - results
       title: RecallResponse
@@ -12526,6 +12604,38 @@ components:
       required:
       - final
       title: RecallScores
+    RecallTaskContext:
+      description: |-
+        Where the caller is working, compared with memory metadata by context admission.
+
+        Every key is optional. With the bank's ``context_admission_mode`` at ``off`` the whole object is
+        ignored. Otherwise each key the server lists in ``HINDSIGHT_API_CONTEXT_ADMISSION_SCOPE_KEYS``
+        is compared with the memory metadata key of the same name (match, mismatch or unknown), and a
+        mismatch on a key in ``HINDSIGHT_API_CONTEXT_ADMISSION_HARD_SCOPE_KEYS`` rejects the memory in
+        strict mode. ``task_intent`` and ``workspace`` only reach the decision-model scorer.
+      properties:
+        repository:
+          nullable: true
+          type: string
+        branch:
+          nullable: true
+          type: string
+        module:
+          nullable: true
+          type: string
+        environment:
+          nullable: true
+          type: string
+        service:
+          nullable: true
+          type: string
+        task_intent:
+          nullable: true
+          type: string
+        workspace:
+          nullable: true
+          type: string
+      title: RecallTaskContext
     RecoverConsolidationResponse:
       description: Response model for recovering failed consolidation.
       example:

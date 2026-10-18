@@ -65,6 +65,7 @@ hindsight_client_api/models/consolidation_strategies_preview_request.py
 hindsight_client_api/models/consolidation_strategy_spec.py
 hindsight_client_api/models/content.py
 hindsight_client_api/models/content_any_of_inner.py
+hindsight_client_api/models/context_admission_summary.py
 hindsight_client_api/models/create_bank_alias_request.py
 hindsight_client_api/models/create_bank_request.py
 hindsight_client_api/models/create_directive_request.py
@@ -176,6 +177,7 @@ hindsight_client_api/models/recall_request.py
 hindsight_client_api/models/recall_response.py
 hindsight_client_api/models/recall_result.py
 hindsight_client_api/models/recall_scores.py
+hindsight_client_api/models/recall_task_context.py
 hindsight_client_api/models/recover_consolidation_response.py
 hindsight_client_api/models/reflect_based_on.py
 hindsight_client_api/models/reflect_directive.py

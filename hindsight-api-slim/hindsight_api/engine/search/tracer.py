@@ -13,6 +13,7 @@ from typing import Any, Literal
 from ..response_models import RecallLifecycle
 from .trace import (
     AdaptiveTraceInfo,
+    ContextAdmissionTraceInfo,
     EntryPoint,
     LifecycleFilteredResult,
     LifecycleTraceInfo,
@@ -105,6 +106,8 @@ class SearchTracer:
         # Lifecycle mode only (same rule): the claim view and the candidates it removed.
         self.lifecycle: LifecycleTraceInfo | None = None
         self.lifecycle_filtered: list[LifecycleFilteredResult] | None = None
+        # Only when the context-admission gate ran (same rule).
+        self.context_admission: ContextAdmissionTraceInfo | None = None
 
         # Tracking state
         self.current_step = 0
@@ -452,6 +455,7 @@ class SearchTracer:
             adaptive=self.adaptive,
             lifecycle=self.lifecycle,
             lifecycle_filtered=self.lifecycle_filtered,
+            context_admission=self.context_admission,
         )
 
         return trace

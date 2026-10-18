@@ -873,6 +873,51 @@ async def live_memory_ids(
     return {str(row["id"]) for row in rows}
 
 
+def _vector(value: Any) -> list[float] | None:
+    """A stored embedding as floats: pgvector's text form (``[0.1,0.2]``) or an array; None when
+    it cannot be read (an unreadable vector only means the memory has no known duplicates)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().removeprefix("[").removesuffix("]")
+        if not text:
+            return None
+        try:
+            return [float(part) for part in text.split(",")]
+        except ValueError:
+            return None
+    try:
+        return [float(part) for part in value]
+    except (TypeError, ValueError):
+        return None
+
+
+async def memory_embeddings(
+    *,
+    conn,
+    fq_table: Callable[[str], str],
+    bank_id: str,
+    unit_ids: list[Any],
+) -> dict[str, list[float]]:
+    """The stored embeddings of ``unit_ids`` in ``bank_id``, as floats; one read. Ids that do not
+    parse, are not in the bank or carry no readable embedding are absent."""
+    ids = _as_uuids(unit_ids)
+    if not ids:
+        return {}
+    rows = await conn.fetch(
+        f"SELECT id, embedding::text AS embedding FROM {fq_table('memory_units')} "
+        "WHERE bank_id = $1 AND id = ANY($2::uuid[])",
+        bank_id,
+        ids,
+    )
+    out: dict[str, list[float]] = {}
+    for row in rows:
+        vector = _vector(row["embedding"])
+        if vector:
+            out[str(row["id"])] = vector
+    return out
+
+
 __all__ = [
     "any_memory_updated_since",
     "any_memory_updated_since_batch",
@@ -882,6 +927,7 @@ __all__ = [
     "latest_memory_write_at",
     "list_tags",
     "live_memory_ids",
+    "memory_embeddings",
     "mark_consolidated",
     "scan_memories",
 ]

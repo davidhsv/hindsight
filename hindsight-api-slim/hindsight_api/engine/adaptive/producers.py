@@ -66,13 +66,16 @@ def reinforcement_allowed(settings: AdaptiveSettings) -> bool:
     return settings.effective_mode.applies_factor and settings.reinforcement_enabled
 
 
-def recall_reinforcement_allowed(settings: AdaptiveSettings) -> bool:
+def recall_reinforcement_allowed(settings: AdaptiveSettings, *, context_admission_mode: str | None = None) -> bool:
     """Whether a final external recall may reinforce what it returned.
 
-    The one place recall reinforcement is decided, so the context-admission track can force it off
-    here: when admission filters a recall, its final results are the admitted set, and reinforcing
-    them would turn admission decisions into retention: a popularity loop where what is shown stays because it was shown.
+    The one place recall reinforcement is decided. Never while context admission filters the
+    recall (``filter`` or ``strict``): its final results are then the admitted set, and reinforcing
+    them would turn admission decisions into retention, a popularity loop where what is shown stays
+    because it was shown. ``observe`` changes nothing the recall returns, so it changes nothing here.
     """
+    if context_admission_mode in ("filter", "strict"):
+        return False
     return reinforcement_allowed(settings) and settings.recall_reinforcement_enabled
 
 

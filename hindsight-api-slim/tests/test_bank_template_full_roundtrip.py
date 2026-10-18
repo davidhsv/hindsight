@@ -142,6 +142,15 @@ _SAMPLE_VALUES: dict[str, Any] = {
     "adaptive_memory_max_stability_days": 900.0,
     "adaptive_memory_default_view": "historical",
     "adaptive_memory_historical_cues": True,
+    "context_admission_mode": "observe",
+    "context_admission_threshold_auto": 0.7,
+    "context_admission_threshold_explicit": 0.3,
+    "context_admission_reference_bonus": 0.1,
+    "context_admission_candidates": 20,
+    "context_admission_max_memories": 6,
+    "context_admission_max_tokens": 1500,
+    "context_admission_mmr_lambda": 0.6,
+    "context_admission_dup_similarity": 0.9,
     # Validated against the DefensePolicy schema on write (parse_policy), so this
     # must be a real policy — and carrying a rule means the round-trip covers the
     # nested list, not just the top-level flag.

@@ -19,13 +19,16 @@ from typing import TYPE_CHECKING, Any, Union, get_args, get_origin
 
 from hindsight_api.config import (
     ADAPTIVE_MEMORY_CONSTRAINED_FIELDS,
+    CONTEXT_ADMISSION_CONSTRAINED_FIELDS,
     DEFAULT_ADAPTIVE_MEMORY_DEFAULT_VIEW,
     DEFAULT_ADAPTIVE_MEMORY_MODE,
+    DEFAULT_CONTEXT_ADMISSION_MODE,
     RECALL_BUDGET_FUNCTIONS,
     HindsightConfig,
     _get_raw_config,
     normalize_adaptive_memory_value,
     normalize_config_dict,
+    normalize_context_admission_value,
     validate_adaptive_memory_stability_bounds,
     validate_retain_chunking_config,
     validate_retain_completion_token_budget,
@@ -632,6 +635,7 @@ class ConfigResolver:
 
         # Validate (and lower-case the choices of) the adaptive-memory fields
         _validate_adaptive_memory_updates(normalized_updates)
+        _validate_context_admission_updates(normalized_updates)
 
         # Constraints spanning several fields need the whole projected
         # configuration, not just the update. This check is the early one, so a
@@ -1051,19 +1055,31 @@ def _validate_adaptive_memory_updates(updates: dict[str, Any]) -> None:
     )
 
 
+def _validate_context_admission_updates(updates: dict[str, Any]) -> None:
+    """Validate context-admission config updates in place (same rules as the env); the mode is
+    lower-cased before it is persisted."""
+    for key in CONTEXT_ADMISSION_CONSTRAINED_FIELDS & updates.keys():
+        if updates[key] is not None:
+            updates[key] = normalize_context_admission_value(key, updates[key])
+
+
 # Stored values of these choice fields that are no longer (or never were) valid fall
 # back to the safe value instead of failing every recall of the bank: an unknown mode
 # means the feature is off, never that it is on in some partial way.
 _STORED_CHOICE_FALLBACKS: dict[str, str] = {
     "adaptive_memory_mode": DEFAULT_ADAPTIVE_MEMORY_MODE,
     "adaptive_memory_default_view": DEFAULT_ADAPTIVE_MEMORY_DEFAULT_VIEW,
+    "context_admission_mode": DEFAULT_CONTEXT_ADMISSION_MODE,
 }
 
 
 def _coerce_stored_choice(bank_id: str, key: str, value: Any) -> Any:
     """Normalize a stored choice override, or fall back to the safe value when it is unknown."""
+    normalize = (
+        normalize_context_admission_value if key.startswith("context_admission_") else normalize_adaptive_memory_value
+    )
     try:
-        return normalize_adaptive_memory_value(key, value)
+        return normalize(key, value)
     except ValueError:
         fallback = _STORED_CHOICE_FALLBACKS[key]
         logger.warning(

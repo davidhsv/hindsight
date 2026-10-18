@@ -54,4 +54,23 @@ describe("POST /api/recall", () => {
     const body = recallMemories.mock.calls[recallMemories.mock.calls.length - 1][0].body;
     expect([body.lifecycle_view, body.as_of]).toEqual(["historical", "2026-01-15T00:00:00Z"]);
   });
+
+  it("forwards the context admission purpose and context", async () => {
+    recallMemories.mockResolvedValue({ data: { results: [] } });
+
+    const request = new Request("http://localhost/api/recall", {
+      method: "POST",
+      body: JSON.stringify({
+        bank_id: "b",
+        query: "q",
+        purpose: "auto_context",
+        context: { repository: "github.com/acme/payments", module: "auth" },
+      }),
+    });
+    await POST(request as unknown as NextRequest);
+
+    const body = recallMemories.mock.calls[recallMemories.mock.calls.length - 1][0].body;
+    expect(body.purpose).toBe("auto_context");
+    expect(body.context).toEqual({ repository: "github.com/acme/payments", module: "auth" });
+  });
 });

@@ -57,6 +57,7 @@ from hindsight_client_api.models.consolidation_strategies_preview_request import
 from hindsight_client_api.models.consolidation_strategy_spec import ConsolidationStrategySpec
 from hindsight_client_api.models.content import Content
 from hindsight_client_api.models.content_any_of_inner import ContentAnyOfInner
+from hindsight_client_api.models.context_admission_summary import ContextAdmissionSummary
 from hindsight_client_api.models.create_bank_alias_request import CreateBankAliasRequest
 from hindsight_client_api.models.create_bank_request import CreateBankRequest
 from hindsight_client_api.models.create_directive_request import CreateDirectiveRequest
@@ -168,6 +169,7 @@ from hindsight_client_api.models.recall_request import RecallRequest
 from hindsight_client_api.models.recall_response import RecallResponse
 from hindsight_client_api.models.recall_result import RecallResult
 from hindsight_client_api.models.recall_scores import RecallScores
+from hindsight_client_api.models.recall_task_context import RecallTaskContext
 from hindsight_client_api.models.recover_consolidation_response import RecoverConsolidationResponse
 from hindsight_client_api.models.reflect_based_on import ReflectBasedOn
 from hindsight_client_api.models.reflect_directive import ReflectDirective

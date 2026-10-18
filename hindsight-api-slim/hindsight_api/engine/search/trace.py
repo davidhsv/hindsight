@@ -220,6 +220,90 @@ class AdaptiveTraceInfo(BaseModel):
     )
 
 
+class ContextAdmissionCandidateTrace(BaseModel):
+    """One candidate's context-admission decision (scores and ids only, never memory text)."""
+
+    memory_id: str = Field(description="The candidate memory")
+    base_retrieval_score: float = Field(description="The recall score the candidate arrived with")
+    scope_score: float = Field(description="Scope agreement with the request context on [0, 1]; 0.5 is neutral")
+    task_relevance: float = Field(
+        description="Relevance to the task on [0, 1]: the deterministic relevance part, or the decision "
+        "model's probability under the jev and hybrid scorers"
+    )
+    expected_utility: float = Field(description="Retention, cost and type part of the score on [0, 1]; 0.5 is neutral")
+    truth_status: str = Field(description="Claim status: active, uncertain, superseded or refuted")
+    retrievability: float | None = Field(
+        default=None, description="Retrievability, when adaptive memory scored the candidate"
+    )
+    admission_score: float = Field(description="The score compared with the threshold")
+    admitted: bool = Field(description="Whether the gate admitted the candidate")
+    reason: str = Field(description="admitted, wrong_scope, below_threshold, superseded, refuted, redundant or budget")
+    tokens: int = Field(description="The candidate's text length in tokens")
+    duplicates: int = Field(default=0, description="Near-duplicates suppressed in favour of this memory")
+    scope: dict[str, str] = Field(default_factory=dict, description="Per scope key: match, mismatch or unknown")
+    features: dict[str, float] = Field(
+        default_factory=dict,
+        description="The deterministic scorer's inputs, keyed as context_admission_weights names them",
+    )
+
+
+class ContextAdmissionTraceInfo(BaseModel):
+    """What context admission did on this recall. Present only when the gate ran."""
+
+    mode: str = Field(description="context_admission_mode: observe, filter or strict")
+    scorer: str = Field(description="context_admission_scorer: deterministic, jev or hybrid")
+    purpose: str = Field(description="The request purpose: auto_context, explicit_search or historical_search")
+    threshold: float = Field(description="The admission threshold this recall applied")
+    historical: bool = Field(description="Whether superseded memories were admissible (a historical task)")
+    reference_signal: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="The memory-reference phrase that lowered the auto_context threshold",
+    )
+    candidates: int = Field(description="Candidates judged")
+    admitted: int = Field(description="Candidates admitted")
+    abstained: bool = Field(description="Candidates were judged and none was admitted")
+    reasons: dict[str, int] = Field(description="Rejected candidates per reason")
+    cross_scope_candidates: int = Field(description="Candidates whose metadata disagrees with a hard scope key")
+    decisions: list[ContextAdmissionCandidateTrace] = Field(description="Every judged candidate, in recall order")
+    shadow_final_ids: list[str] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Observe mode: the ids this recall would have returned with admission applied",
+    )
+    would_change_top_k: bool | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Observe mode: whether shadow_final_ids differs from the ids returned",
+    )
+    would_drop: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Observe mode: returned memories admission would have left out",
+    )
+    jev_error: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Why the decision model gave no scores (not_configured or the error type); the "
+        "deterministic score was used instead",
+    )
+    embeddings_error: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Error type when the embeddings could not be read (no near-duplicate was suppressed)",
+    )
+    relevance_source: str = Field(
+        default="reranker",
+        description="What the deterministic reranker feature read: reranker (the cross-encoder's score) or "
+        "semantic (the recall's reranker scored by rank or was a passthrough, so its scores are positions)",
+    )
+    scope_error: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Error type when observations' source facts could not be read (their scope read unknown)",
+    )
+
+
 class SearchSummary(BaseModel):
     """Summary statistics about the search."""
 
@@ -275,6 +359,12 @@ class SearchTrace(BaseModel):
         default=None,
         exclude_if=lambda v: v is None,
         description="Candidates the lifecycle view removed (status and successor), in fusion order",
+    )
+    # Only when the context-admission gate ran on this recall. Omitted otherwise.
+    context_admission: ContextAdmissionTraceInfo | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Context admission: per-candidate decisions, abstention reasons and observe-mode simulation",
     )
 
     model_config = {"json_encoders": {datetime: lambda v: v.isoformat()}}

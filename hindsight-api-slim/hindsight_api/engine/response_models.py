@@ -487,6 +487,21 @@ class MentalModelResult(BaseModel):
     relevance: float = Field(default=0.0, description="Relevance score to the query")
 
 
+class ContextAdmissionSummary(BaseModel):
+    """What context admission decided on a recall whose results it filters (filter or strict mode).
+
+    Present only then: with the mode off or observe the results are what retrieval returned, and
+    the payload carries nothing new. The reasons per candidate are in the trace only.
+    """
+
+    abstained: bool = Field(
+        description="Candidates were judged and none was admitted: the empty results are the answer "
+        "(nothing relevant), not an empty bank or a too-narrow filter"
+    )
+    candidates: int = Field(description="Candidates judged (0 when retrieval found nothing to judge)")
+    admitted: int = Field(description="Candidates admitted (the results can be fewer, after the token budget)")
+
+
 class RecallResult(BaseModel):
     """
     Result from a recall operation.
@@ -537,6 +552,11 @@ class RecallResult(BaseModel):
             "results[].source_fact_ids have no entry in source_facts — the budget ran out, the "
             "references are not dangling. Only set when source facts were requested."
         ),
+    )
+    context_admission: ContextAdmissionSummary | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Set only when context admission filtered this recall (bank mode filter or strict)",
     )
 
 

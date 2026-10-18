@@ -156,6 +156,22 @@ Only for banks whose [adaptive memory mode](../configuration#adaptive-memory) is
 
 `as_of` filters by what was true, not by when a memory was stored, and it does not move the ranking clock: [`query_timestamp`](#query_timestamp) still anchors recency. A lifecycle-mode recall that cannot read the claims answers 503 (retry it) rather than return memories it could not check. When neither is set, a bank with `adaptive_memory_historical_cues` on answers a query that asks about the past ("what did we use before the upgrade?") from the historical view. MCP recall takes neither field and always uses the bank's default view and cues. See [Adaptive memory](../adaptive-memory.mdx#history-views) for the concepts and a worked example, and [Claim views in recall](../configuration#claim-views-in-recall) for the full rules.
 
+### purpose and context
+
+Only for banks with [context admission](../configuration#context-admission) on (`context_admission_mode` other than `off`); every other bank ignores both. Context admission judges the top recall results for the task at hand and can return none: in `filter` and `strict` modes an empty `results` list means no memory was worth injecting, not that the bank is empty.
+
+`purpose` says why you recall. `auto_context` is for memories injected into an agent's context that nobody asked for (a coding agent's first-prompt recall) and is held to the stricter `context_admission_threshold_auto`; `explicit_search`, the default, is for a person or agent that asked; `historical_search` admits superseded memories and, in a bank whose adaptive memory mode is `lifecycle`, answers from the historical view unless `lifecycle_view` or `as_of` is given (whatever the admission mode). `context` says where you work, and its keys are compared with memory metadata of the same name:
+
+```json
+{
+  "query": "the login endpoint times out after the token refresh",
+  "purpose": "auto_context",
+  "context": { "repository": "github.com/acme/payments", "branch": "fix/auth-timeout", "module": "auth" }
+}
+```
+
+The keys are `repository`, `branch`, `module`, `environment`, `service`, `task_intent` and `workspace`, all optional strings; any other key is a 422. A mismatch on a soft key (module, branch, environment, service) lowers a memory's score, while a `repository` mismatch rejects it in `strict` mode; a memory without the metadata counts as unknown, not as a mismatch. Write the same keys as `metadata` when you retain. In `filter` and `strict` modes the response also carries `context_admission`: `{"abstained": true, "candidates": 12, "admitted": 0}` means candidates were judged and none was relevant, while `candidates: 0` means retrieval found nothing to judge. The field is absent in every other mode. With `"trace": true`, `trace.context_admission` shows each candidate's decision and, when nothing was admitted, the count per reason. MCP recall takes neither field and is judged as `explicit_search`. See [Context admission](../adaptive-memory.mdx#context-admission) for how to roll it out.
+
 ### include
 
 An optional object controlling supplementary data returned alongside the main facts.

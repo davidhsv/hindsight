@@ -1931,6 +1931,17 @@ class MemoriesExtension(Extension, ABC):
         """
         return False
 
+    async def load_embeddings(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, list[float]]:
+        """The stored embeddings of ``memory_ids``, keyed by memory id; one batch per recall.
+
+        Context admission reads them for the few candidates it admitted (at most
+        ``context_admission_candidates``) to suppress near-duplicates. An id that is absent has no
+        known duplicates, so the default ``{}`` is safe: a store that does not implement this
+        admits near-duplicates rather than dropping anything. ``conn`` is a read connection the
+        caller acquired for this call alone.
+        """
+        return {}
+
     async def load_adaptive_state(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, AdaptiveState]:
         """The stored adaptive state of ``memory_ids``, keyed by memory id; one batch per recall.
 

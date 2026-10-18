@@ -23,6 +23,8 @@ export async function POST(request: NextRequest) {
       temporal_window,
       lifecycle_view,
       as_of,
+      purpose,
+      context,
     } = body;
 
     const response = await sdk.recallMemories({
@@ -44,6 +46,8 @@ export async function POST(request: NextRequest) {
         temporal_window,
         lifecycle_view,
         as_of,
+        purpose,
+        context,
       },
     });
 

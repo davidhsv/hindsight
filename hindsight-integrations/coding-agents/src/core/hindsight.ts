@@ -23,6 +23,7 @@ import {
 } from "./missions";
 import { version as PKG_VERSION } from "../../package.json";
 import { pool, semverGte, sleep } from "./util";
+import type { RepoContext } from "./repo-context";
 import type { RetainStamp } from "./retain-stamp";
 
 /** Sent on every request so the server can tell which integration is calling. */
@@ -121,6 +122,9 @@ export interface ClientOpts {
   /** Recall-body overrides, merged key-by-key over `DEFAULT_RECALL_OPTIONS`. Passed through to
    *  the API as given (`types`, `max_tokens`, `budget`, …); `query` is never overridable. */
   recallOptions?: Record<string, unknown>;
+  /** Where the session is working (`core/repo-context.ts`), sent as the recall `context` so a
+   *  server with context admission on can keep other repositories' memories out. */
+  recallContext?: RepoContext;
   /** Re-read the bearer token from the LIVE config, for hosts that outlive their credential.
    *  `apiToken` alone is a construction-time snapshot: a long-lived host (dsh, Cline, Kilo, the
    *  MCP server, any persistent plugin) kept signing with it forever, so enabling auth or rotating
@@ -377,6 +381,7 @@ export class HindsightClient {
   readonly observationScopes: ObservationScopes;
   readonly pageSearchLimit: number;
   readonly recallOptions: Record<string, unknown>;
+  readonly recallContext: RepoContext;
   private readonly rateLimitPatienceMs: number;
 
   constructor(o: ClientOpts) {
@@ -393,6 +398,7 @@ export class HindsightClient {
     // module-level object, and handing every client the same reference makes one caller's
     // mutation everyone's.
     this.recallOptions = { ...DEFAULT_RECALL_OPTIONS, ...o.recallOptions };
+    this.recallContext = { ...o.recallContext };
     this.rateLimitPatienceMs = o.rateLimitPatienceMs ?? 0;
   }
 
@@ -841,15 +847,20 @@ export class HindsightClient {
    * The name predates `recallOptions` (the observation type used to be hardcoded here) and is
    * kept deliberately: this is the client's published surface, so renaming it would break
    * importers for a cosmetic gain. The doc above is the contract, not the name.
+   *
+   * It is the automatic injection nobody asked for, so it says so: `purpose: "auto_context"` and
+   * the session's `recallContext`, which a bank with context admission on judges strictly and may
+   * answer with nothing. A server without context admission ignores both fields.
    */
   async recallObservations(query: string, opts: { timeoutMs: number }): Promise<string[]> {
+    const context = Object.keys(this.recallContext).length ? { context: this.recallContext } : {};
     const r = await this.req(
       "POST",
       this.bankUrl("/memories/recall"),
       // `query` is applied AFTER the spread: everything else is the caller's to override, but a
       // config that could replace the goal with a fixed string would silently recall for the
       // wrong question on every turn.
-      { ...this.recallOptions, query },
+      { purpose: "auto_context", ...context, ...this.recallOptions, query },
       [],
       opts.timeoutMs
     );
