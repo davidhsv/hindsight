@@ -966,6 +966,15 @@ class RecallResponse(BaseModel):
             "references are not dangling. Only set when source facts were requested."
         ),
     )
+    nothing_relevant: bool | None = Field(
+        default=None,
+        description=(
+            "Set when the bank's recall relevance check is on (recall_relevance_check): true when a decision "
+            "model judged that none of the top ten results helps answer the query, or none was returned. A "
+            "warning, not a filter: the results are the same either way. None when the check is off or the "
+            "decision model did not answer."
+        ),
+    )
 
 
 class EntityInput(BaseModel):
@@ -3948,6 +3957,21 @@ class BankTemplateConfig(BaseModel):
         default=None, description="Toggle the entity/link graph arm during recall"
     )
     enable_reranking: bool | None = Field(default=None, description="Toggle cross-encoder reranking during recall")
+    recall_relevance_check: bool | None = Field(
+        default=None,
+        description="Ask the server's recall-checks decision model whether any top result helps answer the query, "
+        "and flag the recall response (nothing_relevant) when none does",
+    )
+    recall_conditional_recency: bool | None = Field(
+        default=None,
+        description="Apply recall's recency boost only to queries the recall-checks decision model reads as asking "
+        "about the current or latest state of something",
+    )
+    recall_injection_gate: bool | None = Field(
+        default=None,
+        description="Withhold recalled memories the recall-checks decision model reads as instructions planted "
+        "for an AI agent",
+    )
     reflect_use_decision_model: bool | None = Field(
         default=None,
         description="When the server has a decision model, reflect lets it prune evidence and decide when to stop",
@@ -6390,6 +6414,7 @@ def _register_routes(app: FastAPI):
                         tag_groups=request.tag_groups,
                         min_scores=request.min_scores,
                         temporal_window=request.temporal_window,
+                        recall_checks=True,
                     ),
                     operation="recall",
                     bank_id=bank_id,
@@ -6480,6 +6505,7 @@ def _register_routes(app: FastAPI):
                 chunks=chunks_response,
                 source_facts=source_facts_response,
                 source_facts_truncated=core_result.source_facts_truncated,
+                nothing_relevant=core_result.nothing_relevant,
             )
 
             handler_duration = time.perf_counter() - handler_start

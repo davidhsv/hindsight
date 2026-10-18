@@ -9225,6 +9225,42 @@
             "title": "Enable Reranking",
             "description": "Toggle cross-encoder reranking during recall"
           },
+          "recall_relevance_check": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recall Relevance Check",
+            "description": "Ask the server's recall-checks decision model whether any top result helps answer the query, and flag the recall response (nothing_relevant) when none does"
+          },
+          "recall_conditional_recency": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recall Conditional Recency",
+            "description": "Apply recall's recency boost only to queries the recall-checks decision model reads as asking about the current or latest state of something"
+          },
+          "recall_injection_gate": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recall Injection Gate",
+            "description": "Withhold recalled memories the recall-checks decision model reads as instructions planted for an AI agent"
+          },
           "reflect_use_decision_model": {
             "anyOf": [
               {
@@ -17320,6 +17356,18 @@
             ],
             "title": "Source Facts Truncated",
             "description": "Whether the source_facts map was cut short by the token budget. When true, some IDs in results[].source_fact_ids have no entry in source_facts \u2014 the budget ran out, the references are not dangling. Only set when source facts were requested."
+          },
+          "nothing_relevant": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nothing Relevant",
+            "description": "Set when the bank's recall relevance check is on (recall_relevance_check): true when a decision model judged that none of the top ten results helps answer the query, or none was returned. A warning, not a filter: the results are the same either way. None when the check is off or the decision model did not answer."
           }
         },
         "type": "object",

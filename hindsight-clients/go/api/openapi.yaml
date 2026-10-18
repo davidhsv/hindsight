@@ -6375,6 +6375,15 @@ components:
         enable_reranking:
           nullable: true
           type: boolean
+        recall_relevance_check:
+          nullable: true
+          type: boolean
+        recall_conditional_recency:
+          nullable: true
+          type: boolean
+        recall_injection_gate:
+          nullable: true
+          type: boolean
         reflect_use_decision_model:
           nullable: true
           type: boolean
@@ -11903,6 +11912,9 @@ components:
             $ref: '#/components/schemas/RecallResult'
           nullable: true
         source_facts_truncated:
+          nullable: true
+          type: boolean
+        nothing_relevant:
           nullable: true
           type: boolean
       required:

@@ -238,6 +238,16 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
                 answers[question_id] = {"type": "choice", "choice": pick, "probabilities": probabilities}
             return JSONResponse({"model": "stub", "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 1}})
 
+        checks = _recall_check_answers(stubs, state, body["questions"])
+        if checks is not None:
+            return JSONResponse(
+                {
+                    "model": body.get("model", "stub"),
+                    "answers": checks,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+            )
+
         for question_id, question in body["questions"].items():
             if question["type"] == "noul":
                 memory = question["instructions"]["memory"]
@@ -281,6 +291,30 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
         return JSONResponse({"id": "rerank-stub", "results": results})
 
     return app
+
+
+def _recall_check_answers(stubs: Stubs, state: object, questions: dict) -> dict | None:
+    """The answers to a recall check's request, or None when the request is not one.
+
+    Told apart by shape: the injection gate lists its memories in a structured state, and the
+    other two each ask one question under a fixed id.
+    """
+    checks = stubs.recall_checks
+    if isinstance(state, dict) and "memories" in state:
+        checks.asked.append("gate")
+        texts = {memory["id"]: memory["text"] for memory in state["memories"]}
+        answers = {}
+        for key in questions:
+            text = texts[key.split("_", 1)[1]]  # "inj_m3" and "skip_m3" both ask about memory m3
+            answers[key] = {"type": "noul", "noul": 0.9 if any(p in text for p in checks.planted) else 0.01}
+        return answers
+    if set(questions) == {"current_state"}:
+        checks.asked.append("current_state")
+        return {"current_state": {"type": "noul", "noul": checks.current_state}}
+    if set(questions) == {"flag"}:
+        checks.asked.append("relevance")
+        return {"flag": {"type": "noul", "noul": checks.any_helps}}
+    return None
 
 
 def _usage(

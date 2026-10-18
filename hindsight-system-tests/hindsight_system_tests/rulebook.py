@@ -514,6 +514,29 @@ class TriageStub:
         self.fits_mission.clear()
 
 
+class RecallChecksStub:
+    """The recall checks' answers, scripted (see hindsight_api/engine/search/recall_checks.py).
+
+    ``current_state`` answers conditional recency ("is the query about the current state?"),
+    ``any_helps`` the relevance check ("does any listed memory help?"); the injection gate
+    scores a memory 0.9 when its text contains one of ``planted``, else 0.01. The defaults let
+    every check pass through: recency kept, something relevant, nothing planted. ``asked``
+    records which check each request was, in arrival order.
+    """
+
+    def __init__(self) -> None:
+        self.current_state = 0.9
+        self.any_helps = 0.95
+        self.planted: set[str] = set()
+        self.asked: list[str] = []
+
+    def reset(self) -> None:
+        self.current_state = 0.9
+        self.any_helps = 0.95
+        self.planted.clear()
+        self.asked.clear()
+
+
 @dataclass(frozen=True)
 class ReceivedWebhook:
     """One delivery the stub accepted, kept so a test can assert on it."""
@@ -542,6 +565,7 @@ class Stubs:
     embeddings: EmbeddingStub = field(default_factory=EmbeddingStub)
     rerank: RerankStub = field(default_factory=RerankStub)
     triage: TriageStub = field(default_factory=TriageStub)
+    recall_checks: RecallChecksStub = field(default_factory=RecallChecksStub)
     rejected_requests: list[str] = field(default_factory=list)
     """Requests the stub refused as malformed — see ``validation.py``."""
 
@@ -568,6 +592,7 @@ class Stubs:
         self.rerank.verdicts = {}
         self.rerank.states = []
         self.triage.reset()
+        self.recall_checks.reset()
         self.rejected_requests.clear()
         self.webhooks.clear()
 

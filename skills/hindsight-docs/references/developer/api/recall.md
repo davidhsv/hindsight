@@ -879,6 +879,10 @@ A dict keyed by fact ID containing full `RecallResult` objects for the source fa
 
 Whether the token budget cut the `source_facts` map short. When `true`, some IDs in `results[].source_fact_ids` have no entry in `source_facts` because the budget ran out — the references are not dangling. Only present when `include.source_facts` is enabled.
 
+### nothing_relevant
+
+A warning, set only on a bank with the [recall relevance check](../configuration.md#recall-checks) on: `true` when a decision model judged that none of the top ten results helps answer the query (or nothing was recalled), `false` when one does. The results are the same either way; an agent can tell its user it found nothing relevant, or read the memories with that in mind. `null` when the check is off or the decision model did not answer.
+
 ### chunks
 
 A dict keyed by chunk ID containing the raw source text chunks associated with the returned facts. Only present when `include.chunks` is enabled. Each chunk has `id`, `text`, `chunk_index`, and `truncated` (whether the text was cut to fit the token budget).

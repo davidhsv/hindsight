@@ -41,7 +41,9 @@ class DecisionQuestion(BaseModel):
     """One question, in the System One shape.
 
     ``criteria``: for a choice, option id -> description (None when the id says enough);
-    for a score, the levels from lowest to highest.
+    for a score, the levels from lowest to highest; for a noul, optionally what counts as
+    ``true`` and as ``false``, each as named parts (what it means, examples). The OpenAI
+    Decisions API has no criteria for a noul, so that provider drops them.
 
     ``instructions`` may be named parts instead of one string — a task and the item it is
     about, say — which System One reads as such; providers that take a string get it as JSON.
@@ -49,7 +51,7 @@ class DecisionQuestion(BaseModel):
 
     type: Literal["noul", "choice", "score"]
     instructions: str | dict[str, str]
-    criteria: dict[str, str | None] | list[str] | None = None
+    criteria: dict[str, str | None] | dict[str, dict[str, str | list[str]]] | list[str] | None = None
 
     def system_one(self) -> dict[str, Any]:
         # Built by hand, not model_dump(exclude_none=True): a choice option with no
@@ -135,12 +137,14 @@ def _openai_question(name: str, question: DecisionQuestion) -> _OpenAIQuestion:
     if question.type == "noul":
         return _OpenAIQuestion(type="predicate", name=name, instructions=instructions)
     criteria = question.criteria or []
-    # The Decisions API wants a description for every option and level; a bare label doubles as one.
-    labels = list(criteria.items()) if isinstance(criteria, dict) else [(label, None) for label in criteria]
+    # The Decisions API wants a description for every option and level; a bare label doubles as
+    # one, and a description given as named parts goes as JSON, as named-part instructions do.
+    pairs = list(criteria.items()) if isinstance(criteria, dict) else [(label, None) for label in criteria]
+    labels = [(k, json.dumps(d, ensure_ascii=False) if isinstance(d, dict) else d or k) for k, d in pairs]
     if question.type == "choice":
-        choices = [_OpenAIOption(value=k, description=d or k) for k, d in labels]
+        choices = [_OpenAIOption(value=k, description=d) for k, d in labels]
         return _OpenAIQuestion(type="choice", name=name, instructions=instructions, choices=choices)
-    levels = [_OpenAILevel(label=k, description=d or k) for k, d in labels]
+    levels = [_OpenAILevel(label=k, description=d) for k, d in labels]
     return _OpenAIQuestion(type="score", name=name, instructions=instructions, levels=levels)
 
 

@@ -1362,6 +1362,7 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                     "include_source_facts": include_source_facts,
                     "max_source_facts_tokens": max_source_facts_tokens,
                     "request_context": _get_request_context(config),
+                    "recall_checks": True,
                 }
                 if tags is not None:
                     recall_kwargs["tags"] = tags
@@ -1488,6 +1489,7 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                     "include_source_facts": include_source_facts,
                     "max_source_facts_tokens": max_source_facts_tokens,
                     "request_context": _get_request_context(config),
+                    "recall_checks": True,
                 }
                 if tags is not None:
                     recall_kwargs["tags"] = tags

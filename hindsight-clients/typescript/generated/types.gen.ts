@@ -589,6 +589,24 @@ export type BankTemplateConfig = {
    */
   enable_reranking?: boolean | null;
   /**
+   * Recall Relevance Check
+   *
+   * Ask the server's recall-checks decision model whether any top result helps answer the query, and flag the recall response (nothing_relevant) when none does
+   */
+  recall_relevance_check?: boolean | null;
+  /**
+   * Recall Conditional Recency
+   *
+   * Apply recall's recency boost only to queries the recall-checks decision model reads as asking about the current or latest state of something
+   */
+  recall_conditional_recency?: boolean | null;
+  /**
+   * Recall Injection Gate
+   *
+   * Withhold recalled memories the recall-checks decision model reads as instructions planted for an AI agent
+   */
+  recall_injection_gate?: boolean | null;
+  /**
    * Reflect Use Decision Model
    *
    * When the server has a decision model, reflect lets it prune evidence and decide when to stop
@@ -5655,6 +5673,12 @@ export type RecallResponse = {
    * Whether the source_facts map was cut short by the token budget. When true, some IDs in results[].source_fact_ids have no entry in source_facts — the budget ran out, the references are not dangling. Only set when source facts were requested.
    */
   source_facts_truncated?: boolean | null;
+  /**
+   * Nothing Relevant
+   *
+   * Set when the bank's recall relevance check is on (recall_relevance_check): true when a decision model judged that none of the top ten results helps answer the query, or none was returned. A warning, not a filter: the results are the same either way. None when the check is off or the decision model did not answer.
+   */
+  nothing_relevant?: boolean | null;
 };
 
 /**

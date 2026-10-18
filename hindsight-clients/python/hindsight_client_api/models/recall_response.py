@@ -35,7 +35,8 @@ class RecallResponse(BaseModel):
     chunks: Optional[Dict[str, ChunkData]] = None
     source_facts: Optional[Dict[str, RecallResult]] = None
     source_facts_truncated: Optional[StrictBool] = None
-    __properties: ClassVar[List[str]] = ["results", "trace", "entities", "chunks", "source_facts", "source_facts_truncated"]
+    nothing_relevant: Optional[StrictBool] = None
+    __properties: ClassVar[List[str]] = ["results", "trace", "entities", "chunks", "source_facts", "source_facts_truncated", "nothing_relevant"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -129,6 +130,11 @@ class RecallResponse(BaseModel):
         if self.source_facts_truncated is None and "source_facts_truncated" in self.model_fields_set:
             _dict['source_facts_truncated'] = None
 
+        # set to None if nothing_relevant (nullable) is None
+        # and model_fields_set contains the field
+        if self.nothing_relevant is None and "nothing_relevant" in self.model_fields_set:
+            _dict['nothing_relevant'] = None
+
         return _dict
 
     @classmethod
@@ -161,7 +167,8 @@ class RecallResponse(BaseModel):
             )
             if obj.get("source_facts") is not None
             else None,
-            "source_facts_truncated": obj.get("source_facts_truncated")
+            "source_facts_truncated": obj.get("source_facts_truncated"),
+            "nothing_relevant": obj.get("nothing_relevant")
         })
         return _obj
 

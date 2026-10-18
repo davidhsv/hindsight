@@ -727,6 +727,7 @@ from .retain.attachment_content import (
 from .retain.fact_storage import _normalize_scopes
 from .retain.fold import FoldMemberRef
 from .retain.types import RetainBatchResult, RetainContentDict, merge_processed_content_tokens
+from .search.recall_checks import apply_result_checks, asks_current_state, recency_decay_for, resolve_recall_checks
 from .search.reranking import CrossEncoderReranker, apply_combined_scoring
 from .search.tag_resolution import MAX_VOCABULARY, TagResolutionError, needs_resolution, resolve_tag_groups
 from .search.tags import (
@@ -8939,6 +8940,7 @@ class MemoryEngine(MemoryEngineInterface):
         _connection_budget: int | None = None,
         _quiet: bool = False,
         reranking: RecallReranking = "cross_encoder",
+        recall_checks: bool = False,
     ) -> RecallResultModel:
         """
         Recall memories using N*4-way parallel retrieval (N fact types × 4 retrieval methods).
@@ -8986,6 +8988,9 @@ class MemoryEngine(MemoryEngineInterface):
                   extracting dates from ``query``. It ranks memories dated inside it
                   higher; it does not exclude memories dated outside it, and it does
                   nothing when the bank has ``enable_temporal_retrieval`` off.
+            recall_checks: Run the bank's recall checks (relevance flag, conditional recency,
+                  injection gate; see search/recall_checks.py). The HTTP and MCP recall pass
+                  True; the recalls consolidation and reflect make for themselves leave them off.
 
         Returns:
             RecallResultModel containing:
@@ -9150,6 +9155,7 @@ class MemoryEngine(MemoryEngineInterface):
         reranking = _resolve_reranking(budget_config_dict, reranking)
         if prefer_observations is None:
             prefer_observations = bool(budget_config_dict.get("recall_prefer_observations", False))
+        checks = resolve_recall_checks(budget_config_dict) if recall_checks else None
 
         # Log recall start with tags if present (skip if quiet mode for internal operations)
         if not _quiet:
@@ -9169,7 +9175,21 @@ class MemoryEngine(MemoryEngineInterface):
         recall_span.set_attribute("hindsight.thinking_budget", thinking_budget)
         recall_span.set_attribute("hindsight.max_tokens", max_tokens)
 
+        recency_route: asyncio.Task[bool | None] | None = None
         try:
+            # Conditional recency is asked as retrieval starts, not before it: the answer is only
+            # read once candidates are scored. Skipped where nothing would read it: recency
+            # already off, the interleave order (never re-scored), or a decision model reranking
+            # recall (its order is final, with no boosts applied).
+            if (
+                checks is not None
+                and checks.conditional_recency
+                and reranking != "interleave"
+                and get_config().recency_decay_function != "none"
+                and get_config().decision_model_config("recall") is None
+            ):
+                recency_route = asyncio.create_task(asks_current_state(checks.model, query))
+
             # Backpressure: limit concurrent recalls to prevent overwhelming the database
             result = None
             error_msg = None
@@ -9214,6 +9234,7 @@ class MemoryEngine(MemoryEngineInterface):
                             enable_text_search=enable_text_search,
                             enable_temporal_retrieval=enable_temporal_retrieval,
                             enable_graph_retrieval=enable_graph_retrieval,
+                            recency_route=recency_route,
                         )
                         get_metrics_collector().record_recall_phase(
                             "search_with_retries", time.perf_counter() - _t0_swr2, diagnostic=True
@@ -9324,6 +9345,13 @@ class MemoryEngine(MemoryEngineInterface):
                 if not get_memories().store_owned_for(bank_id):
                     await self._raise_if_bank_deleted(bank_id)
 
+            # After the existence re-check above, which reads an empty result as a possibly deleted
+            # bank: a gate that withheld every result must not trigger it.
+            if checks is not None and checks.on_results and result is not None:
+                _t0 = time.perf_counter()
+                result = await apply_result_checks(checks, query, result, bank_id)
+                get_metrics_collector().record_recall_phase("recall_checks", time.perf_counter() - _t0)
+
             # Call post-operation hook for success
             if self._operation_validator and result is not None:
                 from hindsight_api.extensions.operation_validator import RecallResult
@@ -9354,6 +9382,8 @@ class MemoryEngine(MemoryEngineInterface):
 
             return result
         finally:
+            if recency_route is not None and not recency_route.done():
+                recency_route.cancel()
             recall_span_context.__exit__(None, None, None)
 
     async def _search_with_retries(
@@ -9389,6 +9419,7 @@ class MemoryEngine(MemoryEngineInterface):
         enable_text_search: bool = True,
         enable_temporal_retrieval: bool = True,
         enable_graph_retrieval: bool = True,
+        recency_route: "asyncio.Task[bool | None] | None" = None,
     ) -> RecallResultModel:
         """
         Search implementation with modular retrieval and reranking.
@@ -9555,7 +9586,7 @@ class MemoryEngine(MemoryEngineInterface):
                     ),
                     per_source_cap=get_config().recall_max_candidates_per_source,
                     strategy_boosts=get_config().recall_strategy_boosts,
-                    recency_decay_function=get_config().recency_decay_function,
+                    recency_decay_function=await recency_decay_for(recency_route, get_config().recency_decay_function),
                     recency_decay_linear_window_days=get_config().recency_decay_linear_window_days,
                     recency_decay_halflife_days=get_config().recency_decay_halflife_days,
                     # Resolved here, not in the store: `question_date` overrides "now", and two
@@ -10133,11 +10164,14 @@ class MemoryEngine(MemoryEngineInterface):
 
                 is_passthrough = stage2_passthrough(reranking, served_provider)
                 scoring_config = get_config()
+                recency_decay_function = await recency_decay_for(recency_route, scoring_config.recency_decay_function)
+                if recency_decay_function != scoring_config.recency_decay_function:
+                    log_buffer.append("  [4.5] Conditional recency: off, the query is not about the current state")
                 apply_combined_scoring(
                     scored_results,
                     now=_recall_scoring_now(question_date),
                     is_passthrough_reranker=is_passthrough,
-                    recency_decay_function=scoring_config.recency_decay_function,
+                    recency_decay_function=recency_decay_function,
                     recency_decay_linear_window_days=scoring_config.recency_decay_linear_window_days,
                     recency_decay_halflife_days=scoring_config.recency_decay_halflife_days,
                 )

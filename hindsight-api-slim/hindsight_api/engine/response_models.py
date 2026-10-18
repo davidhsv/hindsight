@@ -511,6 +511,15 @@ class RecallResult(BaseModel):
             "references are not dangling. Only set when source facts were requested."
         ),
     )
+    nothing_relevant: bool | None = Field(
+        None,
+        description=(
+            "Set when the bank's recall relevance check is on (recall_relevance_check): true when a decision "
+            "model judged that none of the top ten results helps answer the query, or none was returned. A "
+            "warning, not a filter: the results are the same either way. None when the check is off or the "
+            "decision model did not answer."
+        ),
+    )
 
 
 class ReflectResult(BaseModel):

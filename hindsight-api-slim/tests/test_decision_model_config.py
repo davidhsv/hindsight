@@ -39,6 +39,7 @@ def test_no_decision_model_by_default(monkeypatch):
     assert config.decision_model_config("recall") is None
     assert config.decision_model_config("reflect") is None
     assert config.decision_model_config("consolidation") is None
+    assert config.decision_model_config("recall_checks") is None
 
 
 def test_the_typesafe_default_is_an_explicit_jev_release(monkeypatch):
@@ -55,9 +56,23 @@ def test_the_typesafe_default_is_an_explicit_jev_release(monkeypatch):
     }
 
 
+def test_recall_checks_can_run_beside_the_reranker(monkeypatch):
+    """Its own operation: recall can keep the cross-encoder while the checks ask the decision model."""
+    config = _config(
+        monkeypatch,
+        {
+            "HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_PROVIDER": "typesafe",
+            "HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_API_KEY": "checks-key",
+        },
+    )
+    assert config.decision_model_config("recall") is None
+    checks = config.decision_model_config("recall_checks")
+    assert checks is not None and (checks.api_key, checks.model) == ("checks-key", "jev-1.13.0")
+
+
 def test_global_setup_reaches_every_operation(monkeypatch):
     config = _config(monkeypatch, _GLOBAL)
-    for operation in ("recall", "reflect", "consolidation"):
+    for operation in ("recall", "reflect", "consolidation", "recall_checks"):
         assert config.decision_model_config(operation) == DecisionModelConfig(
             provider="typesafe",
             api_key="global-key",

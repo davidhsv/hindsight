@@ -1551,7 +1551,7 @@ changes when TypeSafe moves the alias to a new release. It is `jev-1.13.0`, the 
 decision-model questions below were developed and measured on; the TypeSafe reranker, measured
 separately, defaults to `jev-1.14.0`. Set `HINDSIGHT_API_DECISION_MODEL_MODEL` to move it.
 
-**Per-operation overrides.** `HINDSIGHT_API_{RECALL,REFLECT,CONSOLIDATION}_DECISION_MODEL_{PROVIDER,API_KEY,MODEL,BASE_URL}`
+**Per-operation overrides.** `HINDSIGHT_API_{RECALL,REFLECT,CONSOLIDATION,RECALL_CHECKS}_DECISION_MODEL_{PROVIDER,API_KEY,MODEL,BASE_URL}`
 replace the global value for that operation only. Key, model and URL fall back to the global
 value only while the operation uses the global provider; an operation that switches to another
 provider takes that provider's defaults and needs its own key. Set an operation's provider to
@@ -1583,6 +1583,13 @@ LLM call; only the rest reach the consolidation LLM. On the consolidation eval t
 calls by about 40% at the same pass rate. Turn it off per bank with
 [`HINDSIGHT_API_CONSOLIDATION_USE_DECISION_MODEL`](#observations), or for every bank with
 `HINDSIGHT_API_CONSOLIDATION_DECISION_MODEL_PROVIDER=none`.
+
+**Recall checks.** The `recall_checks` operation is the decision model the per-bank
+[recall checks](#recall-checks) ask. It is separate from `recall` so the checks can run beside
+the cross-encoder: set the global decision model and `HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER=none`,
+or set only `HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_*`. Only the `typesafe` provider is
+supported here, since the checks' wordings and thresholds were measured on Jev: with another
+provider the checks are skipped and a warning is logged.
 
 ### Authentication
 
@@ -1783,6 +1790,20 @@ still maintained, so a bank can be switched back without a reindex. The
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `HINDSIGHT_API_RECALL_PREFER_OBSERVATIONS` | Value of recall's [`prefer_observations`](./api/recall#prefer_observations) when a REST or MCP request leaves it out: drop raw facts that a returned observation was consolidated from, so results carry no duplicates. A value in the request still wins. Hierarchical — overridable per bank. Useful when callers you don't control (MCP connectors, generic agents) never pass the flag. | `false` |
+
+##### Recall checks
+
+Questions recall asks a decision model (the [`recall_checks` operation](#decision-model)) about
+its own query and results. Each is off by default and costs one or a few decision-model requests
+per recall; each is hierarchical, so a bank opts in on its own. They run on REST and MCP recall
+only, never on the recalls consolidation and reflect make internally. A check that is on while
+the server has no decision model for recall checks is skipped, and a warning is logged.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HINDSIGHT_API_RECALL_RELEVANCE_CHECK` | Ask whether any of the top ten results helps answer the query, and set the recall response's `nothing_relevant` to `true` when none does (or nothing was recalled), `false` otherwise. A warning, not a filter: the results are returned unchanged, so the caller decides what to do with them. `nothing_relevant` stays `null` when the check is off or the decision model did not answer. Measured on coding-agent queries, it flagged 7 of 8 held-out queries that needed no memory and 3 of 38 that did; treat it as a hint. Hierarchical (per bank). | `false` |
+| `HINDSIGHT_API_RECALL_CONDITIONAL_RECENCY` | Apply the [recency boost](#retrieval) only when the query asks about the current or latest state of something ("what is X now?"); other queries ("when did X first…?") are ranked without it. Asked while retrieval runs, so it adds little latency. If the decision model does not answer, recency stays as configured. No effect when `HINDSIGHT_API_RECENCY_DECAY_FUNCTION=none`, or when a decision model [reranks recall](#decision-model) (its order is final). Hierarchical (per bank). | `false` |
+| `HINDSIGHT_API_RECALL_INJECTION_GATE` | Withhold recalled memories the decision model reads as instructions planted for an AI agent (run code fetched from outside, send data anywhere, ignore the user, skip review or tests…), using [jevmem](https://github.com/Avinash-jetwani/jevmem)'s gate questions. Screens the results and their source facts, and withholds a blocked memory's chunk with it. Fails closed: a memory whose request fails is withheld too, so a decision-model outage empties recall for the banks that have it on. Hierarchical (per bank). | `false` |
 
 ##### Pairing with the retain side: plain-retrieval ("RAG") banks
 

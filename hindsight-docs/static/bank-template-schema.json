@@ -159,6 +159,45 @@
           "description": "Toggle cross-encoder reranking during recall",
           "title": "Enable Reranking"
         },
+        "recall_relevance_check": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ask the server's recall-checks decision model whether any top result helps answer the query, and flag the recall response (nothing_relevant) when none does",
+          "title": "Recall Relevance Check"
+        },
+        "recall_conditional_recency": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Apply recall's recency boost only to queries the recall-checks decision model reads as asking about the current or latest state of something",
+          "title": "Recall Conditional Recency"
+        },
+        "recall_injection_gate": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Withhold recalled memories the recall-checks decision model reads as instructions planted for an AI agent",
+          "title": "Recall Injection Gate"
+        },
         "reflect_use_decision_model": {
           "anyOf": [
             {

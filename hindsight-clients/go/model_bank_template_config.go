@@ -31,6 +31,9 @@ type BankTemplateConfig struct {
 	EnableTemporalRetrieval NullableBool `json:"enable_temporal_retrieval,omitempty"`
 	EnableGraphRetrieval NullableBool `json:"enable_graph_retrieval,omitempty"`
 	EnableReranking NullableBool `json:"enable_reranking,omitempty"`
+	RecallRelevanceCheck NullableBool `json:"recall_relevance_check,omitempty"`
+	RecallConditionalRecency NullableBool `json:"recall_conditional_recency,omitempty"`
+	RecallInjectionGate NullableBool `json:"recall_injection_gate,omitempty"`
 	ReflectUseDecisionModel NullableBool `json:"reflect_use_decision_model,omitempty"`
 	MentalModelRefreshUseDecisionModel NullableBool `json:"mental_model_refresh_use_decision_model,omitempty"`
 	DispositionSkepticism NullableInt32 `json:"disposition_skepticism,omitempty"`
@@ -595,6 +598,132 @@ func (o *BankTemplateConfig) SetEnableRerankingNil() {
 // UnsetEnableReranking ensures that no value is present for EnableReranking, not even an explicit nil
 func (o *BankTemplateConfig) UnsetEnableReranking() {
 	o.EnableReranking.Unset()
+}
+
+// GetRecallRelevanceCheck returns the RecallRelevanceCheck field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BankTemplateConfig) GetRecallRelevanceCheck() bool {
+	if o == nil || IsNil(o.RecallRelevanceCheck.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.RecallRelevanceCheck.Get()
+}
+
+// GetRecallRelevanceCheckOk returns a tuple with the RecallRelevanceCheck field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BankTemplateConfig) GetRecallRelevanceCheckOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.RecallRelevanceCheck.Get(), o.RecallRelevanceCheck.IsSet()
+}
+
+// HasRecallRelevanceCheck returns a boolean if a field has been set.
+func (o *BankTemplateConfig) HasRecallRelevanceCheck() bool {
+	if o != nil && o.RecallRelevanceCheck.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRecallRelevanceCheck gets a reference to the given NullableBool and assigns it to the RecallRelevanceCheck field.
+func (o *BankTemplateConfig) SetRecallRelevanceCheck(v bool) {
+	o.RecallRelevanceCheck.Set(&v)
+}
+// SetRecallRelevanceCheckNil sets the value for RecallRelevanceCheck to be an explicit nil
+func (o *BankTemplateConfig) SetRecallRelevanceCheckNil() {
+	o.RecallRelevanceCheck.Set(nil)
+}
+
+// UnsetRecallRelevanceCheck ensures that no value is present for RecallRelevanceCheck, not even an explicit nil
+func (o *BankTemplateConfig) UnsetRecallRelevanceCheck() {
+	o.RecallRelevanceCheck.Unset()
+}
+
+// GetRecallConditionalRecency returns the RecallConditionalRecency field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BankTemplateConfig) GetRecallConditionalRecency() bool {
+	if o == nil || IsNil(o.RecallConditionalRecency.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.RecallConditionalRecency.Get()
+}
+
+// GetRecallConditionalRecencyOk returns a tuple with the RecallConditionalRecency field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BankTemplateConfig) GetRecallConditionalRecencyOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.RecallConditionalRecency.Get(), o.RecallConditionalRecency.IsSet()
+}
+
+// HasRecallConditionalRecency returns a boolean if a field has been set.
+func (o *BankTemplateConfig) HasRecallConditionalRecency() bool {
+	if o != nil && o.RecallConditionalRecency.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRecallConditionalRecency gets a reference to the given NullableBool and assigns it to the RecallConditionalRecency field.
+func (o *BankTemplateConfig) SetRecallConditionalRecency(v bool) {
+	o.RecallConditionalRecency.Set(&v)
+}
+// SetRecallConditionalRecencyNil sets the value for RecallConditionalRecency to be an explicit nil
+func (o *BankTemplateConfig) SetRecallConditionalRecencyNil() {
+	o.RecallConditionalRecency.Set(nil)
+}
+
+// UnsetRecallConditionalRecency ensures that no value is present for RecallConditionalRecency, not even an explicit nil
+func (o *BankTemplateConfig) UnsetRecallConditionalRecency() {
+	o.RecallConditionalRecency.Unset()
+}
+
+// GetRecallInjectionGate returns the RecallInjectionGate field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BankTemplateConfig) GetRecallInjectionGate() bool {
+	if o == nil || IsNil(o.RecallInjectionGate.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.RecallInjectionGate.Get()
+}
+
+// GetRecallInjectionGateOk returns a tuple with the RecallInjectionGate field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BankTemplateConfig) GetRecallInjectionGateOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.RecallInjectionGate.Get(), o.RecallInjectionGate.IsSet()
+}
+
+// HasRecallInjectionGate returns a boolean if a field has been set.
+func (o *BankTemplateConfig) HasRecallInjectionGate() bool {
+	if o != nil && o.RecallInjectionGate.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRecallInjectionGate gets a reference to the given NullableBool and assigns it to the RecallInjectionGate field.
+func (o *BankTemplateConfig) SetRecallInjectionGate(v bool) {
+	o.RecallInjectionGate.Set(&v)
+}
+// SetRecallInjectionGateNil sets the value for RecallInjectionGate to be an explicit nil
+func (o *BankTemplateConfig) SetRecallInjectionGateNil() {
+	o.RecallInjectionGate.Set(nil)
+}
+
+// UnsetRecallInjectionGate ensures that no value is present for RecallInjectionGate, not even an explicit nil
+func (o *BankTemplateConfig) UnsetRecallInjectionGate() {
+	o.RecallInjectionGate.Unset()
 }
 
 // GetReflectUseDecisionModel returns the ReflectUseDecisionModel field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -2367,6 +2496,15 @@ func (o BankTemplateConfig) ToMap() (map[string]interface{}, error) {
 	}
 	if o.EnableReranking.IsSet() {
 		toSerialize["enable_reranking"] = o.EnableReranking.Get()
+	}
+	if o.RecallRelevanceCheck.IsSet() {
+		toSerialize["recall_relevance_check"] = o.RecallRelevanceCheck.Get()
+	}
+	if o.RecallConditionalRecency.IsSet() {
+		toSerialize["recall_conditional_recency"] = o.RecallConditionalRecency.Get()
+	}
+	if o.RecallInjectionGate.IsSet() {
+		toSerialize["recall_injection_gate"] = o.RecallInjectionGate.Get()
 	}
 	if o.ReflectUseDecisionModel.IsSet() {
 		toSerialize["reflect_use_decision_model"] = o.ReflectUseDecisionModel.Get()

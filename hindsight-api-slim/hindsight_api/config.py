@@ -698,7 +698,7 @@ ENV_RERANKER_GOOGLE_SERVICE_ACCOUNT_KEY = "HINDSIGHT_API_RERANKER_GOOGLE_SERVICE
 
 # Decision model (TypeSafe System One): set up once, shared by every operation that supports
 # one. Separate from the typesafe reranker above, which keeps its own settings. Each operation may override provider/key/model/URL with
-# HINDSIGHT_API_{RECALL,REFLECT,CONSOLIDATION}_DECISION_MODEL_* (see _decision_model_env).
+# HINDSIGHT_API_{RECALL,REFLECT,CONSOLIDATION,RECALL_CHECKS}_DECISION_MODEL_* (see _decision_model_env).
 ENV_DECISION_MODEL_PROVIDER = "HINDSIGHT_API_DECISION_MODEL_PROVIDER"
 ENV_DECISION_MODEL_API_KEY = "HINDSIGHT_API_DECISION_MODEL_API_KEY"
 ENV_DECISION_MODEL_MODEL = "HINDSIGHT_API_DECISION_MODEL_MODEL"
@@ -1082,6 +1082,12 @@ ENV_ENABLE_TEXT_SEARCH = "HINDSIGHT_API_ENABLE_TEXT_SEARCH"
 ENV_ENABLE_TEMPORAL_RETRIEVAL = "HINDSIGHT_API_ENABLE_TEMPORAL_RETRIEVAL"
 ENV_ENABLE_GRAPH_RETRIEVAL = "HINDSIGHT_API_ENABLE_GRAPH_RETRIEVAL"
 ENV_ENABLE_RERANKING = "HINDSIGHT_API_ENABLE_RERANKING"
+
+# Recall checks: questions recall asks the "recall_checks" decision model about its own query
+# and results, each off by default and switched on per bank (see engine/search/recall_checks.py).
+ENV_RECALL_RELEVANCE_CHECK = "HINDSIGHT_API_RECALL_RELEVANCE_CHECK"
+ENV_RECALL_CONDITIONAL_RECENCY = "HINDSIGHT_API_RECALL_CONDITIONAL_RECENCY"
+ENV_RECALL_INJECTION_GATE = "HINDSIGHT_API_RECALL_INJECTION_GATE"
 
 # Recall budget mapping (budget enum -> thinking_budget integer)
 ENV_RECALL_BUDGET_FUNCTION = "HINDSIGHT_API_RECALL_BUDGET_FUNCTION"
@@ -1520,8 +1526,11 @@ DEFAULT_RERANKER_ALIBABA_MODEL = "qwen3-rerank"
 
 DEFAULT_RERANKER_GOOGLE_MODEL = "semantic-ranker-default-004"
 
-DecisionModelOperation = Literal["recall", "reflect", "consolidation"]
-DECISION_MODEL_OPERATIONS: tuple[DecisionModelOperation, ...] = ("recall", "reflect", "consolidation")
+# "recall" is the decision model that replaces recall's reranker; "recall_checks" is the one the
+# per-bank recall checks ask (see engine/search/recall_checks.py). They are separate operations so
+# a bank can run the checks beside the cross-encoder: set the recall one to "none".
+DecisionModelOperation = Literal["recall", "reflect", "consolidation", "recall_checks"]
+DECISION_MODEL_OPERATIONS: tuple[DecisionModelOperation, ...] = ("recall", "reflect", "consolidation", "recall_checks")
 
 
 @dataclass(frozen=True)
@@ -1536,9 +1545,9 @@ class _DecisionProviderDefaults:
 #
 # typesafe is pinned to an explicit Jev release for the reason the reranker is (see
 # DEFAULT_RERANKER_TYPESAFE_MODEL), but to jev-1.13.0, not 1.14.0. 1.13.0 is what jev-latest
-# served when the pin was made, so triage and reflect keep the model they run on today, and
-# 1.14.0 has only been measured to tie it on per-memory relevance. Move it together with a
-# re-measurement of the questions asked of it.
+# served when the pin was made, so triage and reflect keep the model they run on today; the
+# recall checks' wordings and thresholds were measured on it; and 1.14.0 has only been measured
+# to tie it on per-memory relevance. Move it together with a re-measurement of those questions.
 DECISION_MODEL_PROVIDER_DEFAULTS = {
     "typesafe": _DecisionProviderDefaults(model="jev-1.13.0", base_url="https://api.typesafe.ai"),
     "cloudflare": _DecisionProviderDefaults(model="clef", base_url=None),
@@ -2074,6 +2083,17 @@ DEFAULT_ENABLE_TEXT_SEARCH = True
 DEFAULT_ENABLE_TEMPORAL_RETRIEVAL = True  # Temporal retrieval arm + the date-aware query analysis feeding it
 DEFAULT_ENABLE_GRAPH_RETRIEVAL = True  # Entity/link graph traversal arm
 DEFAULT_ENABLE_RERANKING = True  # Cross-encoder rerank of the fused candidates
+
+# Recall checks, all off: each costs a decision-model request per recall, and the injection gate
+# withholds results. A check that is on but has no "recall_checks" decision model to ask is skipped.
+# Flag the response (nothing_relevant) when none of the top results helps answer the query;
+# the results are returned unchanged.
+DEFAULT_RECALL_RELEVANCE_CHECK = False
+# Apply the recency boost only when the query asks about the current or latest state of
+# something; any other query is ranked without it.
+DEFAULT_RECALL_CONDITIONAL_RECENCY = False
+# Withhold recalled memories the decision model reads as instructions planted for an AI agent.
+DEFAULT_RECALL_INJECTION_GATE = False
 
 # Recall budget mapping
 # "fixed": thinking_budget = recall_budget_fixed_<level> (preserves legacy behavior)
@@ -3669,6 +3689,11 @@ class HindsightConfig:
     enable_graph_retrieval: bool
     enable_reranking: bool
 
+    # Recall checks (per-bank; all default False). See engine/search/recall_checks.py.
+    recall_relevance_check: bool
+    recall_conditional_recency: bool
+    recall_injection_gate: bool
+
     # Default for REST/MCP recall's prefer_observations when the request omits it
     recall_prefer_observations: bool
 
@@ -3908,6 +3933,10 @@ class HindsightConfig:
     consolidation_decision_model_api_key: str | None = None
     consolidation_decision_model_model: str | None = None
     consolidation_decision_model_base_url: str | None = None
+    recall_checks_decision_model_provider: str | None = None
+    recall_checks_decision_model_api_key: str | None = None
+    recall_checks_decision_model_model: str | None = None
+    recall_checks_decision_model_base_url: str | None = None
 
     # Class-level sets for configuration categorization
 
@@ -3986,6 +4015,8 @@ class HindsightConfig:
         "reflect_decision_model_base_url",
         "consolidation_decision_model_api_key",
         "consolidation_decision_model_base_url",
+        "recall_checks_decision_model_api_key",
+        "recall_checks_decision_model_base_url",
         # chatgpt: points at a directory holding an OAuth grant.
         "llm_chatgpt_home",
     }
@@ -4024,6 +4055,10 @@ class HindsightConfig:
         "enable_temporal_retrieval",
         "enable_graph_retrieval",
         "enable_reranking",
+        # Recall checks (each one decision-model request per recall when on)
+        "recall_relevance_check",
+        "recall_conditional_recency",
+        "recall_injection_gate",
         # Consolidation settings
         "enable_observations",
         "enable_auto_consolidation",
@@ -5491,6 +5526,14 @@ class HindsightConfig:
             enable_graph_retrieval=os.getenv(ENV_ENABLE_GRAPH_RETRIEVAL, str(DEFAULT_ENABLE_GRAPH_RETRIEVAL)).lower()
             in ("true", "1", "yes"),
             enable_reranking=os.getenv(ENV_ENABLE_RERANKING, str(DEFAULT_ENABLE_RERANKING)).lower()
+            in ("true", "1", "yes"),
+            recall_relevance_check=os.getenv(ENV_RECALL_RELEVANCE_CHECK, str(DEFAULT_RECALL_RELEVANCE_CHECK)).lower()
+            in ("true", "1", "yes"),
+            recall_conditional_recency=os.getenv(
+                ENV_RECALL_CONDITIONAL_RECENCY, str(DEFAULT_RECALL_CONDITIONAL_RECENCY)
+            ).lower()
+            in ("true", "1", "yes"),
+            recall_injection_gate=os.getenv(ENV_RECALL_INJECTION_GATE, str(DEFAULT_RECALL_INJECTION_GATE)).lower()
             in ("true", "1", "yes"),
             recall_prefer_observations=os.getenv(
                 ENV_RECALL_PREFER_OBSERVATIONS, str(DEFAULT_RECALL_PREFER_OBSERVATIONS)
