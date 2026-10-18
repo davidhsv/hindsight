@@ -357,6 +357,42 @@ def test_thresholds_follow_the_purpose_and_the_reference_signal():
     assert settings.threshold(Purpose.HISTORICAL_SEARCH, reference_signal=False) == 0.3
 
 
+async def test_embedding_similarity_alone_does_not_inject_a_memory():
+    """Two candidates equally close to the query in embedding space and on BM25; the reranker reads
+    only one as an answer, and only that one is injected automatically."""
+    answer = _sr("answer", ce=0.9, semantic=0.9)
+    lookalike = _sr("lookalike", ce=0.02, semantic=0.9)
+    outcome = await _recall(_settings(), purpose=Purpose.AUTO_CONTEXT).decide(
+        [answer, lookalike], historical=False, load_embeddings=_no_embeddings, jev=None
+    )
+    assert outcome.admitted_ids == ["answer"]
+    assert {d.memory_id: d.reason for d in outcome.decisions}["lookalike"] is Reason.BELOW_THRESHOLD
+
+
+async def test_a_search_someone_asked_for_admits_what_automatic_injection_rejects():
+    """One candidate between the default thresholds: explicit and historical searches get it, an
+    automatic injection does not, unless the task refers to shared history."""
+    candidate = _sr("mid", ce=0.02, semantic=0.9)
+    settings = _settings()
+
+    async def decide(purpose, query="How is the payments API deployed?"):
+        (decision,) = (
+            await _recall(settings, purpose=purpose, query=query).decide(
+                [candidate], historical=purpose is Purpose.HISTORICAL_SEARCH, load_embeddings=_no_embeddings, jev=None
+            )
+        ).decisions
+        return decision
+
+    auto = await decide(Purpose.AUTO_CONTEXT)
+    lowered = settings.threshold(Purpose.AUTO_CONTEXT, reference_signal=True)
+    assert lowered <= auto.admission_score < settings.threshold_auto
+    assert auto.admission_score >= settings.threshold_explicit
+    assert auto.reason is Reason.BELOW_THRESHOLD
+    assert (await decide(Purpose.EXPLICIT_SEARCH)).admitted
+    assert (await decide(Purpose.HISTORICAL_SEARCH)).admitted
+    assert (await decide(Purpose.AUTO_CONTEXT, "What did we decide about deploying the payments API?")).admitted
+
+
 @pytest.mark.parametrize(
     ("query", "expected"),
     [
