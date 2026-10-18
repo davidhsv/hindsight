@@ -220,6 +220,8 @@ Arbitrary key-value string pairs that provide context about this item. For examp
 
 Values are stored and returned as strings. A key whose value is `null` is dropped rather than stored, so it will not come back on the recalled memory — send an empty string if you need the key to survive.
 
+Three keys also reach consolidation: `environment`, `service` and `module` say where a fact holds. Facts that give one of them different values are kept in separate observations instead of one replacing the other — a reminder time of 06:00 retained with `{"environment": "staging"}` and one of 09:00 with `{"environment": "dev"}` become two observations, each naming its environment. No other metadata key reaches the consolidation prompt.
+
 ### document_id
 
 A caller-supplied string that groups one or more items under a logical document. This field is the key to making retain **idempotent**.
