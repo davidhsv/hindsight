@@ -195,6 +195,7 @@ DEFAULT_PG0_PORT = int(os.environ.get("HINDSIGHT_TEST_PG_PORT", "5556"))
 # races the others are disabled to avoid.
 os.environ.setdefault("HINDSIGHT_API_CONSOLIDATION_RECONCILE_INTERVAL_SECONDS", "0")
 os.environ.setdefault("HINDSIGHT_API_MENTAL_MODEL_REFRESH_TICK_SECONDS", "0")
+os.environ.setdefault("HINDSIGHT_API_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS", "0")
 os.environ.setdefault("HINDSIGHT_API_LLM_TRACE_RETENTION_DAYS", "-1")
 
 

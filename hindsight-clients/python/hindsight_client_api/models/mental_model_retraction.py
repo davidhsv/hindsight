@@ -17,20 +17,32 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator
 from typing import Any, ClassVar, Dict, List, Optional
 from typing import Optional, Set
 from typing_extensions import Self
 
 class MentalModelRetraction(BaseModel):
     """
-    Facts the document cited that no longer exist, and what was done about them.  A retraction is the one refresh input that is *invisible* in every other report: the fact is gone from the bank, so it appears in no recall, no tool call, and no supporting-fact list. Without this, a refresh that quietly deleted a paragraph — or quietly declined to — leaves no evidence of why.
+    Facts the document cited that no longer exist, and what was done about them.  A retraction is the one refresh input that is *invisible* in every other report: the fact is gone from the bank, so it appears in no recall, no tool call, and no supporting-fact list. Without this, a refresh that quietly deleted a paragraph — or quietly declined to — leaves no evidence of why.  In adaptive memory ``lifecycle`` mode a cited memory whose claim was superseded or refuted counts too: it is still a row, but no longer a current answer. ``cause`` and ``successor_ids`` say so; both are omitted when no such citation was found.
     """ # noqa: E501
-    fact_ids: Optional[List[StrictStr]] = Field(default=None, description="Ids the document's based_on cites that no longer exist in the bank.")
+    fact_ids: Optional[List[StrictStr]] = Field(default=None, description="Ids the document's based_on cites that no longer exist in the bank, or (lifecycle mode) whose claim was superseded or refuted.")
     fact_texts: Optional[List[StrictStr]] = Field(default=None, description="What those facts said, as the document recorded them. The rows themselves are gone — an observation swept away with its source keeps no history — so this copy is the only surviving record.")
-    applied: StrictBool = Field(description="Whether the pass that removes them ran to completion (zero edits still counts).")
+    applied: StrictBool = Field(description="Whether the pass that removes them ran to completion (zero edits still counts). For retired claims that pass is the full regeneration: true when it produced the document.")
+    cause: Optional[StrictStr] = None
+    successor_ids: Optional[List[StrictStr]] = Field(default=None, description="Lifecycle mode: the memories that replaced the retired citations. Omitted when none.")
     deferred_reason: Optional[StrictStr] = None
-    __properties: ClassVar[List[str]] = ["fact_ids", "fact_texts", "applied", "deferred_reason"]
+    __properties: ClassVar[List[str]] = ["fact_ids", "fact_texts", "applied", "cause", "successor_ids", "deferred_reason"]
+
+    @field_validator('cause')
+    def cause_validate_enum(cls, value):
+        """Validates the enum"""
+        if value is None:
+            return value
+
+        if value not in set(['superseded', 'refuted']):
+            raise ValueError("must be one of enum values ('superseded', 'refuted')")
+        return value
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -71,6 +83,11 @@ class MentalModelRetraction(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
+        # set to None if cause (nullable) is None
+        # and model_fields_set contains the field
+        if self.cause is None and "cause" in self.model_fields_set:
+            _dict['cause'] = None
+
         # set to None if deferred_reason (nullable) is None
         # and model_fields_set contains the field
         if self.deferred_reason is None and "deferred_reason" in self.model_fields_set:
@@ -91,6 +108,8 @@ class MentalModelRetraction(BaseModel):
             "fact_ids": obj.get("fact_ids"),
             "fact_texts": obj.get("fact_texts"),
             "applied": obj.get("applied"),
+            "cause": obj.get("cause"),
+            "successor_ids": obj.get("successor_ids"),
             "deferred_reason": obj.get("deferred_reason")
         })
         return _obj

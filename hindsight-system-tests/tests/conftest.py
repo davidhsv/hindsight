@@ -266,6 +266,41 @@ def keyed_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Itera
     server.stop()
 
 
+#: The tenant schema of the archiving deployment, its own for the same reason as ``KEYED_SCHEMA``.
+ARCHIVING_SCHEMA = "systest_archiving"
+
+
+@pytest.fixture(scope="session")
+def archiving_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iterator[object]:
+    """A server that archives faded memories, with no grace period.
+
+    Archiving is server-level (``HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_ENABLED`` is not in
+    ``_CONFIGURABLE_FIELDS``), hence a process. It runs as queued work (the
+    ``adaptive_memory_maintenance`` operation), so the deployment gets a schema of its own: a worker
+    of the default server claiming that work would run it with archiving off. With no grace period
+    the sweep after a consolidation archives whatever has already faded.
+    """
+    server = start_hindsight_server(
+        stub_url=stub_server.url,
+        log_path=tmp_path_factory.mktemp("archiving-server") / "server.log",
+        extra_env={
+            "HINDSIGHT_API_DATABASE_SCHEMA": ARCHIVING_SCHEMA,
+            "HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_ENABLED": "true",
+            "HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_GRACE_DAYS": "0",
+        },
+    )
+    asyncio.run(_delete_leftover_banks(server.url))
+    yield server
+    server.stop()
+
+
+@pytest.fixture
+async def archiving_client(archiving_server) -> AsyncIterator[Hindsight]:
+    client = Hindsight(base_url=archiving_server.url)
+    yield client
+    await client.aclose()
+
+
 @pytest.fixture
 async def keyed_client(keyed_server) -> AsyncIterator[Hindsight]:
     client = Hindsight(base_url=keyed_server.url)

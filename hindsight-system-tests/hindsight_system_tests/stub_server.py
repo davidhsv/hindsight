@@ -58,6 +58,7 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
             tools=tuple(tool["function"]["name"] for tool in body.get("tools") or []),
             api_key=request.headers.get("authorization", "").removeprefix("Bearer ") or None,
             headers={k.lower(): v for k, v in request.headers.items()},
+            body=body,
         )
 
         reply = stubs.llm.resolve(chat_request)
@@ -139,6 +140,7 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
             tools=tuple(tool["name"] for tool in body.get("tools") or []),
             api_key=authorization.removeprefix("Bearer ") or request.headers.get("x-api-key"),
             headers={k.lower(): v for k, v in request.headers.items()},
+            body=body,
         )
 
         reply = stubs.llm.resolve(chat_request)

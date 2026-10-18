@@ -17,6 +17,7 @@
 import { applyBankConfig, loadConfig, type Config } from "./config";
 import { bankProjectName, deriveBankIdOrSkip } from "./bank";
 import { HindsightClient } from "./hindsight";
+import { repoContextOf } from "./repo-context";
 
 /** A host's resolved memory: the config for THIS workspace, the bank it resolved to, and a client
  *  bound to both. */
@@ -71,6 +72,7 @@ export function resolveHostMemory(harness: string, directory: string): HostMemor
       observationScopes: cfg.observationScopes,
       pageSearchLimit: cfg.pageSearchLimit,
       recallOptions: cfg.recallOptions,
+      recallContext: repoContextOf(directory),
       // The credential a host STARTED with is not the one it must keep using: enable auth or
       // rotate the key mid-session and the snapshot 401s every call until restart (#3600). Read
       // through the same pipeline the constructor used, so a per-bank `banks.<id>.apiToken` is

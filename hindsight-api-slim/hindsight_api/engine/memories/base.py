@@ -39,7 +39,7 @@ import json
 import logging
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -54,6 +54,22 @@ from ..search.tags import TagGroup, TagsMatch, tag_filter_active
 from ..search.types import RetrievalResult
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..adaptive.claims import CarryForwardResult, ReingestStash
+    from ..adaptive.models import (
+        AdaptiveState,
+        ArchiveResult,
+        ClaimState,
+        Grounding,
+        PruneCursor,
+        PrunePage,
+        ReinforcementEvent,
+        ReinforcementResult,
+        RetentionPolicy,
+        RetentionState,
+        TruthStatus,
+    )
+    from ..adaptive.settings import AdaptiveSettings
+    from ..adaptive.views import ClaimShadowView, MemoryLifecycle
     from ..consolidation.consolidator import _TemporalBounds
     from ..embeddings import Embeddings
     from ..response_models import MemoryFact
@@ -61,7 +77,14 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..search.retrieval import GraphRetriever
     from ..transfer.export import _LoadedExport, _UnitLocation
     from ..transfer.importer import FactLifecycle, _ObservationOutcome
-    from ..transfer.schema import TransferObservation
+    from ..transfer.schema import (
+        ClaimEvidenceRestore,
+        ImportedMemoryState,
+        LifecycleRelationsRestore,
+        TransferClaimEvidence,
+        TransferLifecycleRelation,
+        TransferObservation,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -891,6 +914,19 @@ class FullRecallRequest:
     #: Per-observation budget. When >= 0 this REPLACES the total, so one observation with many
     #: sources cannot spend every other observation's provenance.
     max_source_facts_tokens_per_observation: int = -1
+
+    # ---- adaptive memory lifecycle mode ----
+    #
+    # Set only when the bank's adaptive memory mode is ``lifecycle``; every other request carries
+    # the defaults. A store that cannot apply the claim view (drop what it does not show before its
+    # reranker trim, annotate the rest) must decline such a request: answering it as if it were
+    # unset would return refuted memories as current.
+    #: ``"current"``, ``"historical"`` or ``"all-with-status"``; None = no claim view.
+    lifecycle_view: "str | None" = None
+    #: Show the claims valid at this instant (wins over ``lifecycle_view``).
+    as_of: "datetime | None" = None
+    #: The engine's historical-cue detector is on for this recall (see ``engine/adaptive/cues.py``).
+    historical_cues: bool = False
 
 
 @dataclass
@@ -1818,8 +1854,14 @@ class MemoriesExtension(Extension, ABC):
         min_keyword: float | None = None,
         enable_text_search: bool = True,
         enable_graph: bool = True,
+        exclude_non_active: bool = False,
     ) -> "dict[str, RecallArms]":
         """Run ALL retrieval arms for every fact_type — the whole recall interface, in one call.
+
+        ``exclude_non_active`` (lifecycle mode: the consolidation dedup probe and pool) drops
+        memories whose claim is superseded or refuted inside the dense, keyword and temporal arms,
+        before their limits, so retired near-twins cannot crowd the live ones out. A store without
+        claim state ignores it (nothing it holds is retired). The graph arm is not filtered.
 
         Returns ``{fact_type: RecallArms(semantic, bm25, graph, temporal)}`` of
         ``RetrievalResult``: the four per-arm candidate lists, unfused (RRF/rerank happen
@@ -1873,6 +1915,508 @@ class MemoriesExtension(Extension, ABC):
         is for a store whose ``recall_unified`` never asks for one; asking then raises.
         """
         return None
+
+    # ------------------------------------------------------------------ adaptive memory
+    #
+    # Per-memory retention and claim state (engine/adaptive/). A store that cannot hold it
+    # answers False below, and the bank's adaptive mode then resolves to "off": recall runs
+    # exactly as it would with the feature disabled. The defaults are that answer, so a store
+    # that predates the feature keeps working untouched.
+
+    def supports_adaptive_state_for(self, bank_id: str) -> bool:
+        """Whether this store keeps adaptive-memory state (retention, claims) for ``bank_id``.
+
+        Default False. Per bank, like :meth:`store_owned_for`, for a router whose banks live in
+        stores of which only some keep the state.
+        """
+        return False
+
+    async def load_embeddings(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, list[float]]:
+        """The stored embeddings of ``memory_ids``, keyed by memory id; one batch per recall.
+
+        Context admission reads them for the few candidates it admitted (at most
+        ``context_admission_candidates``) to suppress near-duplicates. An id that is absent has no
+        known duplicates, so the default ``{}`` is safe: a store that does not implement this
+        admits near-duplicates rather than dropping anything. ``conn`` is a read connection the
+        caller acquired for this call alone.
+        """
+        return {}
+
+    async def load_adaptive_state(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, AdaptiveState]:
+        """The stored adaptive state of ``memory_ids``, keyed by memory id; one batch per recall.
+
+        A memory with neither a retention nor a claim row is ABSENT from the result, not mapped to
+        an empty state: absence means "use the lazy defaults", which is what most memories are.
+        Ids that do not parse, or belong to another bank, are simply absent. Default ``{}``.
+
+        ``conn`` is a read connection the caller acquired for this call alone (recall runs it
+        beside the cross-encoder, outside its budgeted retrieval block).
+        """
+        return {}
+
+    async def record_reinforcement(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        events: Sequence[ReinforcementEvent],
+        settings: AdaptiveSettings,
+        now: datetime,
+        background: bool,
+        anchors: Mapping[str, datetime] | None = None,
+        initial_memory_ids: frozenset[str] = frozenset(),
+    ) -> ReinforcementResult:
+        """Record reinforcement events and apply them to the memories' retention, on ``conn``.
+
+        Runs as a savepoint inside ``conn``'s transaction when there is one; a failure rolls back
+        everything this call wrote, and nothing else. The caller decides what a failure means: the
+        producers catch it (consolidation in its nested savepoint, recall and reflect off the
+        response path), because reinforcement must never fail the operation that produced it.
+
+        Idempotent per ``(memory_id, source_type, source_key)``: an event whose key was ever
+        recorded for the memory is ``deduplicated`` and changes nothing, so a producer may re-send
+        freely. Nothing is written when ``settings`` says reinforcement is off for an event (mode
+        not rank/lifecycle, the bank's ``reinforcement_enabled``, the static recall/reflect source
+        switches): those come back ``disabled``. Memories with no retention row get one, with the
+        lazy defaults recall already scored them by (``anchors[memory_id]`` overrides the anchor,
+        e.g. an observation seeded from its pre-update mention time). A memory in
+        ``initial_memory_ids`` whose row this call creates applies its events as creating evidence
+        (the first anchors, the rest count once each).
+
+        ``background`` producers (recall, reflect) skip a memory another transaction is deleting
+        (``skipped_missing``) instead of waiting for it; request-path producers wait. Never writes
+        ``memory_units``, so it never moves ``updated_at``. ``now`` is the adaptive write clock,
+        stamped on every row written. Default: the no-op result, for a store without adaptive state.
+        """
+        from ..adaptive.models import ReinforcementResult
+
+        return ReinforcementResult()
+
+    async def set_retention_policy(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        importance: float | None = None,
+        forgetting_exempt: bool | None = None,
+        exemption_reason: str | None = None,
+        settings: AdaptiveSettings,
+        now: datetime,
+    ) -> RetentionState | None:
+        """Set a memory's importance and/or forgetting exemption; its retention row after, or None.
+
+        Creates the row if missing. A new importance rescales the stored stability by
+        ``(0.5 + new) / (0.5 + old)``, so what the memory learned is kept. Turning the exemption
+        off clears ``exemption_reason``; ``None`` leaves a field as it is. None when the memory is
+        not live in the bank. Waits for (never skips) a memory locked by another transaction.
+        Default None.
+        """
+        return None
+
+    async def set_retention_policies(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        policies: Sequence[RetentionPolicy],
+        settings: AdaptiveSettings,
+        now: datetime,
+    ) -> Mapping[str, RetentionState]:
+        """Bulk :meth:`set_retention_policy` (retain-time importance/exemption): the new rows by memory id.
+
+        Several policies for one memory merge in order. Memories not live in the bank are absent.
+        Default ``{}``.
+        """
+        return {}
+
+    async def merge_retention(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        survivor_id: str,
+        merged_id: str,
+        settings: AdaptiveSettings,
+        now: datetime,
+    ) -> RetentionState | None:
+        """A lifecycle MERGE: raise the survivor's stability to the larger of the pair's (each side
+        already counted its own evidence once, so the maximum avoids counting it twice). Locks both
+        retention rows the way the reinforcement writer does (default rows created where missing),
+        skipping a memory being deleted. Returns the survivor's state; None when either is not live.
+        Default None."""
+        return None
+
+    async def minted_document_ids(self, conn, *, bank_id: str, document_ids: Sequence[str]) -> frozenset[str]:
+        """Which of ``document_ids`` the server minted (a retain that named no document).
+
+        Reinforcement keys a fact by its document, but a minted id groups only one anonymous retain
+        call, so it counts as weak evidence (``evidence_key``). Retain records the mint in the
+        document's ``retain_params`` (``document_id_minted``) while the bank's adaptive mode writes
+        state. Unknown ids are absent. Default: none, a store without that record keys every
+        document id as a client one.
+        """
+        return frozenset()
+
+    async def get_memory_lifecycle(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        now: datetime,
+        settings: AdaptiveSettings,
+    ) -> MemoryLifecycle | None:
+        """The adaptive view of one memory, live or archived (curation-invalidated); None if absent.
+
+        Retention is always present (the row, or the defaults recall scores the memory with) with
+        retrievability at ``now``; then the claim row, relations in and out, the newest reinforcement
+        events and the shadow record. ``stored`` says whether anything is stored at all. Default None.
+        """
+        return None
+
+    async def grounding_status(self, conn, *, bank_id: str, ids: Sequence[str]) -> dict[str, Grounding]:
+        """What each of ``ids`` is now, for a mental model's grounding check: absent, live or retired.
+
+        Every requested id is a key (unparseable ones read as absent). ``retired`` (with the claim's
+        status and successor) is a live memory whose claim is ``superseded`` or ``refuted``; an
+        ``uncertain`` claim is live. Default: :meth:`live_memory_ids` — a store without claims
+        reports no memory as retired.
+        """
+        from ..adaptive.models import GROUNDING_ABSENT, GROUNDING_LIVE
+        from ..schema import fq_table
+
+        wanted = list(dict.fromkeys(str(i) for i in ids))
+        live = await self.live_memory_ids(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=wanted)
+        return {i: GROUNDING_LIVE if i in live else GROUNDING_ABSENT for i in wanted}
+
+    async def archive_sweep(
+        self, conn, *, bank_id: str, now: datetime, settings: AdaptiveSettings, batch: int = 500
+    ) -> ArchiveResult:
+        """One archive pass over the bank's materialized retention rows (adaptive memory).
+
+        Tracks ``below_threshold_since`` (set when retrievability falls below
+        ``settings.archive_threshold``, cleared when it is back at or above it) and archives a row
+        that has stayed below for ``settings.archive_grace_days``, unless its importance is at least
+        ``settings.archive_protect_importance``, it is exempt (a hold is an exemption), or it is
+        evidence of a claim that is not active. Reads ``batch`` rows per page, each page in its own
+        transaction on ``conn``; rows another transaction holds are skipped until the next sweep.
+        Only rows that exist are swept: a memory still on its lazy defaults has no row and is never
+        archived. Default: nothing to sweep.
+        """
+        from ..adaptive.models import ArchiveResult
+
+        return ArchiveResult()
+
+    async def prune_candidates(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        now: datetime,
+        settings: AdaptiveSettings,
+        limit: int = 500,
+        after: PruneCursor | None = None,
+    ) -> PrunePage:
+        """One page of archived memories old enough to delete (archived at least
+        ``settings.prune_after_days`` ago), oldest archive first.
+
+        Never named: an exempt row (holds included), a memory that is evidence of any claim, and a raw
+        fact that is a source of an observation whose claim is still current (active, uncertain, or
+        no claim row) — deleting it would sweep that observation away. A page reads at most ``limit``
+        archived rows after the cursor ``after`` and names the deletable ones among them, which may be
+        none; ``next_after`` continues the scan and is None on the last page, so protected rows never
+        stop it. The caller deletes them through ``MemoryEngine.delete_memory_units``, re-checking
+        with :meth:`lock_prunable` inside that transaction. Default: the empty, final page.
+        """
+        from ..adaptive.models import PrunePage
+
+        return PrunePage()
+
+    async def lock_prunable(
+        self, conn, *, bank_id: str, memory_ids: Sequence[str], now: datetime, settings: AdaptiveSettings
+    ) -> list[str]:
+        """The ``memory_ids`` that are still prunable, row-locked in the caller's transaction.
+
+        The same rules as :meth:`prune_candidates`, read again under the retention rows' locks, so a
+        memory that got a hold, was unarchived or became claim evidence since the page was read is
+        not deleted. A row another transaction holds is left out (and pruned on a later run).
+        Default: none.
+        """
+        return []
+
+    async def banks_with_retention_state(self, conn) -> list[str]:
+        """The banks of the current schema that hold any retention row, for the maintenance loop's
+        archive discovery. Default: none."""
+        return []
+
+    async def unarchive_memories(self, conn, *, bank_id: str, memory_ids: Sequence[str], now: datetime) -> list[str]:
+        """Return archived memories to ``retention_state='active'`` (clearing ``archived_at`` and
+        ``below_threshold_since``); the ids that were archived. Default: none."""
+        return []
+
+    # ------------------------------------------------------------------ claim lifecycle
+    #
+    # Truth status, evidence and the lifecycle audit trail. Every writer runs on
+    # the caller's connection, inside its transaction, and assumes the rows it writes were locked by
+    # ONE ``lock_claims`` pass in that transaction. The defaults are what a store without adaptive
+    # state answers: nothing locked, nothing written, nothing found.
+
+    async def lock_claims(
+        self, conn, *, bank_id: str, memory_ids: Sequence[str], skip_locked: bool, now: datetime | None = None
+    ) -> set[str]:
+        """Lock the claim rows of ``memory_ids`` (creating default ``active`` rows), in one sorted pass.
+
+        The only way to take claim locks: a writer gathers every claim id it will touch (target,
+        successor, cited facts, inheritance candidates, upward observations) and calls this ONCE,
+        before any CAS. Parents are locked ``FOR KEY SHARE`` (``skip_locked``: a memory being deleted
+        is skipped) in the statement that inserts the default rows, then the claim rows ``FOR UPDATE``
+        in id order. Returns the ids locked; a memory that is not live in the bank is absent.
+        Default: none.
+        """
+        return set()
+
+    async def cas_retire(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        to_status: TruthStatus,
+        retired_via: str,
+        superseded_by_id: str | None,
+        valid_to: datetime | None,
+        reason: str | None,
+        confidence: float | None,
+        inherited_from_id: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        """Retire a locked claim: ``UPDATE … WHERE truth_status IN ('active','uncertain')``; True if it won.
+
+        Writes the status, ``retired_via``, the pointers (NULL when not a live memory of the bank),
+        ``valid_to``, ``reason`` and ``confidence``; leaves ``valid_from`` and ``scope_fingerprint``.
+        Default False.
+        """
+        return False
+
+    async def set_claim(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        truth_status: TruthStatus,
+        valid_from: datetime | None = None,
+        valid_to: datetime | None = None,
+        confidence: float | None = None,
+        scope_fingerprint: str | None = None,
+        retired_via: str | None = None,
+        superseded_by_id: str | None = None,
+        inherited_from_id: str | None = None,
+        reason: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        """Set every column of a locked claim row unconditionally (None writes NULL): successors'
+        ``valid_from``, ``uncertain``, restores and reverts. Default: no-op."""
+        return None
+
+    async def add_claim_evidence(
+        self, conn, *, bank_id: str, memory_id: str, evidence_ids: Sequence[str], now: datetime | None = None
+    ) -> int:
+        """Record the raw facts a non-active claim rests on; only live evidence, duplicates ignored.
+        Returns rows inserted. Default 0."""
+        return 0
+
+    async def insert_relation(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        relation_type: str,
+        source_id: str | None,
+        target_id: str | None,
+        origin: str,
+        reason: str | None,
+        confidence: float | None,
+        evidence: Mapping[str, Any],
+        now: datetime | None = None,
+    ) -> str | None:
+        """Write one lifecycle relation with both endpoint snapshots (text, fact_type, tags, source ids).
+
+        ``(source, target, type)`` is unique: an existing edge writes nothing and returns None.
+        Otherwise the new relation's id. Default None.
+        """
+        return None
+
+    async def inherit_from_observation(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        observation_id: str,
+        to_status: TruthStatus,
+        successor_id: str | None,
+        valid_to: datetime,
+        evidence_ids: Sequence[str],
+        candidate_source_ids: Sequence[str] | None,
+        reason: str | None = None,
+        retired_via: str = "inherited",
+        ignored_citer_ids: Sequence[str] = (),
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Retire a retired observation's raw sources that no live observation still stands on.
+
+        Candidates are ``candidate_source_ids`` (all the observation's sources when None), minus
+        sources another active|uncertain observation still cites, experience facts, dated facts
+        (``occurred_start``), and sources whose tags are not a superset of the observation's. The rest
+        are CAS-retired with ``retired_via`` (``inherited``; a split passes ``splits``), ``valid_to``
+        and the evidence, and stamped consolidated. ``ignored_citer_ids`` are observations whose
+        citing a source does not keep it current (a split's facets). The candidates must be in the
+        caller's ``lock_claims`` pass. Returns the inherited ids. Default: none.
+        """
+        return []
+
+    async def observation_sources(self, conn, *, bank_id: str, observation_ids: Sequence[str]) -> dict[str, list[str]]:
+        """``{observation id: [source ids]}`` for the observations that exist. Default ``{}``."""
+        return {}
+
+    async def claims_for(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, ClaimState]:
+        """The claim rows of ``memory_ids``, lock-free; an id without a row is absent (= active).
+        Default ``{}``."""
+        return {}
+
+    async def claim_evidence(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, list[str]]:
+        """``{claim memory id: [evidence ids]}`` — the raw facts each non-active claim rests on (a
+        lifecycle ``historical`` attach copies them onto the facts it retires). Ids without evidence
+        are absent. Default ``{}``."""
+        return {}
+
+    async def requeue_units(
+        self, conn, *, bank_id: str, unit_ids: Sequence[str], reason: str, clear_failed: bool = False
+    ) -> int:
+        """Return raw facts to the consolidation queue: the ONLY way to clear ``consolidated_at``.
+
+        ``clear_failed`` also clears ``consolidation_failed_at``. Never requeues a fact whose claim is
+        superseded or refuted. ``reason`` tags the log line. Returns how many were
+        requeued (Postgres) — this default, for a store without claims, clears the marker through
+        :meth:`mark_consolidated` and returns how many ids it was given.
+        """
+        ids = [str(u) for u in unit_ids]
+        if not ids:
+            return 0
+        from ..schema import fq_table
+
+        # A store without claims has nothing to keep out of the queue; its own clear is the requeue.
+        await self.mark_consolidated(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=ids, when=None)
+        return len(ids)
+
+    async def repair_lifecycle_for_deleted_facts(
+        self, conn, *, bank_id: str, doomed_ids: Sequence[str], now: datetime | None = None
+    ) -> int:
+        """Revert the claims only the doomed facts justified, before they are physically deleted.
+
+        Called by the store's own delete primitives, never on invalidation, edits or observation
+        rebuilds. A non-active claim reverts to active (``valid_to`` and retirement cleared, reason
+        ``reverted:evidence_deleted``) when every evidence fact it cites is doomed, or when its
+        successor is doomed and it has no surviving evidence; its raw fact is requeued. The superseded
+        and refuted observations citing a doomed fact lose it from their sources and keep their row;
+        one whose claim would revert while it cites no live memory is deleted instead. Returns how
+        many reverted. Default 0.
+        """
+        return 0
+
+    async def relock_relations_before_delete(self, conn, *, bank_id: str, unit_ids: Sequence[str]) -> None:
+        """Lock the relation rows touching ``unit_ids`` in one total order before a physical delete,
+        so the ``ON DELETE SET NULL`` cascade cannot deadlock. Never deletes them. Default no-op."""
+        return None
+
+    async def relinkable_claims(self, conn, *, bank_id: str, evidence_ids: Sequence[str]) -> set[str]:
+        """The retired claims :meth:`relink_rebuilt_successors` may re-link onto an observation citing
+        ``evidence_ids``: no successor, retired via supersedes/refutes/inherited, citing one of them as
+        evidence. Lock-free; a caller puts them in its one ``lock_claims`` pass. Default empty."""
+        return set()
+
+    async def relink_rebuilt_successors(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        new_observation_ids: Sequence[str],
+        now: datetime | None = None,
+        locked_claim_ids: Collection[str] | None = None,
+    ) -> int:
+        """Re-point retired claims whose successor was rebuilt (``superseded_by_id`` NULL, retired via
+        supersedes/refutes/inherited) at the new active observation whose sources contain all their
+        evidence, and copy the predecessor's ``valid_to`` into its ``valid_from``. Returns how many
+        were re-linked. ``locked_claim_ids``: the claims the caller's own ``lock_claims`` pass holds
+        (with :meth:`relinkable_claims` in it); only those are re-linked and no other contended claim
+        is locked. None: the call takes its own pass. Default 0."""
+        return 0
+
+    async def count_active_observations(
+        self, conn, *, bank_id: str, tags: list[str] | None, tags_match: TagsMatch
+    ) -> int:
+        """Observations in the tag scope whose claim is not superseded|refuted (the lifecycle-mode
+        scope cap). Default: every matching observation (no claims), through
+        :meth:`count_observations_with_tags`, which is the ``all_strict`` scope."""
+        from ..schema import fq_table
+
+        return await self.count_observations_with_tags(
+            conn=conn, fq_table=fq_table, bank_id=bank_id, tags=list(tags or [])
+        )
+
+    async def record_shadow_retirement(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        would_status: TruthStatus,
+        deciding_snapshot: Mapping[str, Any],
+        evidence_ids: Sequence[str],
+        now: datetime | None = None,
+    ) -> bool:
+        """Record what observe mode WOULD have retired a memory as (diagnostic, never filters).
+        The latest decision replaces an older one. False when the memory is not live. Default False."""
+        return False
+
+    async def shadow_for(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, ClaimShadowView]:
+        """The observe-mode shadow records of ``memory_ids``. Default ``{}``."""
+        return {}
+
+    async def stash_reingest_lifecycle(
+        self, conn, *, bank_id: str, document_id: str, old_unit_ids: Sequence[str], now: datetime | None = None
+    ) -> ReingestStash | None:
+        """Snapshot the lifecycle state on a re-ingested document's outgoing facts, before they are deleted.
+
+        Also detaches what OTHER claims hold on those facts (evidence rows, successor and inheritance
+        pointers), so the delete's repair leaves them alone until :meth:`carry_forward_reingest`
+        decides. None when there is nothing to carry. Default None.
+        """
+        return None
+
+    async def carry_forward_reingest(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        stash: ReingestStash | None,
+        new_unit_ids: Sequence[str],
+        final: bool,
+        now: datetime | None = None,
+        settings: AdaptiveSettings | None = None,
+    ) -> CarryForwardResult:
+        """Move stashed state onto re-extracted facts matching ``(document, normalized text, fact_type)``.
+
+        Copies claim, retention and ledger rows to the new ids and re-points inbound evidence,
+        pointers and relation endpoints; a new fact whose carried claim is retired is stamped
+        consolidated. ``final`` (the re-ingest's last call) reverts claims whose evidence was only on
+        unmatched facts. ``settings`` rescales carried stability when this retain set a new importance.
+        Default: nothing carried.
+        """
+        from ..adaptive.claims import CarryForwardResult
+
+        return CarryForwardResult()
 
     # ------------------------------------------------------------------ addressed reads
     #
@@ -1994,7 +2538,7 @@ class MemoriesExtension(Extension, ABC):
         Gated like ``find_unconsolidated``: a SQL store keeps the failure marker in a column and
         answers the retry inline, so this default is empty; a store that keeps memories outside
         SQL overrides it. Returns experience/world memories only (observations are never
-        consolidated) — the caller clears them with ``mark_consolidated(when=None)``.
+        consolidated) — the caller clears them with ``requeue_units(clear_failed=True)``.
         """
         return []
 
@@ -2599,6 +3143,10 @@ class MemoriesExtension(Extension, ABC):
         Returns how many observations were removed. Called whenever facts are
         replaced or deleted, so an observation never outlives the facts it
         summarises; sources that survive go back in the consolidation queue.
+
+        A store that keeps claims leaves superseded and refuted observations in place: they are
+        history, not summaries, and keep their row, text and history (their sources are dropped by
+        the physical-delete repair and re-pointed by a re-ingest's carry-forward instead).
         """
 
     # ------------------------------------------------------------------ maintenance
@@ -3079,7 +3627,7 @@ class MemoriesExtension(Extension, ABC):
             # under scopes it no longer writes to, and one that produced no observation there
             # still has to be tried in its new scope (#5309). The same rule a re-retain follows
             # (update_memory_units_metadata_and_tags); a memory that did not move is not here.
-            await self.mark_consolidated(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=_src_ids, when=None)
+            await self.requeue_units(conn, bank_id=bank_id, unit_ids=_src_ids, reason="retag")
         return RetagResult(invalidated_observations=invalidated_obs, requeued_units=len(_src_ids))
 
     async def list_documents_page(
@@ -3275,24 +3823,24 @@ class MemoriesExtension(Extension, ABC):
         )
         src_ids = [m.unit_id for m in page.memories]
         if src_ids:
-            await self.mark_consolidated(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=src_ids, when=None)
+            await self.requeue_units(conn, bank_id=bank_id, unit_ids=src_ids, reason="clear_observations")
         return count
 
     async def requeue_failed_consolidation(self, *, conn, fq_table, bank_id: str) -> int:
         """Return a bank's permanently-failed sources to the not-yet-consolidated state; returns
-        how many. ``mark_consolidated(when=None)`` clears both the failed and consolidated
+        how many. ``requeue_units(clear_failed=True)`` clears both the failed and consolidated
         markers. Postgres counts and clears both columns in two statements."""
         failed = await self.find_failed_consolidation(conn=conn, fq_table=fq_table, bank_id=bank_id)
         if failed:
-            await self.mark_consolidated(
-                conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[m.unit_id for m in failed], when=None
+            await self.requeue_units(
+                conn, bank_id=bank_id, unit_ids=[m.unit_id for m in failed], reason="retry_failed", clear_failed=True
             )
         return len(failed)
 
     async def requeue_source_memory(self, *, conn, fq_table, bank_id: str, unit_id: uuid.UUID) -> None:
         """Clear one source memory's consolidated marker so it re-consolidates. Scheduler state:
         ``updated_at`` stays put. Postgres clears it only on a world/experience row."""
-        await self.mark_consolidated(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[str(unit_id)], when=None)
+        await self.requeue_units(conn, bank_id=bank_id, unit_ids=[str(unit_id)], reason="clear_for_memory")
 
     async def entity_names_by_id(self, *, conn, fq_table, bank_id: str, entity_ids: list[str]) -> list[str]:
         """Canonical names of ``entity_ids`` in this bank, ordered by entity id; unknown ids are
@@ -3998,6 +4546,15 @@ class MemoriesExtension(Extension, ABC):
         """Delete one superseded or contradicted observation, on the caller's transaction."""
         await self.delete_facts(bank_id, [observation_id])
 
+    async def attach_sources_to_observation(
+        self, *, conn, fq_table, bank_id: str, observation_id: str, source_memory_ids: list[uuid.UUID]
+    ) -> bool:
+        """Add ``source_memory_ids`` to an observation's sources and nothing else: its text,
+        embedding, dates and ``updated_at`` stay as they are. The lifecycle ``historical`` attach of
+        an old fact to a retired observation. False when the observation is gone. Only a store that
+        keeps adaptive state receives it, so this default attaches nothing."""
+        return False
+
     # -- reflect's `expand` tool: memories by id, then their chunks and documents --
 
     async def expand_memories(self, *, conn, fq_table, bank_id: str, unit_ids: list[uuid.UUID]) -> list:
@@ -4172,15 +4729,71 @@ class MemoriesExtension(Extension, ABC):
         unit_id_map: dict[str, str],
         document_id_map: dict[str, str],
         bank_rows_json_encoding: str,
+        relation_id_map: Mapping[str, str] | None = None,
     ) -> int:
         """Write :meth:`dump_archived_memories` rows into this bank's archive; returns how many.
 
         ``unit_id_map`` / ``document_id_map`` map the source's unit and document ids to the ones the
-        import wrote (a causal-link snapshot whose endpoint did not come back is dropped). Postgres
-        re-resolves the entity names and inserts on ``conn``. No default, like
-        :meth:`dump_archived_memories`.
+        import wrote (a causal-link snapshot whose endpoint did not come back is dropped).
+        ``relation_id_map`` (source relation id -> imported one, from
+        :meth:`restore_lifecycle_relations`) re-keys an adaptive-state snapshot's relation
+        descriptors. Postgres re-resolves the entity names and inserts on ``conn``. No default,
+        like :meth:`dump_archived_memories`.
         """
         raise NotImplementedError("this store cannot restore archived memories")
+
+    # Adaptive-memory state across a transfer. Retention and claim ride on each
+    # TransferFact / TransferObservation (the store's ``load_transfer_*`` fill them); the edges
+    # between memories travel in two archive sections keyed by source ids. A store without adaptive
+    # state exports none of them and restores nothing: the defaults below.
+
+    async def dump_lifecycle_relations(
+        self, *, conn, fq_table, bank_id: str, memory_ids: Collection[str] | None
+    ) -> list[TransferLifecycleRelation]:
+        """The bank's lifecycle relations for an archive; ``memory_ids`` is the exported set (None:
+        the whole bank, tombstones included). An endpoint outside the set travels as a tombstone.
+        Default ``[]``."""
+        return []
+
+    async def dump_claim_evidence(
+        self, *, conn, fq_table, bank_id: str, memory_ids: Collection[str] | None
+    ) -> list[TransferClaimEvidence]:
+        """The bank's claim-evidence rows whose two memories are both exported. Default ``[]``."""
+        return []
+
+    async def restore_memory_state(self, *, conn, fq_table, bank_id: str, rows: Sequence[ImportedMemoryState]) -> int:
+        """Write imported claims and retention onto the new memories (pointers already on target ids);
+        a retired raw fact is stamped consolidated. Returns how many memories got state. Default 0."""
+        return 0
+
+    async def restore_lifecycle_relations(
+        self,
+        *,
+        conn,
+        fq_table,
+        bank_id: str,
+        rows: Sequence[TransferLifecycleRelation],
+        unit_id_map: Mapping[str, str],
+    ) -> LifecycleRelationsRestore:
+        """Insert imported relations under fresh ids; endpoints that did not come back become
+        tombstones (counted). Default: nothing written."""
+        from ..transfer.schema import LifecycleRelationsRestore
+
+        return LifecycleRelationsRestore()
+
+    async def restore_claim_evidence(
+        self,
+        *,
+        conn,
+        fq_table,
+        bank_id: str,
+        rows: Sequence[TransferClaimEvidence],
+        unit_id_map: Mapping[str, str],
+    ) -> ClaimEvidenceRestore:
+        """Insert imported evidence rows whose two memories both came back. Default: nothing written."""
+        from ..transfer.schema import ClaimEvidenceRestore
+
+        return ClaimEvidenceRestore()
 
     async def resolve_entity_ids_by_name(self, *, conn, fq_table, bank_id: str, names: set[str]) -> dict[str, Any]:
         """Canonical entity name -> this bank's entity id, for rows an import restores by name.

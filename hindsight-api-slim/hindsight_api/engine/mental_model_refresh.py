@@ -32,6 +32,9 @@ ModeFallbackReason = Literal[
     "structured_doc_unreadable",
     "delta_ops_failed",
     "delta_ops_all_skipped",
+    # Lifecycle mode: the document cites a memory whose claim was superseded or refuted, so this run
+    # regenerates over current recall (which no longer returns that claim) instead of editing.
+    "retired_grounding",
 ]
 
 # What a refresh did with the document, as the shared executor reports it — so
@@ -206,11 +209,18 @@ class MentalModelRetraction(BaseModel):
     report: the fact is gone from the bank, so it appears in no recall, no tool
     call, and no supporting-fact list. Without this, a refresh that quietly
     deleted a paragraph — or quietly declined to — leaves no evidence of why.
+
+    In adaptive memory ``lifecycle`` mode a cited memory whose claim was superseded or
+    refuted counts too: it is still a row, but no longer a current answer. ``cause`` and
+    ``successor_ids`` say so; both are omitted when no such citation was found.
     """
 
     fact_ids: list[str] = Field(
         default_factory=list,
-        description="Ids the document's based_on cites that no longer exist in the bank.",
+        description=(
+            "Ids the document's based_on cites that no longer exist in the bank, or (lifecycle mode) "
+            "whose claim was superseded or refuted."
+        ),
     )
     fact_texts: list[str] = Field(
         default_factory=list,
@@ -220,7 +230,25 @@ class MentalModelRetraction(BaseModel):
             "is the only surviving record."
         ),
     )
-    applied: bool = Field(description="Whether the pass that removes them ran to completion (zero edits still counts).")
+    applied: bool = Field(
+        description=(
+            "Whether the pass that removes them ran to completion (zero edits still counts). For retired "
+            "claims that pass is the full regeneration: true when it produced the document."
+        )
+    )
+    cause: Literal["superseded", "refuted"] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description=(
+            "Lifecycle mode: why cited memories stopped being current — 'refuted' when any of them was "
+            "refuted, else 'superseded'. Omitted when every retracted fact is simply gone."
+        ),
+    )
+    successor_ids: list[str] = Field(
+        default_factory=list,
+        exclude_if=lambda v: not v,
+        description="Lifecycle mode: the memories that replaced the retired citations. Omitted when none.",
+    )
     deferred_reason: str | None = Field(
         default=None,
         description=(

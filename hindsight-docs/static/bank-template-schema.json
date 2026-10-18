@@ -729,6 +729,246 @@
           "description": "Max tokens of raw chunks returned by recall (when recall_include_chunks is set)",
           "title": "Recall Chunks Max Tokens"
         },
+        "adaptive_memory_mode": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Adaptive memory mode: 'off' (default; recall is unchanged), 'observe' (compute retention and report it in traces and metrics only), 'rank' (retention down-weights rarely reinforced memories) or 'lifecycle' (rank plus claim lifecycle: superseded and refuted memories stop answering current recall, and history is available through recall's lifecycle_view and as_of)",
+          "title": "Adaptive Memory Mode"
+        },
+        "adaptive_memory_score_alpha": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Weight of the retention factor in the final recall score (0 = no decay)",
+          "title": "Adaptive Memory Score Alpha"
+        },
+        "adaptive_memory_score_floor": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Lowest retention factor a fully-forgotten memory can reach",
+          "title": "Adaptive Memory Score Floor"
+        },
+        "adaptive_memory_reinforcement_enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Let reinforcement events raise a memory's stability (rank and lifecycle modes only)",
+          "title": "Adaptive Memory Reinforcement Enabled"
+        },
+        "adaptive_memory_base_stability_days": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Days before an unreinforced world fact's retrievability falls to e^-1",
+          "title": "Adaptive Memory Base Stability Days"
+        },
+        "adaptive_memory_max_stability_days": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cap on a memory's stability in days (must be >= adaptive_memory_base_stability_days)",
+          "title": "Adaptive Memory Max Stability Days"
+        },
+        "adaptive_memory_default_view": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Lifecycle recall view when the request names none: 'current' (default; superseded and refuted memories are left out) or 'historical' (superseded ones are returned too, annotated)",
+          "title": "Adaptive Memory Default View"
+        },
+        "adaptive_memory_historical_cues": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Detect historical phrasing ('used to', 'before the migration', 'before <date>', ...) in external recall queries that name no lifecycle_view, and answer them from the historical view (or as of the date). Lifecycle mode only",
+          "title": "Adaptive Memory Historical Cues"
+        },
+        "context_admission_mode": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Context admission mode for external recalls: 'off' (default; recall is unchanged), 'observe' (decisions and the would-be admitted set go to traces and metrics only), 'filter' (rejected memories are dropped and recall may return none) or 'strict' (filter plus hard scope, near-duplicate suppression and the memory/token budget)",
+          "title": "Context Admission Mode"
+        },
+        "context_admission_threshold_auto": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Admission score a memory needs on a recall with purpose 'auto_context'",
+          "title": "Context Admission Threshold Auto"
+        },
+        "context_admission_threshold_explicit": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Admission score a memory needs on a recall with purpose 'explicit_search' or 'historical_search'",
+          "title": "Context Admission Threshold Explicit"
+        },
+        "context_admission_reference_bonus": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Subtracted from the auto_context threshold when the query refers to shared history ('last time', 'what did we decide')",
+          "title": "Context Admission Reference Bonus"
+        },
+        "context_admission_candidates": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Top-ranked recall results the admission gate judges; the rest are never admitted",
+          "title": "Context Admission Candidates"
+        },
+        "context_admission_max_memories": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Most memories admitted per recall (strict mode)",
+          "title": "Context Admission Max Memories"
+        },
+        "context_admission_max_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Most memory tokens admitted per recall (strict mode)",
+          "title": "Context Admission Max Tokens"
+        },
+        "context_admission_mmr_lambda": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "MMR trade-off between a memory's score and its novelty against those already admitted (1 = score only; strict mode)",
+          "title": "Context Admission Mmr Lambda"
+        },
+        "context_admission_dup_similarity": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Embedding cosine above which a memory counts as a near-duplicate of one already admitted (strict mode)",
+          "title": "Context Admission Dup Similarity"
+        },
         "memory_defense": {
           "anyOf": [
             {

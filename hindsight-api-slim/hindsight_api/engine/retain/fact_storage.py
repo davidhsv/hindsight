@@ -8,14 +8,33 @@ import json
 import logging
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ...config import _get_raw_config
 from ..memory_engine import fq_table
 from .bank_utils import create_bank_row_on_conn
 from .fact_extraction import _sanitize_text
 from .types import ProcessedFact
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..adaptive.claims import ReingestStash
+
+
+@dataclass
+class ReingestCarry:
+    """The lifecycle state one full-replace re-ingest carries onto its re-extracted facts.
+
+    ``handle_document_tracking`` fills ``stash`` before the outgoing facts are deleted; each batch that
+    inserts facts hands them to ``carry_forward_reingest``, and the last one (or the retain's own
+    closing call) sets ``finished``. A streaming retain writes its batches in separate transactions,
+    so this lives with the retain, not with one connection.
+    """
+
+    stash: "ReingestStash | None" = None
+    finished: bool = False
+
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +219,7 @@ async def handle_document_tracking(
     ops=None,
     store_document_text: bool | None = None,
     attachment_filenames: dict[str, str] | None = None,
+    reingest: ReingestCarry | None = None,
 ) -> None:
     """
     Handle document tracking in the database (full-replace mode).
@@ -219,6 +239,9 @@ async def handle_document_tracking(
             this document. Recorded on the document edge rather than the blob, since
             a filename describes the reference and the same bytes can carry a
             different name in another document.
+        reingest: Where to keep the outgoing facts' lifecycle state for the caller to carry onto
+            the re-extracted facts once they are inserted. None (the 0-fact paths) lets the
+            delete's own repair decide, as for any other delete.
         ops: Backend-specific DataAccessOps. Required by the inner
             ``delete_stale_observations_for_memories`` call to choose the PG
             (native array) vs Oracle (junction table) read path. Defaults to
@@ -294,6 +317,14 @@ async def handle_document_tracking(
                 # new facts don't name again are orphans the moment this
                 # cascade lands.
                 await enqueue_entity_prune_candidates(conn, bank_id, doomed_ids)
+
+        # The lifecycle state on the outgoing facts (claims, retention, what other claims hold on
+        # them), kept for the re-extracted facts before the delete cascades it away.
+        if reingest is not None and existing_unit_ids and store.supports_adaptive_state_for(bank_id):
+            reingest.stash = await store.stash_reingest_lifecycle(
+                conn, bank_id=bank_id, document_id=document_id, old_unit_ids=existing_unit_ids
+            )
+            reingest.finished = False
 
         # Then the outgoing facts, their links and the document row itself, keeping the row's
         # created_at so re-ingestion preserves it.
@@ -566,8 +597,8 @@ async def update_memory_units_metadata_and_tags(
         # `delete_stale_observations` — which only covers an observation's OTHER sources,
         # the ones being deleted — skips them. Reset them here or they stay marked
         # consolidated against an observation that no longer exists and are never selected
-        # into a batch again. Through the store's `mark_consolidated` rather than a raw
-        # UPDATE, the same call `update_document` makes.
-        await store.mark_consolidated(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=rescoped_ids, when=None)
+        # into a batch again. Through the store's `requeue_units` rather than a raw UPDATE, the
+        # same call `update_document` makes; it leaves a retired (superseded/refuted) fact out.
+        await store.requeue_units(conn, bank_id=bank_id, unit_ids=rescoped_ids, reason="rescope")
 
     return relabelled.updated

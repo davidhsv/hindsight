@@ -1,0 +1,1728 @@
+{
+ "arm": "B",
+ "description": "feature branch, adaptive_memory_mode=off (and context_admission_mode=off)",
+ "generated_at": "2026-10-18T08:42:27-03:00",
+ "base_sha": "5331da2f4db369528bb122075341a7de9c3df6df",
+ "feature_head_sha": "554284233f4fdb38d1e065c0d90b94ed9deb38a4",
+ "phase_commits": {
+  "P1": "dafd09a64",
+  "P2": "3816d0e4b",
+  "P3": "b491b2bb9",
+  "P4": "d65f17b05",
+  "P5": "728b265c9",
+  "T2": "504ca72e9",
+  "T2_harm_bench": "2f4c7daae"
+ },
+ "models": {
+  "server_extraction_consolidation": "claude-haiku-5-5",
+  "amb_answer": "claude-haiku-5-5",
+  "judge": "claude-sonnet-5-5",
+  "decision_model": "TypeSafe jev-latest"
+ },
+ "embedder": "local bge-small-en-v1.5 (CPU)",
+ "reranker": "local ms-marco-MiniLM-L-6-v2 cross-encoder (CPU)",
+ "frozen_parameters": {
+  "adaptive_memory_score_alpha": 0.1,
+  "score_floor": 0.3,
+  "base_stability_days": 30,
+  "max_stability_days": 3650,
+  "type_multipliers": {
+   "experience": 0.5,
+   "world": 1.0,
+   "observation": 2.0
+  },
+  "cooldown_hours": 6,
+  "gain": 1.0,
+  "recall_reinforcement": false,
+  "conflict_policy": "evidence",
+  "historical_cues": false,
+  "source": "tasks/adaptive-memory/eval/PREREGISTRATION.md"
+ },
+ "equivalence_R37": {
+  "golden_off_mode_gate": {
+   "result": "byte-identical to the base 5331da2f4 transcript at every phase gate (P1-P5, T2, A68/R59 audit)",
+   "test": "hindsight-system-tests/tests/test_99_golden_off_mode.py",
+   "source": "tasks/adaptive-memory/STATE.md"
+  },
+  "memory_lifecycle_rows_A_vs_off_P1": {
+   "text": "Row diff `arm-A-base-delete` vs `p1-off-base-delete`: 74/74 queries identical (type, labels, class and text at every rank); max |Δ final score| on identical rows 2.00e-06.",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/p1/compare-A-vs-off-rows.txt"
+  },
+  "memory_lifecycle_rows_A_vs_off_P3": {
+   "text": "Row diff `arm-A-base-delete` vs `p3-off-base-delete`: 74/74 queries identical (type, labels, class and text at every rank); max |Δ final score| on identical rows 2.00e-06.",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/p3/rows-A-vs-off.txt"
+  },
+  "amb_longmemeval": "A vs B: 0 discordant on every endpoint (see baseline.json amb_longmemeval_retrieval_noobs)",
+  "locomo": "A vs B: 0/0 at k=5/10/20 (see baseline.json locomo_retrieval)",
+  "known_off_mode_regression": "bulk deletes are slower in every mode, off included (the 10 new FKs). 50,000 units on pg0, SQL delete, median of 3: empty side tables 0.245 -> 1.115 s (4.55x, +17.4 us/row); base side rows (1.5M links, 150k unit_entities) 2.590 -> 3.975 s (1.53x, +27.7 us/row); engine delete_bank 2.917 -> 3.741 s (1.28x). P1's earlier 0.418 -> 1.867 s (4.47x) is reproduced in ratio. Not measured: --scale large, Oracle. See performance.json fk_delete",
+  "recall_latency_B_vs_A": {
+   "noobs": {
+    "seq": {
+     "p95_per_round": [
+      0.0251,
+      -0.0442,
+      0.0,
+      -0.0296
+     ],
+     "p95_run_level_mean": -0.0122,
+     "p95_run_level_t95": [
+      -0.0614,
+      0.037
+     ],
+     "p50_per_round": [
+      0.0909,
+      -0.0244,
+      0.0017,
+      -0.0422
+     ],
+     "p50_run_level_mean": 0.0065,
+     "p50_run_level_t95": [
+      -0.0876,
+      0.1005
+     ],
+     "median_of_run_p95": -0.0322,
+     "pooled_p95": -0.0168,
+     "pooled_p95_cluster_ci95": [
+      -0.0534,
+      0.0189
+     ]
+    },
+    "conc": {
+     "p95_per_round": [
+      0.1146,
+      -0.233,
+      0.1534,
+      -0.0225
+     ],
+     "p95_run_level_mean": 0.0031,
+     "p95_run_level_t95": [
+      -0.2747,
+      0.2809
+     ],
+     "p50_per_round": [
+      0.1769,
+      -0.0237,
+      0.0047,
+      -0.053
+     ],
+     "p50_run_level_mean": 0.0262,
+     "p50_run_level_t95": [
+      -0.138,
+      0.1904
+     ],
+     "median_of_run_p95": -0.0661,
+     "pooled_p95": 0.0885,
+     "pooled_p95_cluster_ci95": [
+      0.0102,
+      0.1927
+     ]
+    }
+   },
+   "obs": {
+    "seq": {
+     "p95_per_round": [
+      -0.0051,
+      -0.0081,
+      0.0147,
+      0.0719
+     ],
+     "p95_run_level_mean": 0.0184,
+     "p95_run_level_t95": [
+      -0.0407,
+      0.0774
+     ],
+     "p50_per_round": [
+      -0.0109,
+      -0.0044,
+      -0.0306,
+      0.0652
+     ],
+     "p50_run_level_mean": 0.0048,
+     "p50_run_level_t95": [
+      -0.0616,
+      0.0713
+     ],
+     "median_of_run_p95": 0.0048,
+     "pooled_p95": 0.0023,
+     "pooled_p95_cluster_ci95": [
+      -0.0065,
+      0.0115
+     ]
+    },
+    "conc": {
+     "p95_per_round": [
+      -0.0657,
+      0.1125,
+      -0.0061,
+      -0.0059
+     ],
+     "p95_run_level_mean": 0.0087,
+     "p95_run_level_t95": [
+      -0.1102,
+      0.1276
+     ],
+     "p50_per_round": [
+      0.006,
+      0.0343,
+      -0.0196,
+      0.0255
+     ],
+     "p50_run_level_mean": 0.0116,
+     "p50_run_level_t95": [
+      -0.0265,
+      0.0496
+     ],
+     "median_of_run_p95": 0.0013,
+     "pooled_p95": 0.0157,
+     "pooled_p95_cluster_ci95": [
+      -0.0284,
+      0.0752
+     ]
+    }
+   },
+   "reading": "within the noise floor of base; the pooled conc p95 +8.8% [+1.0, +19.3] (noobs) is one of the implausible cluster-bootstrap results the verification flags (run-level t95 [-27.5, +28.1])",
+   "source": "tasks/adaptive-memory/eval/perf/performance.json"
+  }
+ },
+ "memory_lifecycle": {
+  "P1 base-delete": {
+   "label": "p1-off-base-delete",
+   "arm": "off",
+   "encoding": "base-delete",
+   "api_sha": "dafd09a64fa475cada75e390f22d5d31520d352a",
+   "api_dirty": false,
+   "embedder": "local (bge-small-en-v1.5 + ms-marco-MiniLM-L-6-v2, CPU)",
+   "payload_source": "authored",
+   "server_env_adaptive": {
+    "HINDSIGHT_API_ADAPTIVE_MEMORY_MODE": "off"
+   },
+   "bank_config": {},
+   "recall_types": null,
+   "started_at_utc": "2026-10-17T08:43:03.586806+00:00",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/p1/arm-off-base-delete.json",
+   "metrics": {
+    "all": {
+     "current_precision@1": {
+      "mean": 0.9138,
+      "n": 58
+     },
+     "current_precision@5": {
+      "mean": 0.6207,
+      "n": 58
+     },
+     "current_recall@1": {
+      "mean": 0.7816,
+      "n": 58
+     },
+     "current_recall@5": {
+      "mean": 0.9828,
+      "n": 58
+     },
+     "stale_contamination@1": {
+      "mean": 0.2222,
+      "n": 18
+     },
+     "stale_contamination@5": {
+      "mean": 0.2333,
+      "n": 18
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.2222,
+      "n": 18
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.2333,
+      "n": 18
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@1": {
+      "mean": 0.0345,
+      "n": 58
+     },
+     "mixed_rate@5": {
+      "mean": 0.0086,
+      "n": 58
+     },
+     "refuted_leakage@1": {
+      "mean": 0.25,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.2,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.1875,
+      "n": 16
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 16
+     },
+     "scope_accuracy@1": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "scope_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.7778,
+      "n": 18
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "uncertainty_accuracy@1": {
+      "mean": 0.0,
+      "n": 6
+     },
+     "uncertainty_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": 0.3333,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": 0.3333,
+      "n": 6
+     }
+    },
+    "holdout": {
+     "current_precision@1": {
+      "mean": 0.8333,
+      "n": 18
+     },
+     "current_precision@5": {
+      "mean": 0.4444,
+      "n": 18
+     },
+     "current_recall@1": {
+      "mean": 0.8333,
+      "n": 18
+     },
+     "current_recall@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "stale_contamination@1": {
+      "mean": 0.2857,
+      "n": 7
+     },
+     "stale_contamination@5": {
+      "mean": 0.2,
+      "n": 7
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.2857,
+      "n": 7
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.2,
+      "n": 7
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "refuted_leakage@1": {
+      "mean": 0.25,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.2,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.0,
+      "n": 10
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 10
+     },
+     "scope_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "scope_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.7143,
+      "n": 7
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "uncertainty_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "uncertainty_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": null,
+      "n": 0
+     }
+    }
+   },
+   "note": "each value is the mean over the split's applicable queries of a per-query score (n = queries); no CI computed",
+   "state_conformance": {
+    "all:conformance": {
+     "mean": null,
+     "n": 0
+    },
+    "all:retirement_recall": {
+     "mean": null,
+     "n": 0
+    },
+    "all:false_retirement": {
+     "mean": null,
+     "n": 0
+    },
+    "dev:conformance": {
+     "mean": null,
+     "n": 0
+    },
+    "dev:retirement_recall": {
+     "mean": null,
+     "n": 0
+    },
+    "dev:false_retirement": {
+     "mean": null,
+     "n": 0
+    },
+    "holdout:conformance": {
+     "mean": null,
+     "n": 0
+    },
+    "holdout:retirement_recall": {
+     "mean": null,
+     "n": 0
+    },
+    "holdout:false_retirement": {
+     "mean": null,
+     "n": 0
+    }
+   }
+  },
+  "P3 base-delete": {
+   "label": "p3-off-base-delete",
+   "arm": "off",
+   "encoding": "base-delete",
+   "api_sha": "b491b2bb9cba775fdb082a75288c0c2192f36726",
+   "api_dirty": false,
+   "embedder": "local (bge-small-en-v1.5 + ms-marco-MiniLM-L-6-v2, CPU)",
+   "payload_source": "authored",
+   "server_env_adaptive": {
+    "HINDSIGHT_API_ADAPTIVE_MEMORY_MODE": "off"
+   },
+   "bank_config": {},
+   "recall_types": null,
+   "started_at_utc": "2026-10-17T17:16:25.412739+00:00",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/p3/p3-off-base-delete.json",
+   "metrics": {
+    "all": {
+     "current_precision@1": {
+      "mean": 0.9138,
+      "n": 58
+     },
+     "current_precision@5": {
+      "mean": 0.6207,
+      "n": 58
+     },
+     "current_recall@1": {
+      "mean": 0.7816,
+      "n": 58
+     },
+     "current_recall@5": {
+      "mean": 0.9828,
+      "n": 58
+     },
+     "stale_contamination@1": {
+      "mean": 0.2222,
+      "n": 18
+     },
+     "stale_contamination@5": {
+      "mean": 0.2333,
+      "n": 18
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.2222,
+      "n": 18
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.2333,
+      "n": 18
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@1": {
+      "mean": 0.0345,
+      "n": 58
+     },
+     "mixed_rate@5": {
+      "mean": 0.0086,
+      "n": 58
+     },
+     "refuted_leakage@1": {
+      "mean": 0.25,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.2,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.1875,
+      "n": 16
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 16
+     },
+     "scope_accuracy@1": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "scope_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.7778,
+      "n": 18
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "uncertainty_accuracy@1": {
+      "mean": 0.0,
+      "n": 6
+     },
+     "uncertainty_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": 0.3333,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": 0.3333,
+      "n": 6
+     }
+    },
+    "holdout": {
+     "current_precision@1": {
+      "mean": 0.8333,
+      "n": 18
+     },
+     "current_precision@5": {
+      "mean": 0.4444,
+      "n": 18
+     },
+     "current_recall@1": {
+      "mean": 0.8333,
+      "n": 18
+     },
+     "current_recall@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "stale_contamination@1": {
+      "mean": 0.2857,
+      "n": 7
+     },
+     "stale_contamination@5": {
+      "mean": 0.2,
+      "n": 7
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.2857,
+      "n": 7
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.2,
+      "n": 7
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "refuted_leakage@1": {
+      "mean": 0.25,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.2,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.0,
+      "n": 10
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 10
+     },
+     "scope_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "scope_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.7143,
+      "n": 7
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "uncertainty_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "uncertainty_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": null,
+      "n": 0
+     }
+    }
+   },
+   "note": "each value is the mean over the split's applicable queries of a per-query score (n = queries); no CI computed",
+   "state_conformance": {
+    "all:conformance": {
+     "mean": null,
+     "n": 0
+    },
+    "all:retirement_recall": {
+     "mean": null,
+     "n": 0
+    },
+    "all:false_retirement": {
+     "mean": null,
+     "n": 0
+    },
+    "dev:conformance": {
+     "mean": null,
+     "n": 0
+    },
+    "dev:retirement_recall": {
+     "mean": null,
+     "n": 0
+    },
+    "dev:false_retirement": {
+     "mean": null,
+     "n": 0
+    },
+    "holdout:conformance": {
+     "mean": null,
+     "n": 0
+    },
+    "holdout:retirement_recall": {
+     "mean": null,
+     "n": 0
+    },
+    "holdout:false_retirement": {
+     "mean": null,
+     "n": 0
+    }
+   }
+  },
+  "P3 base-update": {
+   "label": "p3-off-base-update",
+   "arm": "off",
+   "encoding": "base-update",
+   "api_sha": "b491b2bb9cba775fdb082a75288c0c2192f36726",
+   "api_dirty": false,
+   "embedder": "local (bge-small-en-v1.5 + ms-marco-MiniLM-L-6-v2, CPU)",
+   "payload_source": "authored",
+   "server_env_adaptive": {
+    "HINDSIGHT_API_ADAPTIVE_MEMORY_MODE": "off"
+   },
+   "bank_config": {},
+   "recall_types": null,
+   "started_at_utc": "2026-10-17T17:24:58.613762+00:00",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/p3/p3-off-base-update.json",
+   "metrics": {
+    "all": {
+     "current_precision@1": {
+      "mean": 0.9483,
+      "n": 58
+     },
+     "current_precision@5": {
+      "mean": 0.6112,
+      "n": 58
+     },
+     "current_recall@1": {
+      "mean": 0.8592,
+      "n": 58
+     },
+     "current_recall@5": {
+      "mean": 0.9828,
+      "n": 58
+     },
+     "stale_contamination@1": {
+      "mean": 0.1111,
+      "n": 18
+     },
+     "stale_contamination@5": {
+      "mean": 0.2472,
+      "n": 18
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.1111,
+      "n": 18
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.2472,
+      "n": 18
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@1": {
+      "mean": 0.2241,
+      "n": 58
+     },
+     "mixed_rate@5": {
+      "mean": 0.0586,
+      "n": 58
+     },
+     "refuted_leakage@1": {
+      "mean": 0.25,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.25,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.8125,
+      "n": 16
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 16
+     },
+     "scope_accuracy@1": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "scope_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.8889,
+      "n": 18
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "uncertainty_accuracy@1": {
+      "mean": 0.6667,
+      "n": 6
+     },
+     "uncertainty_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": 0.3333,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": 0.3333,
+      "n": 6
+     }
+    },
+    "holdout": {
+     "current_precision@1": {
+      "mean": 0.8889,
+      "n": 18
+     },
+     "current_precision@5": {
+      "mean": 0.4444,
+      "n": 18
+     },
+     "current_recall@1": {
+      "mean": 0.8889,
+      "n": 18
+     },
+     "current_recall@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "stale_contamination@1": {
+      "mean": 0.1429,
+      "n": 7
+     },
+     "stale_contamination@5": {
+      "mean": 0.2,
+      "n": 7
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.1429,
+      "n": 7
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.2,
+      "n": 7
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "mixed_rate@1": {
+      "mean": 0.3333,
+      "n": 18
+     },
+     "mixed_rate@5": {
+      "mean": 0.0778,
+      "n": 18
+     },
+     "refuted_leakage@1": {
+      "mean": 0.25,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.25,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.8,
+      "n": 10
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 10
+     },
+     "scope_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "scope_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.8571,
+      "n": 7
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "uncertainty_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "uncertainty_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": null,
+      "n": 0
+     }
+    }
+   },
+   "note": "each value is the mean over the split's applicable queries of a per-query score (n = queries); no CI computed",
+   "state_conformance": {
+    "all:conformance": {
+     "mean": null,
+     "n": 0
+    },
+    "all:retirement_recall": {
+     "mean": null,
+     "n": 0
+    },
+    "all:false_retirement": {
+     "mean": null,
+     "n": 0
+    },
+    "dev:conformance": {
+     "mean": null,
+     "n": 0
+    },
+    "dev:retirement_recall": {
+     "mean": null,
+     "n": 0
+    },
+    "dev:false_retirement": {
+     "mean": null,
+     "n": 0
+    },
+    "holdout:conformance": {
+     "mean": null,
+     "n": 0
+    },
+    "holdout:retirement_recall": {
+     "mean": null,
+     "n": 0
+    },
+    "holdout:false_retirement": {
+     "mean": null,
+     "n": 0
+    }
+   }
+  }
+ },
+ "amb_longmemeval_retrieval_noobs": {
+  "dataset": "LongMemEval-s cleaned (AMB loader), knowledge-update 72 + temporal-reasoning 127 non-abstention questions; frozen arm-A banks imported into every arm",
+  "endpoint_definitions": "tasks/adaptive-memory/eval/arms/score_endpoints.py",
+  "reference_arm": "B",
+  "endpoints": {
+   "knowledge-update:earlier@10": {
+    "value": 0.9861,
+    "x": 71,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.925,
+     0.9996
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:earlier@20": {
+    "value": 1.0,
+    "x": 72,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.9501,
+     1.0
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:earlier@5": {
+    "value": 0.9861,
+    "x": 71,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.925,
+     0.9996
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:latest@10": {
+    "value": 1.0,
+    "x": 72,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.9501,
+     1.0
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:latest@20": {
+    "value": 1.0,
+    "x": 72,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.9501,
+     1.0
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:latest@5": {
+    "value": 1.0,
+    "x": 72,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.9501,
+     1.0
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:latest_first": {
+    "value": 0.8194,
+    "x": 59,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.7111,
+     0.9002
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:all_gold@10": {
+    "value": 0.8268,
+    "x": 105,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.7496,
+     0.8881
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:all_gold@20": {
+    "value": 0.9134,
+    "x": 116,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.8503,
+     0.956
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:all_gold@5": {
+    "value": 0.7008,
+    "x": 89,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.6132,
+     0.7788
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:gold@10": {
+    "value": 0.9843,
+    "x": 125,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.9443,
+     0.9981
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:gold@20": {
+    "value": 0.9921,
+    "x": 126,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.9569,
+     0.9998
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:gold@5": {
+    "value": 0.9764,
+    "x": 124,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.9325,
+     0.9951
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   }
+  }
+ },
+ "amb_longmemeval_retrieval_obs": {
+  "dataset": "40 KU questions (eval/arms/obs-ku-qids.txt, sha256 7ba3a529...), each bank consolidated once with the base prompt (mode off) on P3 code, Haiku 5.5",
+  "reference_arm": "B-obs",
+  "B-obs": {
+   "knowledge-update:earlier@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:earlier@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:earlier@5": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@5": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest_first": {
+    "value": 0.225,
+    "x": 9,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.1084,
+     0.3845
+    ],
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   }
+  },
+  "P-obs (off + recall_prefer_observations=true)": {
+   "knowledge-update:earlier@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:earlier@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:earlier@5": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@5": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest_first": {
+    "value": 0.15,
+    "x": 6,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.0571,
+     0.2984
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 0.225,
+    "ref_only": 3,
+    "arm_only": 0,
+    "p_exact_mcnemar": 0.25,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   }
+  },
+  "T-obs (off + types=['observation'])": {
+   "knowledge-update:earlier@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:earlier@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:earlier@5": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@5": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest_first": {
+    "value": 0.15,
+    "x": 6,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.0571,
+     0.2984
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 0.225,
+    "ref_only": 3,
+    "arm_only": 0,
+    "p_exact_mcnemar": 0.25,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   }
+  }
+ },
+ "amb_longmemeval_judged_noobs": {
+  "n_questions": 211,
+  "source_scored": "tasks/adaptive-memory/eval/judged/judged-noobs.md",
+  "source_rows": {
+   "A": [
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-A-r1/rag/s.json",
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-A-r2/rag/s.json"
+   ],
+   "B": [
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-B-r1/rag/s.json",
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-B-r2/rag/s.json"
+   ],
+   "D": [
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-D-r1/rag/s.json",
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-D-r2/rag/s.json"
+   ],
+   "E": [
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-E-r1/rag/s.json",
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-E-r2/rag/s.json"
+   ]
+  },
+  "rule": "primary = correct in both repeats; sensitivity = correct in at least one (PREREGISTRATION amendment 2026-10-17 20:34); exact McNemar vs reference",
+  "all_arms": {
+   "A": {
+    "per_repeat": [
+     0.9242,
+     0.9194
+    ],
+    "both_correct": 0.891,
+    "both_correct_x": 188,
+    "at_least_one": 0.9526,
+    "both_correct_vs_B": {
+     "ref_only": 3,
+     "arm_only": 3,
+     "p_exact_mcnemar": 1.0
+    },
+    "at_least_one_vs_B": {
+     "ref_only": 2,
+     "arm_only": 4,
+     "p_exact_mcnemar": 0.6875
+    },
+    "both_correct_knowledge-update": 0.9487,
+    "both_correct_temporal-reasoning": 0.8571
+   },
+   "B": {
+    "per_repeat": [
+     0.9194,
+     0.9147
+    ],
+    "both_correct": 0.891,
+    "both_correct_x": 188,
+    "at_least_one": 0.9431,
+    "both_correct_knowledge-update": 0.9231,
+    "both_correct_temporal-reasoning": 0.8722
+   },
+   "D": {
+    "per_repeat": [
+     0.91,
+     0.9194
+    ],
+    "both_correct": 0.8957,
+    "both_correct_x": 189,
+    "at_least_one": 0.9336,
+    "both_correct_vs_B": {
+     "ref_only": 3,
+     "arm_only": 4,
+     "p_exact_mcnemar": 1.0
+    },
+    "at_least_one_vs_B": {
+     "ref_only": 3,
+     "arm_only": 1,
+     "p_exact_mcnemar": 0.625
+    },
+    "both_correct_knowledge-update": 0.9231,
+    "both_correct_temporal-reasoning": 0.8797
+   },
+   "E": {
+    "per_repeat": [
+     0.9147,
+     0.9336
+    ],
+    "both_correct": 0.9052,
+    "both_correct_x": 191,
+    "at_least_one": 0.9431,
+    "both_correct_vs_B": {
+     "ref_only": 3,
+     "arm_only": 6,
+     "p_exact_mcnemar": 0.5078
+    },
+    "at_least_one_vs_B": {
+     "ref_only": 2,
+     "arm_only": 2,
+     "p_exact_mcnemar": 1.0
+    },
+    "both_correct_knowledge-update": 0.9359,
+    "both_correct_temporal-reasoning": 0.8872
+   }
+  },
+  "arm": {
+   "runs": [
+    "judged-B-r1",
+    "judged-B-r2"
+   ],
+   "per_repeat": [
+    {
+     "value": 0.9194,
+     "x": 194,
+     "n": 211,
+     "ci95_clopper_pearson": [
+      0.8741,
+      0.9524
+     ]
+    },
+    {
+     "value": 0.9147,
+     "x": 193,
+     "n": 211,
+     "ci95_clopper_pearson": [
+      0.8685,
+      0.9487
+     ]
+    }
+   ],
+   "both_correct": {
+    "value": 0.891,
+    "x": 188,
+    "n": 211,
+    "ci95_clopper_pearson": [
+     0.8409,
+     0.9296
+    ]
+   },
+   "at_least_one": {
+    "value": 0.9431,
+    "x": 199,
+    "n": 211,
+    "ci95_clopper_pearson": [
+     0.9028,
+     0.9703
+    ]
+   },
+   "both_correct_knowledge-update": {
+    "value": 0.9231,
+    "x": 72,
+    "n": 78,
+    "ci95_clopper_pearson": [
+     0.8401,
+     0.9712
+    ]
+   },
+   "both_correct_temporal-reasoning": {
+    "value": 0.8722,
+    "x": 116,
+    "n": 133,
+    "ci95_clopper_pearson": [
+     0.8033,
+     0.9237
+    ]
+   }
+  }
+ },
+ "amb_longmemeval_judged_obs": {
+  "n_questions": 40,
+  "source_scored": "tasks/adaptive-memory/eval/judged/judged-obs.md",
+  "source_rows": {
+   "B-obs": [
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-Bobs-r1/rag/s.json",
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-Bobs-r2/rag/s.json"
+   ],
+   "E-obs": [
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-Eobs-r1/rag/s.json",
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-Eobs-r2/rag/s.json"
+   ]
+  },
+  "rule": "primary = correct in both repeats; sensitivity = correct in at least one (PREREGISTRATION amendment 2026-10-17 20:34); exact McNemar vs reference",
+  "all_arms": {
+   "B-obs": {
+    "per_repeat": [
+     0.95,
+     0.975
+    ],
+    "both_correct": 0.95,
+    "both_correct_x": 38,
+    "at_least_one": 0.975,
+    "both_correct_knowledge-update": 0.95
+   },
+   "E-obs": {
+    "per_repeat": [
+     0.95,
+     0.95
+    ],
+    "both_correct": 0.925,
+    "both_correct_x": 37,
+    "at_least_one": 0.975,
+    "both_correct_vs_B-obs": {
+     "ref_only": 2,
+     "arm_only": 1,
+     "p_exact_mcnemar": 1.0
+    },
+    "at_least_one_vs_B-obs": {
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0
+    },
+    "both_correct_knowledge-update": 0.925
+   }
+  },
+  "arm": {
+   "runs": [
+    "judged-Bobs-r1",
+    "judged-Bobs-r2"
+   ],
+   "per_repeat": [
+    {
+     "value": 0.95,
+     "x": 38,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.8308,
+      0.9939
+     ]
+    },
+    {
+     "value": 0.975,
+     "x": 39,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.8684,
+      0.9994
+     ]
+    }
+   ],
+   "both_correct": {
+    "value": 0.95,
+    "x": 38,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.8308,
+     0.9939
+    ]
+   },
+   "at_least_one": {
+    "value": 0.975,
+    "x": 39,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.8684,
+     0.9994
+    ]
+   },
+   "both_correct_knowledge-update": {
+    "value": 0.95,
+    "x": 38,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.8308,
+     0.9939
+    ]
+   }
+  }
+ },
+ "locomo_retrieval": {
+  "n_queries": 1540,
+  "source_scored": "tasks/adaptive-memory/eval/judged/locomo-endpoints.md",
+  "source_rows": {
+   "A": "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/locomo/locomo-A/retrieval/locomo10.json",
+   "B": "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/locomo/locomo-B/retrieval/locomo10.json",
+   "D": "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/locomo/locomo-D/retrieval/locomo10.json",
+   "E": "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/locomo/locomo-E/retrieval/locomo10.json",
+   "E-nodecay": "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/locomo/locomo-E-nodecay/retrieval/locomo10.json"
+  },
+  "endpoint": "first gold rank <= k (AMB retrieval mode, AMB default budget)",
+  "arm": {
+   "run": "locomo-B",
+   "gold@5": {
+    "value": 0.9019,
+    "x": 1389,
+    "n": 1540,
+    "ci95_clopper_pearson": [
+     0.886,
+     0.9163
+    ]
+   },
+   "gold@10": {
+    "value": 0.9468,
+    "x": 1458,
+    "n": 1540,
+    "ci95_clopper_pearson": [
+     0.9343,
+     0.9574
+    ]
+   },
+   "gold@20": {
+    "value": 0.9753,
+    "x": 1502,
+    "n": 1540,
+    "ci95_clopper_pearson": [
+     0.9663,
+     0.9825
+    ]
+   },
+   "any_gold": {
+    "value": 0.9942,
+    "x": 1531,
+    "n": 1540,
+    "ci95_clopper_pearson": [
+     0.9889,
+     0.9973
+    ]
+   }
+  }
+ },
+ "classification_eval_arm_B": {
+  "P3_K3": {
+   "judged_pass": {
+    "value": 0.9012,
+    "x": 73,
+    "n": 81,
+    "ci95_clopper_pearson": [
+     0.8146,
+     0.9564
+    ]
+   },
+   "source": "tasks/adaptive-memory/eval/classify/REPORT.md",
+   "failures": "environment-divergence 3/3 (rewrote 50 -> 5), conflict-same-day-gateway 2/3, conflict-same-day-date 1/3, employer-supersedes 1/3, cascade-to-group 1/3"
+  },
+  "P5_K1": {
+   "judged_pass": {
+    "value": 0.8519,
+    "x": 23,
+    "n": 27,
+    "ci95_clopper_pearson": [
+     0.6627,
+     0.9581
+    ]
+   },
+   "source": "tasks/adaptive-memory/eval/classify/raw-p5/score.md"
+  },
+  "tokens": {
+   "P3": {
+    "calls": 504,
+    "input_tokens": 5633246,
+    "output_tokens": 296821,
+    "server_usd": 0.71
+   },
+   "P5": {
+    "calls": 169,
+    "input_tokens": 1864911,
+    "output_tokens": 97029,
+    "server_usd": 0.235
+   }
+  }
+ }
+}

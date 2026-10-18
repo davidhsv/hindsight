@@ -117,6 +117,7 @@ async def retrieve_all_fact_types_parallel(
     enable_text_search: bool = True,
     enable_temporal_retrieval: bool = True,
     enable_graph_retrieval: bool = True,
+    exclude_retired: bool = False,
 ) -> MultiFactTypeRetrievalResult:
     """
     Retrieve every recall arm for all fact types, through the memories store.
@@ -146,6 +147,9 @@ async def retrieve_all_fact_types_parallel(
             query analysis that feeds it (no constraint means nothing to filter on).
         enable_graph_retrieval: Run the entity/link graph arm. False skips those queries
             and returns no graph results.
+        exclude_retired: Have the store drop superseded and refuted memories inside the
+            arms' SQL, before their limits (``recall_unified(exclude_non_active=True)``;
+            adaptive memory's lifecycle mode). The graph arm is not filtered by the store.
 
     Returns:
         MultiFactTypeRetrievalResult with results organized by fact type
@@ -206,6 +210,7 @@ async def retrieve_all_fact_types_parallel(
         min_keyword=min_keyword,
         enable_text_search=enable_text_search,
         enable_graph=enable_graph_retrieval,
+        **({"exclude_non_active": True} if exclude_retired else {}),
     )
 
     _unified_elapsed = time.perf_counter() - _unified_start

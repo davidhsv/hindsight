@@ -695,6 +695,7 @@
       "webhookDelivery": "Entrega de webhook",
       "graphMaintenance": "Mantenimiento del grafo",
       "vectorIndexMaintenance": "Mantenimiento del índice vectorial",
+      "adaptiveMemoryMaintenance": "Mantenimiento de memoria adaptativa",
       "exportDocuments": "Exportar documentos",
       "importDocuments": "Importar documentos",
       "exportBank": "Exportar banco",
@@ -2021,7 +2022,9 @@
         "retain": "No se pudo ejecutar Retain por lotes",
         "retainAsync": "No se pudo ejecutar Retain por lotes de forma asíncrona",
         "history": "No se pudo obtener el historial de observaciones",
-        "update": "No se pudo actualizar la memoria"
+        "update": "No se pudo actualizar la memoria",
+        "confirm": "No se pudo confirmar la memoria",
+        "lifecycle": "No se pudo actualizar el ciclo de vida de la memoria"
       },
       "documents": {
         "fetchList": "No se pudieron obtener los documentos",
@@ -2259,5 +2262,32 @@
     "pausedTitle": "La última actualización falló, así que este modelo ya no se actualiza solo: actualízalo para reanudarlo",
     "retrying": "Reintentando",
     "retryingTitle": "El último intento falló y hay otro en cola: las actualizaciones automáticas solo se detienen si este también falla"
+  },
+  "memoryLifecycle": {
+    "sectionTitle": "Memoria adaptativa",
+    "truthStatus": "Estado de verdad",
+    "status": {
+      "active": "Activa",
+      "uncertain": "Incierta",
+      "superseded": "Sustituida",
+      "refuted": "Refutada"
+    },
+    "until": "hasta {date}",
+    "supersededByTitle": "Sustituida por {id}",
+    "validity": "Válida",
+    "unknownStart": "antes de cualquier registro",
+    "openEnd": "ahora",
+    "supersededBy": "Sustituida por",
+    "retiredVia": "Retirada mediante",
+    "reason": "Motivo",
+    "retrievability": "Recuperabilidad",
+    "stability": "Estabilidad",
+    "stabilityValue": "{days} días",
+    "reinforcements": "Refuerzos",
+    "importance": "Importancia",
+    "exempt": "Exenta del olvido",
+    "yes": "Sí",
+    "archived": "Archivada",
+    "observeShadow": "El modo de observación la marcaría como"
   }
 }

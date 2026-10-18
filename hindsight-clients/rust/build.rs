@@ -11,6 +11,50 @@ fn convert_31_to_30(spec: &mut serde_json::Value) {
 
     // Recursively convert anyOf with null to nullable
     convert_anyof_to_nullable(spec);
+
+    // Numeric exclusive bounds to the 3.0 boolean form
+    convert_exclusive_bounds(spec);
+}
+
+/// Rewrite 3.1's numeric `exclusiveMinimum: x` / `exclusiveMaximum: x` (what
+/// pydantic emits for `gt` / `lt`) as 3.0's `minimum: x, exclusiveMinimum: true`.
+/// The 3.0 parser only accepts a boolean there, so a single numeric bound fails
+/// the whole build. When the schema also carries an inclusive bound that is
+/// already stricter, the exclusive one adds nothing and is dropped.
+fn convert_exclusive_bounds(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(obj) => {
+            for (exclusive, inclusive, is_lower) in [
+                ("exclusiveMinimum", "minimum", true),
+                ("exclusiveMaximum", "maximum", false),
+            ] {
+                let Some(bound) = obj.get(exclusive).filter(|v| v.is_number()).cloned() else {
+                    continue;
+                };
+                let existing = obj.get(inclusive).and_then(|v| v.as_f64());
+                match (existing, bound.as_f64()) {
+                    (Some(current), Some(new))
+                        if (is_lower && current > new) || (!is_lower && current < new) =>
+                    {
+                        obj.remove(exclusive);
+                    }
+                    _ => {
+                        obj.insert(inclusive.to_string(), bound);
+                        obj.insert(exclusive.to_string(), serde_json::json!(true));
+                    }
+                }
+            }
+            for (_key, val) in obj.iter_mut() {
+                convert_exclusive_bounds(val);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                convert_exclusive_bounds(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Remove paths with multipart/form-data content type (not supported by progenitor)

@@ -10,6 +10,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from ..response_models import RecallLifecycle
+
 
 class TemporalConstraint(BaseModel):
     """Detected temporal constraint from query analysis."""
@@ -130,6 +132,176 @@ class RerankedResult(BaseModel):
     rrf_rank: int = Field(description="Original RRF rank before reranking")
     rank_change: int = Field(description="Change in rank (positive = moved up)")
     score_components: dict[str, float] = Field(default_factory=dict, description="Score breakdown")
+    # Claim-lifecycle annotation (truth status, validity, successor) for a result whose claim is
+    # not plain active, in lifecycle mode. Omitted from the payload when None, so traces from
+    # every other mode keep their exact shape.
+    lifecycle: RecallLifecycle | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Claim lifecycle state of this result (adaptive memory lifecycle mode only)",
+    )
+
+
+class LifecycleFilteredResult(BaseModel):
+    """A candidate the lifecycle view removed before the reranker saw it."""
+
+    node_id: str = Field(description="Memory unit ID")
+    truth_status: str = Field(description="Its claim status: superseded, refuted (or uncertain, outside as_of)")
+    retired_via: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="How it was retired (supersedes, refutes, merges, splits, explicit, inherited)",
+    )
+    superseded_by: str | None = Field(
+        default=None, exclude_if=lambda v: v is None, description="The memory that replaced it"
+    )
+
+
+class LifecycleTraceInfo(BaseModel):
+    """Which claim view a lifecycle-mode recall applied, and why."""
+
+    view: str = Field(description="current, historical, as_of or all-with-status (internal)")
+    as_of: datetime | None = Field(
+        default=None, exclude_if=lambda v: v is None, description="The instant an as_of view kept claims valid at"
+    )
+    historical_cue: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="The phrase pattern that turned this recall historical (adaptive_memory_historical_cues)",
+    )
+    claims_checked: int = Field(description="Merged candidates whose claim was read before the reranker trim")
+    refill_rounds: int = Field(description="Extra claim reads made to refill the trim after removals")
+
+
+class AdaptiveTraceInfo(BaseModel):
+    """What adaptive memory did on this recall. Present only when the bank's mode loads state."""
+
+    mode: str = Field(description="Effective adaptive_memory_mode: observe, rank or lifecycle")
+    alpha: float = Field(description="adaptive_memory_score_alpha: weight of the retention factor")
+    floor: float = Field(description="adaptive_memory_score_floor: retention factor at R=0, before importance")
+    scored: bool = Field(
+        description=(
+            "Whether the adaptive factor was computed. False for the decision-model and interleave "
+            "orders (authoritative, never re-weighted), an empty pool, or a failed state load"
+        )
+    )
+    states_loaded: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Candidates that had stored adaptive state; the rest used lazy defaults",
+    )
+    simulated_final_ids: list[str] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Observe mode: the ids this recall would have returned with the factor applied",
+    )
+    top_k_changed: bool | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Observe mode: whether simulated_final_ids differs from the ids actually returned",
+    )
+    rerank_changed: bool | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Rank/lifecycle mode: whether the returned ids differ from the factor-free ones",
+    )
+    state_load_error: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Exception type when the adaptive state could not be loaded (the recall then used factor 1)",
+    )
+    archive_suppressed: list[str] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description=(
+            "Rank/lifecycle mode with archiving on: archived memories dropped after scoring because their "
+            "normalized reranker score was below adaptive_memory_archive_recall_min_score"
+        ),
+    )
+
+
+class ContextAdmissionCandidateTrace(BaseModel):
+    """One candidate's context-admission decision (scores and ids only, never memory text)."""
+
+    memory_id: str = Field(description="The candidate memory")
+    base_retrieval_score: float = Field(description="The recall score the candidate arrived with")
+    scope_score: float = Field(description="Scope agreement with the request context on [0, 1]; 0.5 is neutral")
+    task_relevance: float = Field(
+        description="Relevance to the task on [0, 1]: the deterministic relevance part, or the decision "
+        "model's probability under the jev and hybrid scorers"
+    )
+    expected_utility: float = Field(description="Retention, cost and type part of the score on [0, 1]; 0.5 is neutral")
+    truth_status: str = Field(description="Claim status: active, uncertain, superseded or refuted")
+    retrievability: float | None = Field(
+        default=None, description="Retrievability, when adaptive memory scored the candidate"
+    )
+    admission_score: float = Field(description="The score compared with the threshold")
+    admitted: bool = Field(description="Whether the gate admitted the candidate")
+    reason: str = Field(description="admitted, wrong_scope, below_threshold, superseded, refuted, redundant or budget")
+    tokens: int = Field(description="The candidate's text length in tokens")
+    duplicates: int = Field(default=0, description="Near-duplicates suppressed in favour of this memory")
+    scope: dict[str, str] = Field(default_factory=dict, description="Per scope key: match, mismatch or unknown")
+    features: dict[str, float] = Field(
+        default_factory=dict,
+        description="The deterministic scorer's inputs, keyed as context_admission_weights names them",
+    )
+
+
+class ContextAdmissionTraceInfo(BaseModel):
+    """What context admission did on this recall. Present only when the gate ran."""
+
+    mode: str = Field(description="context_admission_mode: observe, filter or strict")
+    scorer: str = Field(description="context_admission_scorer: deterministic, jev or hybrid")
+    purpose: str = Field(description="The request purpose: auto_context, explicit_search or historical_search")
+    threshold: float = Field(description="The admission threshold this recall applied")
+    historical: bool = Field(description="Whether superseded memories were admissible (a historical task)")
+    reference_signal: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="The memory-reference phrase that lowered the auto_context threshold",
+    )
+    candidates: int = Field(description="Candidates judged")
+    admitted: int = Field(description="Candidates admitted")
+    abstained: bool = Field(description="Candidates were judged and none was admitted")
+    reasons: dict[str, int] = Field(description="Rejected candidates per reason")
+    cross_scope_candidates: int = Field(description="Candidates whose metadata disagrees with a hard scope key")
+    decisions: list[ContextAdmissionCandidateTrace] = Field(description="Every judged candidate, in recall order")
+    shadow_final_ids: list[str] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Observe mode: the ids this recall would have returned with admission applied",
+    )
+    would_change_top_k: bool | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Observe mode: whether shadow_final_ids differs from the ids returned",
+    )
+    would_drop: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Observe mode: returned memories admission would have left out",
+    )
+    jev_error: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Why the decision model gave no scores (not_configured or the error type); the "
+        "deterministic score was used instead",
+    )
+    embeddings_error: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Error type when the embeddings could not be read (no near-duplicate was suppressed)",
+    )
+    relevance_source: str = Field(
+        default="reranker",
+        description="What the deterministic reranker feature read: reranker (the cross-encoder's score) or "
+        "semantic (the recall's reranker scored by rank or was a passthrough, so its scores are positions)",
+    )
+    scope_error: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Error type when observations' source facts could not be read (their scope read unknown)",
+    )
 
 
 class SearchSummary(BaseModel):
@@ -170,6 +342,30 @@ class SearchTrace(BaseModel):
 
     # Final results (for comparison with visits)
     final_results: list[dict[str, Any]] = Field(description="Final ranked results returned to user")
+
+    # Omitted unless the bank's adaptive_memory_mode loaded state: a mode-off trace is unchanged.
+    adaptive: AdaptiveTraceInfo | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Adaptive memory: mode, factor parameters and observe-mode simulation",
+    )
+    # Lifecycle mode only: the claim view and what it removed. Omitted otherwise.
+    lifecycle: LifecycleTraceInfo | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Adaptive memory lifecycle mode: the claim view this recall applied",
+    )
+    lifecycle_filtered: list[LifecycleFilteredResult] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Candidates the lifecycle view removed (status and successor), in fusion order",
+    )
+    # Only when the context-admission gate ran on this recall. Omitted otherwise.
+    context_admission: ContextAdmissionTraceInfo | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Context admission: per-candidate decisions, abstention reasons and observe-mode simulation",
+    )
 
     model_config = {"json_encoders": {datetime: lambda v: v.isoformat()}}
 

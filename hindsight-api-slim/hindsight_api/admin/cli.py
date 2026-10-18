@@ -69,6 +69,13 @@ BACKUP_TABLES = [
     "chunks",
     "memory_units",
     "invalidated_memory_units",
+    # Adaptive-memory side tables: each references memory_units only.
+    "memory_retention_state",
+    "memory_claim_state",
+    "memory_claim_evidence",
+    "memory_lifecycle_relations",
+    "memory_reinforcement_events",
+    "memory_claim_shadow",
     "unit_entities",
     "entity_cooccurrences",
     "memory_links",

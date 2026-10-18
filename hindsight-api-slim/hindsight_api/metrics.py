@@ -20,9 +20,10 @@ import random
 _resource_mod = importlib.import_module("resource") if importlib.util.find_spec("resource") else None
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Callable, NamedTuple
+from typing import TYPE_CHECKING, Callable, Literal, NamedTuple
 
 from opentelemetry import metrics
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
@@ -32,6 +33,11 @@ from opentelemetry.sdk.resources import Resource
 
 if TYPE_CHECKING:
     import asyncpg
+
+    from .engine.adaptive.models import RecordedEvent
+
+#: The claim transitions ``record_adaptive_claim_transition`` counts, one counter each.
+ClaimTransition = Literal["supersession", "refutation", "uncertain", "split", "merge"]
 
 
 def _get_tenant() -> str:
@@ -99,6 +105,12 @@ LLM_DURATION_BUCKETS = (0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 15.0, 30.0, 60
 
 # HTTP request duration buckets (millisecond-level for fast endpoints)
 HTTP_DURATION_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
+
+# Adaptive memory: retrievability is in (0, 1], so 0.05-wide buckets across it; stability spans
+# half a day to ten years, so roughly log-spaced day buckets with the calendar marks a reader
+# thinks in (a week is between 5 and 10, a month is 30, a year 365).
+ADAPTIVE_RETRIEVABILITY_BUCKETS = tuple(round(0.05 * i, 2) for i in range(1, 21))
+ADAPTIVE_STABILITY_DAYS_BUCKETS = (1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 90.0, 180.0, 365.0, 730.0, 1825.0, 3650.0)
 
 # How often the backlog / queue-depth gauge caches are refreshed (seconds).
 # The counts are aggregate COUNT queries, so a background task refreshes a
@@ -354,6 +366,116 @@ class MetricsCollectorBase:
         """
         raise NotImplementedError
 
+    def record_adaptive_state_load_error(self, *, mode: str, bank_id: str):
+        """Record a recall whose adaptive-state load failed; it continued with factor 1."""
+        raise NotImplementedError
+
+    def record_adaptive_recall(
+        self,
+        *,
+        mode: str,
+        bank_id: str,
+        retrievability: Sequence[float],
+        stability_days: Sequence[float],
+        rerank_changed: bool | None,
+        top_k_changed: bool | None,
+    ):
+        """Record one adaptively-scored recall, once, over its FINAL results (never per candidate).
+
+        `retrievability` / `stability_days` are the returned memories' values. `rerank_changed`
+        (rank/lifecycle) says the returned ids differ from what the factor-free order would have
+        returned; `top_k_changed` (observe) says the simulated factor-applied ids differ from the
+        ones returned. None means "not measured in this mode".
+        """
+        raise NotImplementedError
+
+    def record_adaptive_reinforcement(self, *, bank_id: str, initialized: int, events: Sequence["RecordedEvent"]):
+        """Record one ``record_reinforcement`` call: the retention rows it created and each event's fate.
+
+        An applied, initial or cooled-down event counts in ``reinforcement_events{source_type,outcome}``;
+        one whose key was already in the ledger in ``reinforcement_events_deduplicated{source_type}``.
+        Disabled and skipped events count nowhere. A no-op here rather than abstract, so a collector
+        that predates adaptive memory keeps working.
+        """
+
+    def record_adaptive_reinforcement_dropped(self, *, producer: str, reason: str, bank_id: str):
+        """Record a reinforcement a producer gave up on: ``reason`` "error" (the write failed) or
+        "overflow" (too many background writes in flight). ``producer`` is consolidation, recall or
+        reflect. The operation that produced it was not affected. A no-op here, like the above.
+        """
+
+    def record_adaptive_carry_forward(self, *, bank_id: str, matched: int, unmatched: int):
+        """Record one re-ingest carry-forward: outgoing facts whose lifecycle state moved to a
+        re-extracted fact (``matched``) and those whose state was dropped (``unmatched``, counted
+        once, on the final call). A no-op here, like the above.
+        """
+
+    def record_adaptive_claims_reverted(self, *, bank_id: str, reason: str, count: int):
+        """Record claims returned to active because every piece of their evidence was physically
+        deleted (``reason`` "evidence_deleted") or never re-extracted by a re-ingest
+        ("reingest_unmatched"). A no-op here, like the above.
+        """
+
+    def record_adaptive_claim_transition(
+        self, *, bank_id: str, transition: ClaimTransition, origin: str, count: int = 1
+    ):
+        """Record claim transitions that won their compare-and-set: ``transition`` is supersession,
+        refutation, uncertain, split or merge; ``origin`` is consolidation or explicit (the PATCH
+        lifecycle API). Inherited raw-fact retirements are not counted here. A no-op here, like
+        the above.
+        """
+
+    def record_adaptive_lifecycle_filtered(self, *, bank_id: str, view: str, superseded: int, refuted: int):
+        """Record one lifecycle-mode recall's claim view: candidates it removed because their claim
+        is superseded or refuted (``view`` current, historical or as_of). Called once per recall, zero
+        counts included. A no-op here, like the above.
+        """
+
+    def record_adaptive_historical_cue(self, *, bank_id: str, cue: str):
+        """Record a recall the historical-cue detector turned historical; ``cue`` is the pattern name
+        (``engine/adaptive/cues.py::CUE_NAMES``). A no-op here, like the above.
+        """
+
+    def record_adaptive_archive_suppressed(self, *, bank_id: str, count: int):
+        """Record archived memories one recall dropped after scoring because their normalized
+        reranker score was below ``archive_recall_min_score``. A no-op here, like the above.
+        """
+
+    def record_adaptive_archive_maintenance(self, *, bank_id: str, archived: int, pruned: int):
+        """Record one ``adaptive_memory_maintenance`` run: memories it archived and archived memories
+        it deleted (prune). A no-op here, like the above.
+        """
+
+    def record_context_admission(
+        self,
+        *,
+        mode: str,
+        scorer: str,
+        bank_id: str,
+        candidates: int,
+        admitted: int,
+        abstained: bool,
+        rejected: Mapping[str, int],
+        cross_scope_candidates: int,
+        would_drop: int | None = None,
+        would_abstain: bool | None = None,
+        would_change_top_k: bool | None = None,
+    ):
+        """Record one recall the context-admission gate judged (counts only, never content).
+
+        ``rejected`` counts the rejected candidates per reason. The ``would_*`` values are the
+        observe-mode comparison with what the recall returned (None in filter and strict). A no-op
+        here, like the above.
+        """
+
+    def record_adaptive_lifecycle_dropped(self, *, reason: str, bank_id: str):
+        """Record one lifecycle label (a supersede, refute, split, conflict, history attach or retire)
+        that consolidation's deterministic validation dropped; ``reason`` names the rule it broke
+        (``target_not_in_pool``, ``target_not_active``, ``scope_tags``, ``scope_fingerprint``,
+        ``recency``, ``duplicate_retirement``, ``self_reference``, ``source_not_of_target``,
+        ``scope_changed``, ``cas_lost``). A no-op here, like the above.
+        """
+
     def set_db_pool(self, pool: "asyncpg.Pool"):
         """Set the database pool for metrics collection."""
         pass
@@ -435,6 +557,65 @@ class NoOpMetricsCollector(MetricsCollectorBase):
 
     def record_consolidation_batch_failure(self, failure_class: str, error_type: str):
         """No-op consolidation batch-failure recording."""
+        pass
+
+    def record_adaptive_state_load_error(self, *, mode: str, bank_id: str):
+        """No-op adaptive state-load error recording."""
+        pass
+
+    def record_adaptive_recall(
+        self,
+        *,
+        mode: str,
+        bank_id: str,
+        retrievability: Sequence[float],
+        stability_days: Sequence[float],
+        rerank_changed: bool | None,
+        top_k_changed: bool | None,
+    ):
+        """No-op adaptive recall recording."""
+        pass
+
+    def record_adaptive_reinforcement(self, *, bank_id: str, initialized: int, events: Sequence["RecordedEvent"]):
+        """No-op adaptive reinforcement recording."""
+        pass
+
+    def record_adaptive_reinforcement_dropped(self, *, producer: str, reason: str, bank_id: str):
+        """No-op dropped-reinforcement recording."""
+        pass
+
+    def record_adaptive_carry_forward(self, *, bank_id: str, matched: int, unmatched: int):
+        """No-op carry-forward recording."""
+        pass
+
+    def record_adaptive_claims_reverted(self, *, bank_id: str, reason: str, count: int):
+        """No-op claim-revert recording."""
+        pass
+
+    def record_adaptive_claim_transition(
+        self, *, bank_id: str, transition: ClaimTransition, origin: str, count: int = 1
+    ):
+        """No-op claim-transition recording."""
+        pass
+
+    def record_adaptive_lifecycle_filtered(self, *, bank_id: str, view: str, superseded: int, refuted: int):
+        """No-op lifecycle-view recording."""
+        pass
+
+    def record_adaptive_historical_cue(self, *, bank_id: str, cue: str):
+        """No-op historical-cue recording."""
+        pass
+
+    def record_adaptive_archive_suppressed(self, *, bank_id: str, count: int):
+        """No-op archive-suppression recording."""
+        pass
+
+    def record_adaptive_archive_maintenance(self, *, bank_id: str, archived: int, pruned: int):
+        """No-op archive-maintenance recording."""
+        pass
+
+    def record_adaptive_lifecycle_dropped(self, *, reason: str, bank_id: str):
+        """No-op dropped-lifecycle-label recording."""
         pass
 
 
@@ -637,6 +818,169 @@ class MetricsCollector(MetricsCollectorBase):
             name="hindsight.event_loop.lag",
             description="Event-loop lag: extra time a ready coroutine waited before it ran",
             unit="s",
+        )
+
+        # Adaptive memory (engine/adaptive). Units are chosen for the exported Prometheus names:
+        # "1" adds no suffix and "d" adds "_days", which the stability name already ends with, so
+        # these export as hindsight_adaptive_memory_<name>[_total] exactly (asserted in
+        # tests/test_adaptive_scoring.py). Emitted only for banks whose adaptive mode is not off.
+        self.adaptive_state_load_errors = self.meter.create_counter(
+            name="hindsight.adaptive_memory.state_load_errors",
+            description="Recalls whose adaptive-memory state could not be loaded (they continued with factor 1)",
+            unit="1",
+        )
+        self.adaptive_rerank_changes = self.meter.create_counter(
+            name="hindsight.adaptive_memory.rerank_changes",
+            description="Rank/lifecycle recalls whose returned ids differ from the factor-free order's",
+            unit="1",
+        )
+        self.adaptive_top_k_changed = self.meter.create_counter(
+            name="hindsight.adaptive_memory.top_k_changed",
+            description="Observe recalls whose simulated factor-applied ids differ from the ones returned",
+            unit="1",
+        )
+        self.adaptive_retrievability = self.meter.create_histogram(
+            name="hindsight.adaptive_memory.retrievability",
+            description="Retrievability of the memories a recall returned (adaptive memory)",
+            unit="1",
+            explicit_bucket_boundaries_advisory=list(ADAPTIVE_RETRIEVABILITY_BUCKETS),
+        )
+        self.adaptive_stability_days = self.meter.create_histogram(
+            name="hindsight.adaptive_memory.stability_days",
+            description="Stability, in days, of the memories a recall returned (adaptive memory)",
+            unit="d",
+            explicit_bucket_boundaries_advisory=list(ADAPTIVE_STABILITY_DAYS_BUCKETS),
+        )
+        self.adaptive_state_initialized = self.meter.create_counter(
+            name="hindsight.adaptive_memory.state_initialized",
+            description="Retention rows created by reinforcement or an explicit retention setting (adaptive memory)",
+            unit="1",
+        )
+        self.adaptive_reinforcement_events = self.meter.create_counter(
+            name="hindsight.adaptive_memory.reinforcement_events",
+            description="Reinforcement events decided, by source type and outcome (applied, initial, cooldown)",
+            unit="1",
+        )
+        self.adaptive_reinforcement_events_deduplicated = self.meter.create_counter(
+            name="hindsight.adaptive_memory.reinforcement_events_deduplicated",
+            description="Reinforcement events whose key was already recorded for the memory, by source type",
+            unit="1",
+        )
+        self.adaptive_reinforcement_dropped = self.meter.create_counter(
+            name="hindsight.adaptive_memory.reinforcement_dropped",
+            description="Reinforcements a producer gave up on, by producer and reason (error, overflow)",
+            unit="1",
+        )
+        self.adaptive_carry_forward_matched = self.meter.create_counter(
+            name="hindsight.adaptive_memory.carry_forward_matched",
+            description="Re-ingested facts whose lifecycle state was carried to a re-extracted fact",
+            unit="1",
+        )
+        self.adaptive_carry_forward_unmatched = self.meter.create_counter(
+            name="hindsight.adaptive_memory.carry_forward_unmatched",
+            description="Re-ingested facts with lifecycle state that no re-extracted fact matched (state dropped)",
+            unit="1",
+        )
+        self.adaptive_claims_reverted = self.meter.create_counter(
+            name="hindsight.adaptive_memory.claims_reverted",
+            description="Claims returned to active because all their evidence was deleted, by reason",
+            unit="1",
+        )
+        # One counter per claim transition, labelled by origin (docs/developer/monitoring.md).
+        self.adaptive_claim_transitions = {
+            transition: self.meter.create_counter(
+                name=f"hindsight.adaptive_memory.{instrument}",
+                description=description,
+                unit="1",
+            )
+            for transition, instrument, description in (
+                ("supersession", "supersessions", "Claims superseded (compare-and-set won), by origin"),
+                ("refutation", "refutations", "Claims refuted (compare-and-set won), by origin"),
+                ("uncertain", "uncertain_claims", "Claims marked uncertain, by origin"),
+                ("split", "splits", "Observations split into narrower ones, by origin"),
+                ("merge", "merges", "Observations merge-retired into a survivor, by origin"),
+            )
+        }
+        self.adaptive_recall_superseded_filtered = self.meter.create_counter(
+            name="hindsight.adaptive_memory.recall_superseded_filtered",
+            description="Recall candidates removed by the lifecycle view because their claim is superseded",
+            unit="1",
+        )
+        self.adaptive_recall_refuted_filtered = self.meter.create_counter(
+            name="hindsight.adaptive_memory.recall_refuted_filtered",
+            description="Recall candidates removed by the lifecycle view because their claim is refuted",
+            unit="1",
+        )
+        self.adaptive_historical_cue_fired = self.meter.create_counter(
+            name="hindsight.adaptive_memory.historical_cue_fired",
+            description="External recalls the historical-cue detector turned historical, by cue",
+            unit="1",
+        )
+        self.adaptive_archive_suppressed = self.meter.create_counter(
+            name="hindsight.adaptive_memory.archive_suppressed",
+            description="Archived memories recall dropped after scoring (normalized reranker score below the cue bar)",
+            unit="1",
+        )
+        self.adaptive_archived = self.meter.create_counter(
+            name="hindsight.adaptive_memory.archived",
+            description="Memories the adaptive-memory maintenance job archived",
+            unit="1",
+        )
+        self.adaptive_pruned = self.meter.create_counter(
+            name="hindsight.adaptive_memory.pruned",
+            description="Archived memories the adaptive-memory maintenance job deleted (prune)",
+            unit="1",
+        )
+        self.adaptive_lifecycle_dropped = self.meter.create_counter(
+            name="hindsight.adaptive_memory.lifecycle_transitions_dropped",
+            description="Consolidation lifecycle labels dropped by validation, by reason",
+            unit="1",
+        )
+        # Context admission (engine/context_admission). Emitted only for recalls the gate judged.
+        self.context_admission_recalls = self.meter.create_counter(
+            name="hindsight.context_admission.recalls",
+            description="External recalls the context-admission gate judged, by mode and scorer",
+            unit="1",
+        )
+        self.context_admission_candidates = self.meter.create_counter(
+            name="hindsight.context_admission.candidates",
+            description="Candidates the context-admission gate judged",
+            unit="1",
+        )
+        self.context_admission_admitted = self.meter.create_counter(
+            name="hindsight.context_admission.admitted",
+            description="Candidates the context-admission gate admitted",
+            unit="1",
+        )
+        self.context_admission_rejected = self.meter.create_counter(
+            name="hindsight.context_admission.rejected",
+            description="Candidates the context-admission gate rejected, by reason",
+            unit="1",
+        )
+        self.context_admission_abstained = self.meter.create_counter(
+            name="hindsight.context_admission.abstained",
+            description="Recalls where the gate judged candidates and admitted none",
+            unit="1",
+        )
+        self.context_admission_cross_scope = self.meter.create_counter(
+            name="hindsight.context_admission.cross_scope_candidates_detected",
+            description="Candidates whose metadata disagreed with the request on a hard scope key",
+            unit="1",
+        )
+        self.context_admission_would_drop = self.meter.create_counter(
+            name="hindsight.context_admission.would_drop_count",
+            description="Observe mode: returned memories the gate would have left out",
+            unit="1",
+        )
+        self.context_admission_would_abstain = self.meter.create_counter(
+            name="hindsight.context_admission.would_abstain_count",
+            description="Observe mode: recalls the gate would have answered with no memories",
+            unit="1",
+        )
+        self.context_admission_would_change_top_k = self.meter.create_counter(
+            name="hindsight.context_admission.would_change_top_k",
+            description="Observe mode: recalls whose returned ids the gate would have changed",
+            unit="1",
         )
 
         # Process metrics (observable gauges - collected on scrape)
@@ -954,6 +1298,170 @@ class MetricsCollector(MetricsCollectorBase):
         self.consolidation_batch_failures.add(
             1, {"failure_class": failure_class, "error_type": error_type, **self._tenant_attrs()}
         )
+
+    def _adaptive_attrs(self, mode: str, bank_id: str) -> dict[str, str]:
+        attrs = {"mode": mode, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        return attrs
+
+    def record_adaptive_state_load_error(self, *, mode: str, bank_id: str):
+        """Record a recall whose adaptive-state load failed; it continued with factor 1."""
+        self.adaptive_state_load_errors.add(1, self._adaptive_attrs(mode, bank_id))
+
+    def record_adaptive_recall(
+        self,
+        *,
+        mode: str,
+        bank_id: str,
+        retrievability: Sequence[float],
+        stability_days: Sequence[float],
+        rerank_changed: bool | None,
+        top_k_changed: bool | None,
+    ):
+        """Record one adaptively-scored recall over its final results; see the base class."""
+        attrs = self._adaptive_attrs(mode, bank_id)
+        for value in retrievability:
+            self.adaptive_retrievability.record(value, attrs)
+        for value in stability_days:
+            self.adaptive_stability_days.record(value, attrs)
+        if rerank_changed:
+            self.adaptive_rerank_changes.add(1, attrs)
+        if top_k_changed:
+            self.adaptive_top_k_changed.add(1, attrs)
+
+    def record_adaptive_reinforcement(self, *, bank_id: str, initialized: int, events: Sequence["RecordedEvent"]):
+        """Record one reinforcement write; see the base class."""
+        attrs: dict[str, str] = dict(self._tenant_attrs())
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        if initialized:
+            self.adaptive_state_initialized.add(initialized, attrs)
+        for event in events:
+            if event.outcome in ("applied", "initial", "cooldown"):
+                self.adaptive_reinforcement_events.add(
+                    1, {**attrs, "source_type": event.source_type, "outcome": event.outcome}
+                )
+            elif event.outcome == "deduplicated":
+                self.adaptive_reinforcement_events_deduplicated.add(1, {**attrs, "source_type": event.source_type})
+
+    def record_adaptive_reinforcement_dropped(self, *, producer: str, reason: str, bank_id: str):
+        """Record a reinforcement a producer gave up on; see the base class."""
+        attrs: dict[str, str] = {"producer": producer, "reason": reason, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.adaptive_reinforcement_dropped.add(1, attrs)
+
+    def record_adaptive_carry_forward(self, *, bank_id: str, matched: int, unmatched: int):
+        """Record one re-ingest carry-forward; see the base class."""
+        attrs: dict[str, str] = dict(self._tenant_attrs())
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        if matched:
+            self.adaptive_carry_forward_matched.add(matched, attrs)
+        if unmatched:
+            self.adaptive_carry_forward_unmatched.add(unmatched, attrs)
+
+    def record_adaptive_claims_reverted(self, *, bank_id: str, reason: str, count: int):
+        """Record reverted claims; see the base class."""
+        if not count:
+            return
+        attrs: dict[str, str] = {"reason": reason, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.adaptive_claims_reverted.add(count, attrs)
+
+    def record_adaptive_claim_transition(
+        self, *, bank_id: str, transition: ClaimTransition, origin: str, count: int = 1
+    ):
+        """Record claim transitions; see the base class."""
+        if count <= 0:
+            return
+        attrs: dict[str, str] = {"origin": origin, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.adaptive_claim_transitions[transition].add(count, attrs)
+
+    def record_adaptive_lifecycle_filtered(self, *, bank_id: str, view: str, superseded: int, refuted: int):
+        """Record one recall's lifecycle-view removals; see the base class."""
+        attrs: dict[str, str] = {"view": view, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        if superseded:
+            self.adaptive_recall_superseded_filtered.add(superseded, attrs)
+        if refuted:
+            self.adaptive_recall_refuted_filtered.add(refuted, attrs)
+
+    def record_adaptive_historical_cue(self, *, bank_id: str, cue: str):
+        """Record a fired historical cue; see the base class."""
+        attrs: dict[str, str] = {"cue": cue, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.adaptive_historical_cue_fired.add(1, attrs)
+
+    def record_adaptive_archive_suppressed(self, *, bank_id: str, count: int):
+        """Record archive suppression in one recall; see the base class."""
+        if count <= 0:
+            return
+        attrs: dict[str, str] = {**self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.adaptive_archive_suppressed.add(count, attrs)
+
+    def record_adaptive_archive_maintenance(self, *, bank_id: str, archived: int, pruned: int):
+        """Record one maintenance run; see the base class."""
+        attrs: dict[str, str] = {**self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        if archived > 0:
+            self.adaptive_archived.add(archived, attrs)
+        if pruned > 0:
+            self.adaptive_pruned.add(pruned, attrs)
+
+    def record_context_admission(
+        self,
+        *,
+        mode: str,
+        scorer: str,
+        bank_id: str,
+        candidates: int,
+        admitted: int,
+        abstained: bool,
+        rejected: Mapping[str, int],
+        cross_scope_candidates: int,
+        would_drop: int | None = None,
+        would_abstain: bool | None = None,
+        would_change_top_k: bool | None = None,
+    ):
+        """Record one gated recall; see the base class."""
+        attrs: dict[str, str] = {"mode": mode, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.context_admission_recalls.add(1, {**attrs, "scorer": scorer})
+        if candidates:
+            self.context_admission_candidates.add(candidates, attrs)
+        if admitted:
+            self.context_admission_admitted.add(admitted, attrs)
+        for reason, count in rejected.items():
+            if count:
+                self.context_admission_rejected.add(count, {**attrs, "reason": reason})
+        if abstained:
+            self.context_admission_abstained.add(1, attrs)
+        if cross_scope_candidates:
+            self.context_admission_cross_scope.add(cross_scope_candidates, attrs)
+        if would_drop:
+            self.context_admission_would_drop.add(would_drop, attrs)
+        if would_abstain:
+            self.context_admission_would_abstain.add(1, attrs)
+        if would_change_top_k:
+            self.context_admission_would_change_top_k.add(1, attrs)
+
+    def record_adaptive_lifecycle_dropped(self, *, reason: str, bank_id: str):
+        """Record a dropped lifecycle label; see the base class."""
+        attrs: dict[str, str] = {"reason": reason, **self._tenant_attrs()}
+        if self._include_bank_id:
+            attrs["bank_id"] = bank_id
+        self.adaptive_lifecycle_dropped.add(1, attrs)
 
     def _setup_process_metrics(self):
         """Set up observable gauges for process metrics."""

@@ -9,6 +9,7 @@ import dataclasses
 import hashlib
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -25,6 +26,9 @@ from ...extensions.memory_defense import (
 )
 from ...metrics import get_metrics_collector
 from ...worker.stage import set_stage
+from ..adaptive import clock as adaptive_clock
+from ..adaptive.models import RetentionPolicy
+from ..adaptive.producers import write_settings
 from ..chunk_ids import build_chunk_id
 from ..db_utils import acquire_with_retry
 from ..memory_engine import count_tokens, fq_table
@@ -630,6 +634,112 @@ def _build_retain_params(contents_dicts, document_tags=None, doc_contents=None):
     return retain_params, merged_tags
 
 
+async def _mark_minted_document(
+    pool: Any,
+    bank_id: str,
+    document_id: str,
+    contents_dicts: list[RetainContentDict],
+    *,
+    minted_now: bool,
+    log_buffer: list[str],
+) -> None:
+    """Stamp ``document_id_minted`` on the items of a document whose id the server minted, in place.
+
+    ``_build_retain_params`` copies it into the document's ``retain_params`` (it is replayed, so a
+    reprocess keeps it). A caller that re-retains, appends to or replaces a document under an id
+    the server once minted for it supplies that id itself, so the mark is read back from the stored
+    document and carried over: once minted, the document stays weak evidence. Only called while the
+    bank's adaptive mode writes state. In place, not copied: the streaming path consumes each item's
+    ``content`` to free it, and a copy would keep every body alive for the whole retain.
+    """
+    minted = minted_now or any(item.get("document_id_minted") for item in contents_dicts)
+    if not minted:
+        from ..memories import get_memories
+
+        try:
+            async with acquire_with_retry(pool) as conn:
+                minted = bool(
+                    await get_memories().minted_document_ids(conn, bank_id=bank_id, document_ids=[document_id])
+                )
+        except Exception as exc:
+            # Provenance for reinforcement is not worth failing a retain over: without the mark the
+            # document keys as a client one (full independence), which is what it was before.
+            logger.warning(f"[RETAIN] could not read the minted mark of document {document_id}: {exc!r}")
+            log_buffer.append(f"[adaptive] minted-mark read failed for {document_id}: {exc!r}")
+            return
+    if minted:
+        for item in contents_dicts:
+            item["document_id_minted"] = True
+
+
+async def _apply_retain_retention_policies(
+    conn,
+    bank_id: str,
+    processed_facts: list[ProcessedFact],
+    unit_ids: list[str],
+    config,
+) -> None:
+    """Retain-time ``importance`` / ``forgetting_exempt``, in the retain transaction.
+
+    Only for facts whose item set one (``forgetting_exempt=False`` alone is the default and writes
+    nothing), and only while the bank's adaptive mode is rank or lifecycle: the retention rows the
+    policy creates are adaptive state, which observe and off never write.
+    """
+    pairs = [
+        (fact, unit_id)
+        for fact, unit_id in zip(processed_facts, unit_ids)
+        if fact.importance is not None or fact.forgetting_exempt
+    ]
+    if not pairs:
+        return
+    settings = write_settings(config, bank_id=bank_id)
+    if settings is None:
+        return
+    from ..memories import get_memories
+
+    await get_memories().set_retention_policies(
+        conn,
+        bank_id=bank_id,
+        policies=[
+            RetentionPolicy(
+                memory_id=str(unit_id), importance=fact.importance, forgetting_exempt=fact.forgetting_exempt
+            )
+            for fact, unit_id in pairs
+        ],
+        settings=settings,
+        now=adaptive_clock.utcnow(),
+    )
+
+
+async def _carry_reingest_forward(
+    conn,
+    bank_id: str,
+    reingest: "fact_storage.ReingestCarry | None",
+    result_unit_ids: list[list[str]],
+    *,
+    final: bool,
+    config,
+) -> None:
+    """Hand a re-ingest's freshly inserted facts to the store's carry-forward.
+
+    In the transaction that inserted them, so a fact's carried claim, retention and the evidence other
+    claims re-point at it commit with the fact itself. A no-op when the outgoing facts carried nothing.
+    """
+    if reingest is None or reingest.stash is None or reingest.finished:
+        return
+    from ..memories import get_memories
+
+    await get_memories().carry_forward_reingest(
+        conn,
+        bank_id=bank_id,
+        stash=reingest.stash,
+        new_unit_ids=[unit_id for ids in result_unit_ids for unit_id in ids],
+        final=final,
+        now=adaptive_clock.utcnow(),
+        settings=write_settings(config, bank_id=bank_id),
+    )
+
+
 async def _pre_resolve_phase1(
     pool: Any,
     entity_resolver,
@@ -857,6 +967,8 @@ async def _insert_facts_and_links(
             conn, bank_id, unit_ids, processed_facts, ops=ops
         )
         log_buffer.append(f"  Causal links: {causal_link_count} links in {time.perf_counter() - step_start:.3f}s")
+
+        await _apply_retain_retention_policies(conn, bank_id, processed_facts, unit_ids, config)
 
     # Map results back to original content items. Use processed_facts (not
     # extracted_facts) because unit_ids has 1:1 alignment with processed_facts —
@@ -1505,6 +1617,9 @@ async def retain_batch(
 
     # Convert dicts to RetainContent objects
     contents = _build_contents(contents_dicts, document_tags)
+    # Adaptive memory, only while the bank's mode writes state (rank/lifecycle): None otherwise, so
+    # a bank with the feature off retains exactly as before.
+    adaptive_settings = write_settings(config, bank_id=bank_id)
 
     # When contents carry more than one document (several distinct per-content
     # document_ids, or one document_id next to items without any) and no
@@ -1520,7 +1635,11 @@ async def retain_batch(
             groups: dict[str, tuple[list[RetainContentDict], list[RetainContent]]] = {}
             original_indices: dict[str, list[int]] = {}
             for idx, (cd, c) in enumerate(zip(contents_dicts, contents)):
-                doc_key = cd.get("document_id") or str(uuid.uuid4())
+                doc_key = cd.get("document_id")
+                if not doc_key:
+                    doc_key = str(uuid.uuid4())
+                    if adaptive_settings is not None:
+                        cd["document_id_minted"] = True
                 if doc_key not in groups:
                     groups[doc_key] = ([], [])
                     original_indices[doc_key] = []
@@ -1723,6 +1842,9 @@ async def retain_batch(
     # can find existing chunks from a prior attempt. On retry, a generated
     # document_id is recovered from operation result_metadata.document_ids[0].
     effective_doc_id = document_id
+    # Whether the server, not the caller, chose this document's id: here, or on an earlier attempt
+    # of the same operation (the id recovered below is one only the server could have minted).
+    document_id_minted = False
     if not effective_doc_id:
         doc_ids = {item.get("document_id") for item in contents_dicts if item.get("document_id")}
         if len(doc_ids) == 1:
@@ -1743,10 +1865,16 @@ async def retain_batch(
                     recovered = meta.get("document_ids") or []
                     if recovered:
                         effective_doc_id = recovered[0]
+                        document_id_minted = True
         except Exception:
             pass
     if not effective_doc_id:
         effective_doc_id = str(uuid.uuid4())
+        document_id_minted = True
+    if adaptive_settings is not None:
+        await _mark_minted_document(
+            pool, bank_id, effective_doc_id, contents_dicts, minted_now=document_id_minted, log_buffer=log_buffer
+        )
 
     # Record effective_doc_id on the operation (idempotent set-append). Captures
     # both user-provided and generated ids so the operation shows every document
@@ -2679,6 +2807,10 @@ async def _streaming_retain_batch(
     # the insert). A post-loop fallback fires the callback in those cases, so this
     # flag exists to guarantee the callback fires exactly once.
     outbox_fired = [False]
+    # The outgoing version's lifecycle state, stashed by the first batch's document tracking and
+    # carried onto the facts each batch inserts; the last batch (or the closing call after the
+    # pipeline) reverts what no batch re-extracted.
+    reingest_carry = fact_storage.ReingestCarry()
 
     # ---------------------------------------------------------------------------
     # Producer-consumer pipeline: LLM extraction runs concurrently with DB writes
@@ -2768,6 +2900,8 @@ async def _streaming_retain_batch(
                 tags=source.tags,
                 attachment_filenames=source.attachment_filenames,
                 observation_scopes=source.observation_scopes,
+                importance=source.importance,
+                forgetting_exempt=source.forgetting_exempt,
             )
             # Attribute this chunk's extraction LLM call to its document, so the
             # trace row carries document_id (a document accrues one such trace
@@ -3289,6 +3423,7 @@ async def _streaming_retain_batch(
                                 ops=pool.ops,
                                 store_document_text=config.store_document_text,
                                 attachment_filenames=_attachment_filenames_for(contents),
+                                reingest=reingest_carry,
                             )
                             log_buffer.append(f"[streaming] Document {effective_doc_id} tracked (full content)")
                         doc_tracking_done[0] = True
@@ -3362,8 +3497,13 @@ async def _streaming_retain_batch(
                         outbox_callback=outbox_callback if is_last else None,
                         ops=pool.ops,
                     )
+                    await _carry_reingest_forward(
+                        conn, bank_id, reingest_carry, batch_result_ids, final=is_last, config=config
+                    )
 
                 logger.info(f"[streaming] Phase 2 (write transaction): {time.perf_counter() - p2_start:.3f}s")
+                if is_last and reingest_carry.stash is not None:
+                    reingest_carry.finished = True
 
                 # The write TXN above committed the transactional-outbox row in the
                 # same transaction as this batch's facts. Record it so the post-loop
@@ -3544,6 +3684,15 @@ async def _streaming_retain_batch(
                         # read again — release the per-document text now.
                         combined_content = ""
                         log_buffer.append(f"[streaming] Document {effective_doc_id} tracked (no facts extracted)")
+
+        # The last batch carried nothing forward (it extracted no facts, or the committed-chunk
+        # count landed on a batch boundary): close the re-ingest's carry-forward on its own, so
+        # the claims whose evidence no batch re-extracted are reverted.
+        if reingest_carry.stash is not None and not reingest_carry.finished and not pipeline_aborted[0]:
+            async with acquire_with_retry(pool) as conn:
+                async with conn.transaction():
+                    await _carry_reingest_forward(conn, bank_id, reingest_carry, [], final=True, config=config)
+            reingest_carry.finished = True
 
         # Transactional-outbox fallback. The in-TXN fire only runs on a final
         # facts-bearing batch (is_last=True). When the committed-chunk count lands
@@ -4154,8 +4303,14 @@ async def _try_delta_retain(
                     for idx in changed_indices + removed_indices
                     if idx in existing_by_index
                 ]
+                reingest_carry = fact_storage.ReingestCarry()
                 invalidated_obs = await chunk_storage.delete_chunks_by_ids(
-                    conn, chunks_to_delete, bank_id, ops=pool.ops
+                    conn,
+                    chunks_to_delete,
+                    bank_id,
+                    ops=pool.ops,
+                    document_id=effective_doc_id,
+                    reingest=reingest_carry,
                 )
                 log_buffer.append(
                     f"  Deleted {len(chunks_to_delete)} chunks "
@@ -4238,6 +4393,7 @@ async def _try_delta_retain(
                     outbox_callback=outbox_callback,
                     ops=pool.ops,
                 )
+                await _carry_reingest_forward(conn, bank_id, reingest_carry, result_unit_ids, final=True, config=config)
 
             total_time = time.perf_counter() - start_time
             log_buffer.append(f"{'=' * 60}")
@@ -4441,9 +4597,33 @@ def _build_contents(contents_dicts: list[RetainContentDict], document_tags: list
             tags=merged_tags,
             attachment_filenames=item.get("attachment_filenames") or {},
             observation_scopes=item.get("observation_scopes"),
+            importance=_retain_importance(item.get("importance")),
+            forgetting_exempt=_retain_forgetting_exempt(item.get("forgetting_exempt")),
         )
         contents.append(content)
     return contents
+
+
+def _retain_importance(value: Any) -> float | None:
+    """A retain item's ``importance``: None, or a finite number in [0, 1] (else ValueError).
+
+    Checked here, before extraction spends an LLM call, rather than at the insert, where a bad
+    value would only surface once the whole retain had been paid for.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"importance must be a number in [0, 1], got {value!r}")
+    if not 0.0 <= float(value) <= 1.0:
+        raise ValueError(f"importance must be a number in [0, 1], got {value!r}")
+    return float(value)
+
+
+def _retain_forgetting_exempt(value: Any) -> bool | None:
+    """A retain item's ``forgetting_exempt``: None or a bool (else ValueError)."""
+    if value is None or isinstance(value, bool):
+        return value
+    raise ValueError(f"forgetting_exempt must be a boolean, got {value!r}")
 
 
 def _chunk_contents_for_delta(contents: list[RetainContent], config) -> dict[int, str]:
@@ -4507,6 +4687,8 @@ def _build_delta_contents(
             resolve_entities=template_content.resolve_entities,
             tags=template_content.tags,
             observation_scopes=template_content.observation_scopes,
+            importance=template_content.importance,
+            forgetting_exempt=template_content.forgetting_exempt,
         )
         delta_contents.append(delta_content)
         delta_chunk_map[len(delta_contents) - 1] = original_chunk_idx

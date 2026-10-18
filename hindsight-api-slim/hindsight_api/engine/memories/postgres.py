@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -57,6 +57,10 @@ from .base import (
     StoredMemory,
     TypedMemoryScope,
 )
+from .pg import adaptive as pg_adaptive
+from .pg import adaptive_claims as pg_claims
+from .pg import adaptive_maintenance as pg_adaptive_maintenance
+from .pg import adaptive_transfer as pg_adaptive_transfer
 from .pg import admin as pg_admin
 from .pg import banks as pg_banks
 from .pg import consolidation as pg_consolidation
@@ -67,6 +71,22 @@ from .pg import retain as pg_retain
 from .pg import transfer as pg_transfer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..adaptive.claims import CarryForwardResult, ReingestStash
+    from ..adaptive.models import (
+        AdaptiveState,
+        ArchiveResult,
+        ClaimState,
+        Grounding,
+        PruneCursor,
+        PrunePage,
+        ReinforcementEvent,
+        ReinforcementResult,
+        RetentionPolicy,
+        RetentionState,
+        TruthStatus,
+    )
+    from ..adaptive.settings import AdaptiveSettings
+    from ..adaptive.views import ClaimShadowView, MemoryLifecycle
     from ..consolidation.consolidator import _TemporalBounds
     from ..embeddings import Embeddings
     from ..response_models import MemoryFact
@@ -74,7 +94,14 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..search.graph_retrieval import GraphRetriever
     from ..transfer.export import _LoadedExport, _UnitLocation
     from ..transfer.importer import FactLifecycle, _ObservationOutcome
-    from ..transfer.schema import TransferObservation
+    from ..transfer.schema import (
+        ClaimEvidenceRestore,
+        ImportedMemoryState,
+        LifecycleRelationsRestore,
+        TransferClaimEvidence,
+        TransferLifecycleRelation,
+        TransferObservation,
+    )
     from .pg.entity_resolver import EntityResolver
 
 logger = logging.getLogger(__name__)
@@ -142,6 +169,7 @@ class PostgresMemories(MemoriesExtension):
         min_keyword: float | None = None,
         enable_text_search: bool = True,
         enable_graph: bool = True,
+        exclude_non_active: bool = False,
     ) -> "dict[str, RecallArms]":
         """Run every recall arm for Postgres by orchestrating the split per-arm SQL internally.
 
@@ -192,6 +220,7 @@ class PostgresMemories(MemoriesExtension):
                 min_keyword=min_keyword,
                 graph_seed_min_similarity=graph_seed_min_similarity,
                 enable_text_search=enable_text_search,
+                exclude_non_active=exclude_non_active,
             )
 
             temporal_by_ft: dict[str, list] = {}
@@ -211,6 +240,7 @@ class PostgresMemories(MemoriesExtension):
                     tag_groups=tag_groups,
                     created_after=created_after,
                     created_before=created_before,
+                    exclude_non_active=exclude_non_active,
                 )
 
         # Graph per fact_type in parallel, on the pool, after the dense connection is released —
@@ -282,6 +312,7 @@ class PostgresMemories(MemoriesExtension):
         min_keyword: float | None = None,
         graph_seed_min_similarity: float | None = None,
         enable_text_search: bool = True,
+        exclude_non_active: bool = False,
     ) -> dict[str, SemanticBm25Result]:
         """The dense + keyword arms, as one UNION query.
 
@@ -311,6 +342,7 @@ class PostgresMemories(MemoriesExtension):
             min_keyword=min_keyword,
             graph_seed_min_similarity=graph_seed_min_similarity,
             enable_text_search=enable_text_search,
+            exclude_non_active=exclude_non_active,
         )
 
     async def temporal_search(
@@ -329,6 +361,7 @@ class PostgresMemories(MemoriesExtension):
         tag_groups: list | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        exclude_non_active: bool = False,
     ) -> dict[str, list]:
         from .pg.recall import retrieve_temporal_combined_sql
 
@@ -346,6 +379,7 @@ class PostgresMemories(MemoriesExtension):
             tag_groups=tag_groups,
             created_after=created_after,
             created_before=created_before,
+            exclude_non_active=exclude_non_active,
         )
 
     # ------------------------------------------------------------------ addressed reads
@@ -453,6 +487,13 @@ class PostgresMemories(MemoriesExtension):
         when: datetime | None,
         failed: bool = False,
     ) -> None:
+        if when is None:
+            # A clear is a requeue, and a requeue goes through the one helper that keeps retired
+            # facts out of the queue; callers should name it directly.
+            await self.requeue_units(
+                conn, bank_id=bank_id, unit_ids=unit_ids, reason="mark_consolidated", clear_failed=failed
+            )
+            return
         await reads.mark_consolidated(
             conn=conn, fq_table=fq_store_table, bank_id=bank_id, unit_ids=unit_ids, when=when, failed=failed
         )
@@ -522,6 +563,430 @@ class PostgresMemories(MemoriesExtension):
 
     async def live_memory_ids(self, *, conn, fq_table, bank_id: str, unit_ids: list[Any]) -> set[str]:
         return await reads.live_memory_ids(conn=conn, fq_table=fq_store_table, bank_id=bank_id, unit_ids=unit_ids)
+
+    # -- adaptive memory --
+
+    def supports_adaptive_state_for(self, bank_id: str) -> bool:
+        # Both SQL dialects carry the adaptive tables (migration a7d3e91c5f42).
+        return True
+
+    async def load_embeddings(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, list[float]]:
+        return await reads.memory_embeddings(
+            conn=conn, fq_table=fq_store_table, bank_id=bank_id, unit_ids=list(memory_ids)
+        )
+
+    async def load_adaptive_state(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, AdaptiveState]:
+        return await pg_adaptive.load_adaptive_state(
+            conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids
+        )
+
+    async def record_reinforcement(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        events: Sequence[ReinforcementEvent],
+        settings: AdaptiveSettings,
+        now: datetime,
+        background: bool,
+        anchors: Mapping[str, datetime] | None = None,
+        initial_memory_ids: frozenset[str] = frozenset(),
+    ) -> ReinforcementResult:
+        return await pg_adaptive.record_reinforcement(
+            conn,
+            ops=graph._ops_for(conn),
+            fq_table=fq_store_table,
+            bank_id=bank_id,
+            events=events,
+            settings=settings,
+            now=now,
+            background=background,
+            anchors=anchors,
+            initial_memory_ids=initial_memory_ids,
+        )
+
+    async def set_retention_policy(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        importance: float | None = None,
+        forgetting_exempt: bool | None = None,
+        exemption_reason: str | None = None,
+        settings: AdaptiveSettings,
+        now: datetime,
+    ) -> RetentionState | None:
+        from ..adaptive.models import RetentionPolicy
+
+        states = await self.set_retention_policies(
+            conn,
+            bank_id=bank_id,
+            policies=[
+                RetentionPolicy(
+                    memory_id=memory_id,
+                    importance=importance,
+                    forgetting_exempt=forgetting_exempt,
+                    exemption_reason=exemption_reason,
+                )
+            ],
+            settings=settings,
+            now=now,
+        )
+        return next(iter(states.values()), None)
+
+    async def set_retention_policies(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        policies: Sequence[RetentionPolicy],
+        settings: AdaptiveSettings,
+        now: datetime,
+    ) -> Mapping[str, RetentionState]:
+        return await pg_adaptive.set_retention_policies(
+            conn,
+            ops=graph._ops_for(conn),
+            fq_table=fq_store_table,
+            bank_id=bank_id,
+            policies=policies,
+            settings=settings,
+            now=now,
+        )
+
+    async def merge_retention(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        survivor_id: str,
+        merged_id: str,
+        settings: AdaptiveSettings,
+        now: datetime,
+    ) -> RetentionState | None:
+        return await pg_adaptive.merge_retention(
+            conn,
+            ops=graph._ops_for(conn),
+            fq_table=fq_store_table,
+            bank_id=bank_id,
+            survivor_id=survivor_id,
+            merged_id=merged_id,
+            settings=settings,
+            now=now,
+        )
+
+    async def minted_document_ids(self, conn, *, bank_id: str, document_ids: Sequence[str]) -> frozenset[str]:
+        return await pg_adaptive.minted_document_ids(
+            conn, fq_table=fq_store_table, bank_id=bank_id, document_ids=document_ids
+        )
+
+    async def get_memory_lifecycle(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        now: datetime,
+        settings: AdaptiveSettings,
+    ) -> MemoryLifecycle | None:
+        return await pg_adaptive.get_memory_lifecycle(
+            conn, fq_table=fq_store_table, bank_id=bank_id, memory_id=memory_id, now=now, settings=settings
+        )
+
+    # -- maintenance (pg/adaptive_maintenance.py) --
+
+    async def grounding_status(self, conn, *, bank_id: str, ids: Sequence[str]) -> dict[str, Grounding]:
+        return await pg_adaptive_maintenance.grounding_status(conn, fq_table=fq_store_table, bank_id=bank_id, ids=ids)
+
+    async def archive_sweep(
+        self, conn, *, bank_id: str, now: datetime, settings: AdaptiveSettings, batch: int = 500
+    ) -> ArchiveResult:
+        return await pg_adaptive_maintenance.archive_sweep(
+            conn, fq_table=fq_store_table, bank_id=bank_id, now=now, settings=settings, batch=batch
+        )
+
+    async def prune_candidates(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        now: datetime,
+        settings: AdaptiveSettings,
+        limit: int = 500,
+        after: PruneCursor | None = None,
+    ) -> PrunePage:
+        return await pg_adaptive_maintenance.prune_candidates(
+            conn, fq_table=fq_store_table, bank_id=bank_id, now=now, settings=settings, limit=limit, after=after
+        )
+
+    async def lock_prunable(
+        self, conn, *, bank_id: str, memory_ids: Sequence[str], now: datetime, settings: AdaptiveSettings
+    ) -> list[str]:
+        return await pg_adaptive_maintenance.lock_prunable(
+            conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids, now=now, settings=settings
+        )
+
+    async def banks_with_retention_state(self, conn) -> list[str]:
+        return await pg_adaptive_maintenance.banks_with_retention_state(conn, fq_table=fq_store_table)
+
+    async def unarchive_memories(self, conn, *, bank_id: str, memory_ids: Sequence[str], now: datetime) -> list[str]:
+        return await pg_adaptive_maintenance.unarchive_memories(
+            conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids, now=now
+        )
+
+    # -- claim lifecycle (pg/adaptive_claims.py) --
+
+    async def lock_claims(
+        self, conn, *, bank_id: str, memory_ids: Sequence[str], skip_locked: bool, now: datetime | None = None
+    ) -> set[str]:
+        return await pg_claims.lock_claims(
+            conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids, skip_locked=skip_locked, now=now
+        )
+
+    async def cas_retire(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        to_status: TruthStatus,
+        retired_via: str,
+        superseded_by_id: str | None,
+        valid_to: datetime | None,
+        reason: str | None,
+        confidence: float | None,
+        inherited_from_id: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        return await pg_claims.cas_retire(
+            conn,
+            fq_table=fq_store_table,
+            bank_id=bank_id,
+            memory_id=memory_id,
+            to_status=to_status,
+            retired_via=retired_via,
+            superseded_by_id=superseded_by_id,
+            valid_to=valid_to,
+            reason=reason,
+            confidence=confidence,
+            inherited_from_id=inherited_from_id,
+            now=now,
+        )
+
+    async def set_claim(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        truth_status: TruthStatus,
+        valid_from: datetime | None = None,
+        valid_to: datetime | None = None,
+        confidence: float | None = None,
+        scope_fingerprint: str | None = None,
+        retired_via: str | None = None,
+        superseded_by_id: str | None = None,
+        inherited_from_id: str | None = None,
+        reason: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        await pg_claims.set_claim(
+            conn,
+            fq_table=fq_store_table,
+            bank_id=bank_id,
+            memory_id=memory_id,
+            truth_status=truth_status,
+            valid_from=valid_from,
+            valid_to=valid_to,
+            confidence=confidence,
+            scope_fingerprint=scope_fingerprint,
+            retired_via=retired_via,
+            superseded_by_id=superseded_by_id,
+            inherited_from_id=inherited_from_id,
+            reason=reason,
+            now=now,
+        )
+
+    async def add_claim_evidence(
+        self, conn, *, bank_id: str, memory_id: str, evidence_ids: Sequence[str], now: datetime | None = None
+    ) -> int:
+        return await pg_claims.add_claim_evidence(
+            conn, fq_table=fq_store_table, bank_id=bank_id, memory_id=memory_id, evidence_ids=evidence_ids, now=now
+        )
+
+    async def insert_relation(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        relation_type: str,
+        source_id: str | None,
+        target_id: str | None,
+        origin: str,
+        reason: str | None,
+        confidence: float | None,
+        evidence: Mapping[str, Any],
+        now: datetime | None = None,
+    ) -> str | None:
+        return await pg_claims.insert_relation(
+            conn,
+            fq_table=fq_store_table,
+            bank_id=bank_id,
+            relation_type=relation_type,
+            source_id=source_id,
+            target_id=target_id,
+            origin=origin,
+            reason=reason,
+            confidence=confidence,
+            evidence=evidence,
+            now=now,
+        )
+
+    async def inherit_from_observation(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        observation_id: str,
+        to_status: TruthStatus,
+        successor_id: str | None,
+        valid_to: datetime,
+        evidence_ids: Sequence[str],
+        candidate_source_ids: Sequence[str] | None,
+        reason: str | None = None,
+        retired_via: str = "inherited",
+        ignored_citer_ids: Sequence[str] = (),
+        now: datetime | None = None,
+    ) -> list[str]:
+        return await pg_claims.inherit_from_observation(
+            conn,
+            fq_table=fq_store_table,
+            bank_id=bank_id,
+            observation_id=observation_id,
+            to_status=to_status,
+            successor_id=successor_id,
+            valid_to=valid_to,
+            evidence_ids=evidence_ids,
+            candidate_source_ids=candidate_source_ids,
+            reason=reason,
+            retired_via=retired_via,
+            ignored_citer_ids=ignored_citer_ids,
+            now=now,
+        )
+
+    async def observation_sources(self, conn, *, bank_id: str, observation_ids: Sequence[str]) -> dict[str, list[str]]:
+        return await pg_claims.observation_sources(
+            conn, fq_table=fq_store_table, bank_id=bank_id, observation_ids=observation_ids
+        )
+
+    async def claims_for(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, ClaimState]:
+        return await pg_claims.claims_for(conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids)
+
+    async def claim_evidence(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, list[str]]:
+        return await pg_claims.claim_evidence(conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids)
+
+    async def requeue_units(
+        self, conn, *, bank_id: str, unit_ids: Sequence[str], reason: str, clear_failed: bool = False
+    ) -> int:
+        return await pg_claims.requeue_units(
+            conn, fq_table=fq_store_table, bank_id=bank_id, unit_ids=unit_ids, reason=reason, clear_failed=clear_failed
+        )
+
+    async def repair_lifecycle_for_deleted_facts(
+        self, conn, *, bank_id: str, doomed_ids: Sequence[str], now: datetime | None = None
+    ) -> int:
+        return await pg_claims.repair_lifecycle_for_deleted_facts(
+            conn, fq_table=fq_store_table, bank_id=bank_id, doomed_ids=doomed_ids, now=now
+        )
+
+    async def relock_relations_before_delete(self, conn, *, bank_id: str, unit_ids: Sequence[str]) -> None:
+        await pg_claims.relock_relations_before_delete(
+            conn, fq_table=fq_store_table, bank_id=bank_id, unit_ids=unit_ids
+        )
+
+    async def relinkable_claims(self, conn, *, bank_id: str, evidence_ids: Sequence[str]) -> set[str]:
+        return await pg_claims.relinkable_claims(
+            conn, fq_table=fq_store_table, bank_id=bank_id, evidence_ids=evidence_ids
+        )
+
+    async def relink_rebuilt_successors(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        new_observation_ids: Sequence[str],
+        now: datetime | None = None,
+        locked_claim_ids: Collection[str] | None = None,
+    ) -> int:
+        return await pg_claims.relink_rebuilt_successors(
+            conn,
+            fq_table=fq_store_table,
+            bank_id=bank_id,
+            new_observation_ids=new_observation_ids,
+            now=now,
+            locked_claim_ids=locked_claim_ids,
+        )
+
+    async def count_active_observations(
+        self, conn, *, bank_id: str, tags: list[str] | None, tags_match: TagsMatch
+    ) -> int:
+        return await pg_claims.count_active_observations(
+            conn, fq_table=fq_store_table, bank_id=bank_id, tags=tags, tags_match=tags_match
+        )
+
+    async def record_shadow_retirement(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        memory_id: str,
+        would_status: TruthStatus,
+        deciding_snapshot: Mapping[str, Any],
+        evidence_ids: Sequence[str],
+        now: datetime | None = None,
+    ) -> bool:
+        return await pg_claims.record_shadow_retirement(
+            conn,
+            fq_table=fq_store_table,
+            bank_id=bank_id,
+            memory_id=memory_id,
+            would_status=would_status,
+            deciding_snapshot=deciding_snapshot,
+            evidence_ids=evidence_ids,
+            now=now,
+        )
+
+    async def shadow_for(self, conn, *, bank_id: str, memory_ids: Sequence[str]) -> dict[str, ClaimShadowView]:
+        return await pg_claims.shadow_for(conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids)
+
+    async def stash_reingest_lifecycle(
+        self, conn, *, bank_id: str, document_id: str, old_unit_ids: Sequence[str], now: datetime | None = None
+    ) -> ReingestStash | None:
+        return await pg_claims.stash_reingest_lifecycle(
+            conn, fq_table=fq_store_table, bank_id=bank_id, document_id=document_id, old_unit_ids=old_unit_ids, now=now
+        )
+
+    async def carry_forward_reingest(
+        self,
+        conn,
+        *,
+        bank_id: str,
+        stash: ReingestStash | None,
+        new_unit_ids: Sequence[str],
+        final: bool,
+        now: datetime | None = None,
+        settings: AdaptiveSettings | None = None,
+    ) -> CarryForwardResult:
+        return await pg_claims.carry_forward_reingest(
+            conn,
+            fq_table=fq_store_table,
+            bank_id=bank_id,
+            stash=stash,
+            new_unit_ids=new_unit_ids,
+            final=final,
+            now=now,
+            settings=settings,
+        )
 
     # -- count surfaces --
 
@@ -1580,6 +2045,18 @@ class PostgresMemories(MemoriesExtension):
             conn=conn, fq_table=fq_store_table, bank_id=bank_id, observation_id=observation_id
         )
 
+    async def attach_sources_to_observation(
+        self, *, conn, fq_table, bank_id: str, observation_id: str, source_memory_ids: list[uuid.UUID]
+    ) -> bool:
+        return await pg_consolidation.attach_sources_to_observation(
+            conn=conn,
+            ops=graph._ops_for(conn),
+            fq_table=fq_store_table,
+            bank_id=bank_id,
+            observation_id=observation_id,
+            source_memory_ids=source_memory_ids,
+        )
+
     async def expand_memories(self, *, conn, fq_table, bank_id: str, unit_ids: list[uuid.UUID]) -> list:
         return await pg_expand.expand_memories(conn=conn, fq_table=fq_store_table, bank_id=bank_id, unit_ids=unit_ids)
 
@@ -1655,6 +2132,7 @@ class PostgresMemories(MemoriesExtension):
         unit_id_map: dict[str, str],
         document_id_map: dict[str, str],
         bank_rows_json_encoding: str,
+        relation_id_map: Mapping[str, str] | None = None,
     ) -> int:
         return await pg_transfer.restore_archived_memories(
             conn=conn,
@@ -1664,6 +2142,52 @@ class PostgresMemories(MemoriesExtension):
             unit_id_map=unit_id_map,
             document_id_map=document_id_map,
             bank_rows_json_encoding=bank_rows_json_encoding,  # ty: ignore[invalid-argument-type]
+            relation_id_map=relation_id_map,
+        )
+
+    async def dump_lifecycle_relations(
+        self, *, conn, fq_table, bank_id: str, memory_ids: Collection[str] | None
+    ) -> list[TransferLifecycleRelation]:
+        return await pg_adaptive_transfer.dump_lifecycle_relations(
+            conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids
+        )
+
+    async def dump_claim_evidence(
+        self, *, conn, fq_table, bank_id: str, memory_ids: Collection[str] | None
+    ) -> list[TransferClaimEvidence]:
+        return await pg_adaptive_transfer.dump_claim_evidence(
+            conn, fq_table=fq_store_table, bank_id=bank_id, memory_ids=memory_ids
+        )
+
+    async def restore_memory_state(self, *, conn, fq_table, bank_id: str, rows: Sequence[ImportedMemoryState]) -> int:
+        return await pg_adaptive_transfer.restore_memory_state(
+            conn, fq_table=fq_store_table, bank_id=bank_id, rows=rows
+        )
+
+    async def restore_lifecycle_relations(
+        self,
+        *,
+        conn,
+        fq_table,
+        bank_id: str,
+        rows: Sequence[TransferLifecycleRelation],
+        unit_id_map: Mapping[str, str],
+    ) -> LifecycleRelationsRestore:
+        return await pg_adaptive_transfer.restore_lifecycle_relations(
+            conn, fq_table=fq_store_table, bank_id=bank_id, rows=rows, unit_id_map=unit_id_map
+        )
+
+    async def restore_claim_evidence(
+        self,
+        *,
+        conn,
+        fq_table,
+        bank_id: str,
+        rows: Sequence[TransferClaimEvidence],
+        unit_id_map: Mapping[str, str],
+    ) -> ClaimEvidenceRestore:
+        return await pg_adaptive_transfer.restore_claim_evidence(
+            conn, fq_table=fq_store_table, bank_id=bank_id, rows=rows, unit_id_map=unit_id_map
         )
 
     async def resolve_entity_ids_by_name(self, *, conn, fq_table, bank_id: str, names: set[str]) -> dict[str, Any]:

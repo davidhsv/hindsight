@@ -6,11 +6,15 @@ Handles storage of document chunks in the database.
 
 import hashlib
 import logging
+from typing import TYPE_CHECKING
 
 from ...config import _get_raw_config
 from ..chunk_ids import build_chunk_id
 from ..memory_engine import fq_table
 from .types import ChunkMetadata
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .fact_storage import ReingestCarry
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +46,15 @@ async def memory_ids_for_chunks(conn, bank_id: str, chunk_ids: list[str], *, sto
     return await store.memory_ids_for_chunks(conn=conn, fq_table=fq_table, bank_id=bank_id, chunk_ids=chunk_ids)
 
 
-async def delete_chunks_by_ids(conn, chunk_ids: list[str], bank_id: str, ops=None) -> int:
+async def delete_chunks_by_ids(
+    conn,
+    chunk_ids: list[str],
+    bank_id: str,
+    ops=None,
+    *,
+    document_id: str | None = None,
+    reingest: "ReingestCarry | None" = None,
+) -> int:
     """
     Delete the named chunks, which must all belong to ``bank_id``.
 
@@ -56,6 +68,9 @@ async def delete_chunks_by_ids(conn, chunk_ids: list[str], bank_id: str, ops=Non
 
     ``ops`` is the backend-specific DataAccessOps the observation sweep below needs to choose
     the PG (native array) vs Oracle (junction table) read path — pass ``pool.ops``.
+
+    ``reingest`` (with the chunks' ``document_id``) keeps the outgoing facts' lifecycle state for
+    the caller to carry onto the re-extracted facts once they are inserted (``carry_forward_reingest``).
 
     Returns the number of observations invalidated by the sweep, so the caller can log it.
     """
@@ -93,13 +108,21 @@ async def delete_chunks_by_ids(conn, chunk_ids: list[str], bank_id: str, ops=Non
 
         await enqueue_relink_victims(conn, bank_id, outgoing_unit_ids)
 
+    from ..memories import get_memories
+
+    store = get_memories()
+    # The outgoing facts' lifecycle state, kept before the cascade takes it (see ReingestCarry).
+    if reingest is not None and document_id and outgoing_unit_ids and store.supports_adaptive_state_for(bank_id):
+        reingest.stash = await store.stash_reingest_lifecycle(
+            conn, bank_id=bank_id, document_id=document_id, old_unit_ids=outgoing_unit_ids
+        )
+        reingest.finished = False
+
     # Then the chunks themselves, with the facts and links they own. Postgres takes the row locks
     # in a total order; a store that keeps memories outside SQL (where no FK cascade reaches them)
     # drops the memories carrying each chunk_id — otherwise a delta re-ingest leaves the old ones
     # as duplicates.
-    from ..memories import get_memories
-
-    await get_memories().delete_chunks(conn=conn, fq_table=fq_table, bank_id=bank_id, chunk_ids=chunk_ids)
+    await store.delete_chunks(conn=conn, fq_table=fq_table, bank_id=bank_id, chunk_ids=chunk_ids)
     return invalidated
 
 

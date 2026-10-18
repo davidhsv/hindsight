@@ -5,14 +5,23 @@ efficient batch operations.
 """
 
 import asyncio
+import uuid
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 
+from ..causal_links import DEFAULT_CAUSAL_LINK_WEIGHT, CausalLinkDescriptor
 from .base import DatabaseConnection
 from .ops import (
+    RETENTION_STATE_COLUMNS,
     ChunkIdOwnedByAnotherBank,
     ClaimedOperations,
     DataAccessOps,
+    LifecycleRelationRow,
     LinkExpansionRows,
+    ReinforcementEventRow,
+    ReinforcementKey,
+    RetentionLock,
+    RetentionStateUpdate,
     TagListingParts,
     UpdatedWindow,
     bank_serialization_sql,
@@ -1998,3 +2007,478 @@ class PostgreSQLOps(DataAccessOps):
             serialization_key,
             limit,
         )
+
+    # -- Adaptive memory ------------------------------------------------------
+
+    async def upsert_default_retention_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        retention_table: str,
+        units_table: str,
+        bank_id: str,
+        memory_ids: Sequence[uuid.UUID],
+        default_stability: Mapping[str, float],
+        fallback_stability: float,
+        anchors: Mapping[uuid.UUID, datetime],
+        now: datetime,
+        skip_locked: bool,
+    ) -> RetentionLock:
+        ids = sorted(set(memory_ids))
+        if not ids:
+            return RetentionLock(present=[], initialized=frozenset(), rows=[])
+        types = sorted(default_stability)
+        wanted = set(ids)
+        anchor_ids = sorted(a for a in anchors if a in wanted)
+        # One statement, the bulk_insert_links shape: the parents are locked FOR KEY SHARE in id
+        # order by the same statement that inserts the side rows, so a concurrent DELETE of a
+        # parent waits for our COMMIT and the deferred FK check cannot fail there (#1882). The
+        # defaults are looked up, not computed, here: the stability per fact type comes from
+        # retention.initial_stability in Python, and the anchor order mirrors default_anchor plus
+        # the created_at fallback the NOT NULL column needs.
+        flags = await conn.fetch(
+            f"""
+            WITH locked AS MATERIALIZED (
+                SELECT id, fact_type, mentioned_at, occurred_start, event_date, created_at
+                FROM {units_table}
+                WHERE bank_id = $1 AND id = ANY($2::uuid[])
+                ORDER BY id
+                FOR KEY SHARE{" SKIP LOCKED" if skip_locked else ""}
+            ),
+            inserted AS (
+                INSERT INTO {retention_table}
+                    (memory_id, bank_id, importance, stability_days, last_reinforced_at, reinforcement_count,
+                     access_count, forgetting_exempt, retention_state, model_version, created_at, updated_at)
+                SELECT l.id, $1, 0.5, COALESCE(d.stability, $5),
+                       COALESCE(a.anchor, l.mentioned_at, l.occurred_start, l.event_date, l.created_at),
+                       0, 0, FALSE, 'active', 1, $8, $8
+                FROM locked l
+                LEFT JOIN unnest($3::text[], $4::float8[]) AS d(fact_type, stability) ON d.fact_type = l.fact_type
+                LEFT JOIN unnest($6::uuid[], $7::timestamptz[]) AS a(memory_id, anchor) ON a.memory_id = l.id
+                ORDER BY l.id
+                ON CONFLICT (memory_id) DO NOTHING
+                RETURNING memory_id
+            )
+            SELECT l.id AS memory_id, (i.memory_id IS NOT NULL) AS initialized
+            FROM locked l
+            LEFT JOIN inserted i ON i.memory_id = l.id
+            ORDER BY l.id
+            """,
+            bank_id,
+            ids,
+            types,
+            [float(default_stability[t]) for t in types],
+            float(fallback_stability),
+            anchor_ids,
+            [anchors[a] for a in anchor_ids],
+            now,
+        )
+        present = [str(row["memory_id"]) for row in flags]
+        if not present:
+            return RetentionLock(present=[], initialized=frozenset(), rows=[])
+        # Per-memory serialization: every writer of a memory's adaptive state holds this row lock,
+        # taken in id order, before it reads or writes the ledger.
+        rows = await conn.fetch(
+            f"""
+            SELECT {RETENTION_STATE_COLUMNS}
+            FROM {retention_table}
+            WHERE bank_id = $1 AND memory_id = ANY($2::uuid[])
+            ORDER BY memory_id
+            FOR UPDATE
+            """,
+            bank_id,
+            [uuid.UUID(m) for m in present],
+        )
+        return RetentionLock(
+            present=present,
+            initialized=frozenset(str(row["memory_id"]) for row in flags if row["initialized"]),
+            rows=list(rows),
+        )
+
+    async def fetch_reinforcement_keys(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        keys: Sequence[ReinforcementKey],
+    ) -> frozenset[ReinforcementKey]:
+        if not keys:
+            return frozenset()
+        rows = await conn.fetch(
+            f"""
+            SELECT e.memory_id, e.source_type, e.source_key
+            FROM {table} e
+            JOIN unnest($2::uuid[], $3::text[], $4::text[]) AS k(memory_id, source_type, source_key)
+              ON e.memory_id = k.memory_id AND e.source_type = k.source_type AND e.source_key = k.source_key
+            WHERE e.bank_id = $1
+            """,
+            bank_id,
+            [uuid.UUID(k.memory_id) for k in keys],
+            [k.source_type for k in keys],
+            [k.source_key for k in keys],
+        )
+        return frozenset(
+            ReinforcementKey(memory_id=str(r["memory_id"]), source_type=r["source_type"], source_key=r["source_key"])
+            for r in rows
+        )
+
+    async def insert_reinforcement_events(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        rows: Sequence[ReinforcementEventRow],
+    ) -> frozenset[str]:
+        if not rows:
+            return frozenset()
+        inserted = await conn.fetch(
+            f"""
+            INSERT INTO {table}
+                (id, bank_id, memory_id, source_type, source_key, event_time, weight, independence_weight,
+                 applied_gain, outcome, processed_at, created_at)
+            SELECT u.id, $1, u.memory_id, u.source_type, u.source_key, u.event_time, u.weight,
+                   u.independence_weight, u.applied_gain, u.outcome, u.processed_at, u.created_at
+            FROM unnest($2::uuid[], $3::uuid[], $4::text[], $5::text[], $6::timestamptz[], $7::float8[],
+                        $8::float8[], $9::float8[], $10::text[], $11::timestamptz[], $12::timestamptz[])
+                AS u(id, memory_id, source_type, source_key, event_time, weight, independence_weight,
+                     applied_gain, outcome, processed_at, created_at)
+            ORDER BY u.memory_id, u.source_type, u.source_key
+            ON CONFLICT (memory_id, source_type, source_key) DO NOTHING
+            RETURNING id
+            """,
+            bank_id,
+            [r.id for r in rows],
+            [r.memory_id for r in rows],
+            [r.source_type for r in rows],
+            [r.source_key for r in rows],
+            [r.event_time for r in rows],
+            [float(r.weight) for r in rows],
+            [float(r.independence_weight) for r in rows],
+            [float(r.applied_gain) for r in rows],
+            [r.outcome for r in rows],
+            [r.processed_at for r in rows],
+            [r.created_at for r in rows],
+        )
+        return frozenset(str(r["id"]) for r in inserted)
+
+    async def update_retention_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        rows: Sequence[RetentionStateUpdate],
+        now: datetime,
+    ) -> None:
+        if not rows:
+            return
+        await conn.execute(
+            f"""
+            UPDATE {table} AS s
+            SET importance = u.importance, stability_days = u.stability_days,
+                last_reinforced_at = u.last_reinforced_at, reinforcement_count = u.reinforcement_count,
+                access_count = u.access_count, last_recalled_at = u.last_recalled_at,
+                forgetting_exempt = u.forgetting_exempt, exemption_reason = u.exemption_reason, updated_at = $11
+            FROM unnest($2::uuid[], $3::float8[], $4::float8[], $5::timestamptz[], $6::int[], $7::int[],
+                        $8::timestamptz[], $9::bool[], $10::text[])
+                AS u(memory_id, importance, stability_days, last_reinforced_at, reinforcement_count, access_count,
+                     last_recalled_at, forgetting_exempt, exemption_reason)
+            WHERE s.memory_id = u.memory_id AND s.bank_id = $1
+            """,
+            bank_id,
+            [r.memory_id for r in rows],
+            [float(r.importance) for r in rows],
+            [float(r.stability_days) for r in rows],
+            [r.last_reinforced_at for r in rows],
+            [int(r.reinforcement_count) for r in rows],
+            [int(r.access_count) for r in rows],
+            [r.last_recalled_at for r in rows],
+            [bool(r.forgetting_exempt) for r in rows],
+            [r.exemption_reason for r in rows],
+            now,
+        )
+
+    # -- Claim lifecycle ---------------------------------------------------
+
+    async def upsert_default_claim_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        claims_table: str,
+        units_table: str,
+        bank_id: str,
+        memory_ids: Sequence[uuid.UUID],
+        now: datetime,
+        skip_locked: bool,
+    ) -> list[str]:
+        ids = sorted(set(memory_ids))
+        if not ids:
+            return []
+        # The bulk_insert_links shape (see upsert_default_retention_state): the parents are locked
+        # FOR KEY SHARE in id order by the statement that inserts the side rows, so a concurrent
+        # DELETE of a parent waits for our COMMIT and the deferred FK cannot fail there (#1882).
+        flags = await conn.fetch(
+            f"""
+            WITH locked AS MATERIALIZED (
+                SELECT id FROM {units_table}
+                WHERE bank_id = $1 AND id = ANY($2::uuid[])
+                ORDER BY id
+                FOR KEY SHARE{" SKIP LOCKED" if skip_locked else ""}
+            ),
+            inserted AS (
+                INSERT INTO {claims_table} (memory_id, bank_id, truth_status, created_at, updated_at)
+                SELECT l.id, $1, 'active', $3, $3 FROM locked l ORDER BY l.id
+                ON CONFLICT (memory_id) DO NOTHING
+                RETURNING memory_id
+            )
+            SELECT l.id AS memory_id FROM locked l ORDER BY l.id
+            """,
+            bank_id,
+            ids,
+            now,
+        )
+        present = [row["memory_id"] for row in flags]
+        if not present:
+            return []
+        rows = await conn.fetch(
+            f"""
+            SELECT memory_id FROM {claims_table}
+            WHERE bank_id = $1 AND memory_id = ANY($2::uuid[])
+            ORDER BY memory_id
+            FOR UPDATE
+            """,
+            bank_id,
+            present,
+        )
+        return [str(row["memory_id"]) for row in rows]
+
+    async def insert_claim_evidence(
+        self,
+        conn: DatabaseConnection,
+        *,
+        evidence_table: str,
+        units_table: str,
+        bank_id: str,
+        pairs: Sequence[tuple[uuid.UUID, uuid.UUID]],
+        now: datetime,
+    ) -> int:
+        ordered = sorted(set(pairs))
+        if not ordered:
+            return 0
+        inserted = await conn.fetch(
+            f"""
+            WITH pairs AS (
+                SELECT * FROM unnest($2::uuid[], $3::uuid[]) AS p(memory_id, evidence_memory_id)
+            ),
+            live AS MATERIALIZED (
+                SELECT id FROM {units_table}
+                WHERE bank_id = $1
+                  AND id IN (SELECT memory_id FROM pairs UNION SELECT evidence_memory_id FROM pairs)
+                ORDER BY id
+                FOR KEY SHARE SKIP LOCKED
+            )
+            INSERT INTO {evidence_table} (memory_id, evidence_memory_id, bank_id, created_at)
+            SELECT p.memory_id, p.evidence_memory_id, $1, $4
+            FROM pairs p
+            JOIN live m ON m.id = p.memory_id
+            JOIN live e ON e.id = p.evidence_memory_id
+            ORDER BY p.memory_id, p.evidence_memory_id
+            ON CONFLICT (memory_id, evidence_memory_id) DO NOTHING
+            RETURNING memory_id
+            """,
+            bank_id,
+            [p[0] for p in ordered],
+            [p[1] for p in ordered],
+            now,
+        )
+        return len(inserted)
+
+    async def insert_lifecycle_relation(
+        self, conn: DatabaseConnection, *, table: str, row: LifecycleRelationRow
+    ) -> bool:
+        inserted = await conn.fetchval(
+            f"""
+            INSERT INTO {table}
+                (id, bank_id, relation_type, source_memory_id, target_memory_id, source_snapshot,
+                 target_snapshot, origin, reason, confidence, evidence, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10, $11::jsonb, $12)
+            ON CONFLICT ON CONSTRAINT uq_mlr_edge DO NOTHING
+            RETURNING id
+            """,
+            row.id,
+            row.bank_id,
+            row.relation_type,
+            row.source_memory_id,
+            row.target_memory_id,
+            row.source_snapshot,
+            row.target_snapshot,
+            row.origin,
+            row.reason,
+            row.confidence,
+            row.evidence,
+            row.created_at,
+        )
+        return inserted is not None
+
+    async def lock_relations_for_delete(
+        self, conn: DatabaseConnection, *, table: str, bank_id: str, unit_ids: Sequence[uuid.UUID]
+    ) -> None:
+        ids = sorted(set(unit_ids))
+        if not ids:
+            return
+        # Each endpoint found through its own index (an OR across the two columns is not indexable,
+        # the #3387 lesson), then all rows locked in one total order.
+        await conn.fetch(
+            f"""
+            SELECT r.id FROM {table} r
+            WHERE r.id IN (
+                SELECT id FROM {table} WHERE bank_id = $1 AND source_memory_id = ANY($2::uuid[])
+                UNION
+                SELECT id FROM {table} WHERE bank_id = $1 AND target_memory_id = ANY($2::uuid[])
+            )
+            ORDER BY LEAST(r.source_memory_id, r.target_memory_id),
+                     GREATEST(r.source_memory_id, r.target_memory_id),
+                     r.relation_type, r.id
+            FOR UPDATE OF r
+            """,
+            bank_id,
+            ids,
+        )
+
+    async def upsert_claim_shadow(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        units_table: str,
+        bank_id: str,
+        memory_id: uuid.UUID,
+        would_status: str,
+        deciding_snapshot: str,
+        evidence_ids: str,
+        now: datetime,
+    ) -> bool:
+        written = await conn.fetchval(
+            f"""
+            WITH locked AS MATERIALIZED (
+                SELECT id FROM {units_table} WHERE bank_id = $1 AND id = $2 FOR KEY SHARE SKIP LOCKED
+            )
+            INSERT INTO {table} (memory_id, bank_id, would_status, deciding_snapshot, evidence_ids, created_at)
+            SELECT l.id, $1, $3, $4::jsonb, $5::jsonb, $6 FROM locked l
+            ON CONFLICT (memory_id) DO UPDATE
+            SET would_status = EXCLUDED.would_status, deciding_snapshot = EXCLUDED.deciding_snapshot,
+                evidence_ids = EXCLUDED.evidence_ids, created_at = EXCLUDED.created_at
+            RETURNING memory_id
+            """,
+            bank_id,
+            memory_id,
+            would_status,
+            deciding_snapshot,
+            evidence_ids,
+            now,
+        )
+        return written is not None
+
+    # -- Curation archive and observation folds ----------------------------
+
+    async def table_columns(self, conn: DatabaseConnection, table: str) -> list[str]:
+        rows = await conn.fetch(
+            f"SELECT a.attname FROM pg_attribute a "
+            f"WHERE a.attrelid = '{table}'::regclass "
+            f"AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum"
+        )
+        return [f'"{r["attname"]}"' for r in rows]
+
+    def search_vector_expr(self, config, *, text_col: str = "text", context_col: str = "context") -> str | None:
+        return pg_search_vector_expr(config, text_col=text_col, context_col=context_col)
+
+    async def fetch_causal_link_descriptors(
+        self,
+        conn: DatabaseConnection,
+        *,
+        links_table: str,
+        archive_table: str,
+        bank_id: str,
+        unit_id: str,
+        link_types: Sequence[str],
+    ) -> list[CausalLinkDescriptor]:
+        rows = await conn.fetch(
+            f"""
+            SELECT from_unit_id, to_unit_id, link_type, weight
+            FROM {links_table}
+            WHERE (from_unit_id = $1 OR to_unit_id = $1)
+              AND bank_id = $2
+              AND link_type = ANY($3::text[])
+            UNION
+            SELECT d.from_unit_id, d.to_unit_id, d.link_type, d.weight
+            FROM {archive_table} a
+            CROSS JOIN LATERAL jsonb_to_recordset(a.causal_links)
+                AS d(from_unit_id uuid, to_unit_id uuid, link_type text, weight float8)
+            WHERE a.bank_id = $2
+              AND a.causal_links <> '[]'::jsonb
+              AND (d.from_unit_id = $1 OR d.to_unit_id = $1)
+              -- Same guard as CausalLinkDescriptor.from_json_dict: the column is
+              -- schemaless JSON, and a malformed entry would otherwise be copied
+              -- forward as a NULL-endpoint descriptor.
+              AND d.from_unit_id IS NOT NULL
+              AND d.to_unit_id IS NOT NULL
+              AND d.link_type = ANY($3::text[])
+            """,
+            unit_id,
+            bank_id,
+            list(link_types),
+        )
+        return [
+            CausalLinkDescriptor(
+                from_unit_id=str(r["from_unit_id"]),
+                to_unit_id=str(r["to_unit_id"]),
+                link_type=r["link_type"],
+                weight=float(r["weight"]) if r["weight"] is not None else DEFAULT_CAUSAL_LINK_WEIGHT,
+            )
+            for r in rows
+        ]
+
+    async def fold_sources_into_observation(
+        self,
+        conn: DatabaseConnection,
+        *,
+        units_table: str,
+        sources_table: str,
+        observation_id: uuid.UUID,
+        expected_text: str,
+        merged_text: str,
+        source_memory_ids: Sequence[uuid.UUID],
+        event_date: datetime | None,
+        occurred_start: datetime | None,
+        occurred_end: datetime | None,
+        mentioned_at: datetime | None,
+        search_vector_clause: str,
+    ) -> bool:
+        # RETURNING-gate on the probe-time text so a concurrent rewrite of the survivor during the
+        # connection-free LLM window can't be clobbered. PG has no junction table to keep.
+        folded = await conn.fetchval(
+            f"""
+                UPDATE {units_table}
+                SET text = $1,
+                    source_memory_ids = (SELECT array_agg(DISTINCT e) FROM unnest(source_memory_ids || $2::uuid[]) e),
+                    proof_count = (SELECT count(DISTINCT e) FROM unnest(source_memory_ids || $2::uuid[]) e),
+                    event_date = LEAST(event_date, COALESCE($5, event_date)),
+                    occurred_start = LEAST(occurred_start, COALESCE($6, occurred_start)),
+                    occurred_end = GREATEST(occurred_end, COALESCE($7, occurred_end)),
+                    mentioned_at = GREATEST(mentioned_at, COALESCE($8, mentioned_at)),
+                    updated_at = now(){search_vector_clause}
+                WHERE id = $3::uuid AND text = $4
+                RETURNING id
+                """,
+            merged_text,
+            list(source_memory_ids),
+            observation_id,
+            expected_text,
+            event_date,
+            occurred_start,
+            occurred_end,
+            mentioned_at,
+        )
+        return folded is not None

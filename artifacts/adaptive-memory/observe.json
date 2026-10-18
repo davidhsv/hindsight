@@ -1,0 +1,944 @@
+{
+ "arm": "C",
+ "description": "feature branch, adaptive_memory_mode=observe: compute retention/would-change, change nothing visible",
+ "generated_at": "2026-10-18T08:42:28-03:00",
+ "base_sha": "5331da2f4db369528bb122075341a7de9c3df6df",
+ "feature_head_sha": "554284233f4fdb38d1e065c0d90b94ed9deb38a4",
+ "phase_commits": {
+  "P1": "dafd09a64",
+  "P2": "3816d0e4b",
+  "P3": "b491b2bb9",
+  "P4": "d65f17b05",
+  "P5": "728b265c9",
+  "T2": "504ca72e9",
+  "T2_harm_bench": "2f4c7daae"
+ },
+ "models": {
+  "server_extraction_consolidation": "claude-haiku-5-5",
+  "amb_answer": "claude-haiku-5-5",
+  "judge": "claude-sonnet-5-5",
+  "decision_model": "TypeSafe jev-latest"
+ },
+ "embedder": "local bge-small-en-v1.5 (CPU)",
+ "reranker": "local ms-marco-MiniLM-L-6-v2 cross-encoder (CPU)",
+ "frozen_parameters": {
+  "adaptive_memory_score_alpha": 0.1,
+  "score_floor": 0.3,
+  "base_stability_days": 30,
+  "max_stability_days": 3650,
+  "type_multipliers": {
+   "experience": 0.5,
+   "world": 1.0,
+   "observation": 2.0
+  },
+  "cooldown_hours": 6,
+  "gain": 1.0,
+  "recall_reinforcement": false,
+  "conflict_policy": "evidence",
+  "historical_cues": false,
+  "source": "tasks/adaptive-memory/eval/PREREGISTRATION.md"
+ },
+ "memory_lifecycle": {
+  "P1 base-delete": {
+   "label": "p1-observe-base-delete",
+   "arm": "observe",
+   "encoding": "base-delete",
+   "api_sha": "dafd09a64fa475cada75e390f22d5d31520d352a",
+   "api_dirty": false,
+   "embedder": "local (bge-small-en-v1.5 + ms-marco-MiniLM-L-6-v2, CPU)",
+   "payload_source": "authored",
+   "server_env_adaptive": {
+    "HINDSIGHT_API_ADAPTIVE_MEMORY_MODE": "observe"
+   },
+   "bank_config": {},
+   "recall_types": null,
+   "started_at_utc": "2026-10-17T08:44:39.662418+00:00",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/p1/arm-observe-base-delete.json",
+   "metrics": {
+    "all": {
+     "current_precision@1": {
+      "mean": 0.9138,
+      "n": 58
+     },
+     "current_precision@5": {
+      "mean": 0.6207,
+      "n": 58
+     },
+     "current_recall@1": {
+      "mean": 0.7816,
+      "n": 58
+     },
+     "current_recall@5": {
+      "mean": 0.9828,
+      "n": 58
+     },
+     "stale_contamination@1": {
+      "mean": 0.2222,
+      "n": 18
+     },
+     "stale_contamination@5": {
+      "mean": 0.2333,
+      "n": 18
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.2222,
+      "n": 18
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.2333,
+      "n": 18
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@1": {
+      "mean": 0.0345,
+      "n": 58
+     },
+     "mixed_rate@5": {
+      "mean": 0.0086,
+      "n": 58
+     },
+     "refuted_leakage@1": {
+      "mean": 0.25,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.2,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.1875,
+      "n": 16
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 16
+     },
+     "scope_accuracy@1": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "scope_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.7778,
+      "n": 18
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "uncertainty_accuracy@1": {
+      "mean": 0.0,
+      "n": 6
+     },
+     "uncertainty_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": 0.3333,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": 0.3333,
+      "n": 6
+     }
+    },
+    "holdout": {
+     "current_precision@1": {
+      "mean": 0.8333,
+      "n": 18
+     },
+     "current_precision@5": {
+      "mean": 0.4444,
+      "n": 18
+     },
+     "current_recall@1": {
+      "mean": 0.8333,
+      "n": 18
+     },
+     "current_recall@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "stale_contamination@1": {
+      "mean": 0.2857,
+      "n": 7
+     },
+     "stale_contamination@5": {
+      "mean": 0.2,
+      "n": 7
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.2857,
+      "n": 7
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.2,
+      "n": 7
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "refuted_leakage@1": {
+      "mean": 0.25,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.2,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.0,
+      "n": 10
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 10
+     },
+     "scope_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "scope_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.7143,
+      "n": 7
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "uncertainty_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "uncertainty_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": null,
+      "n": 0
+     }
+    }
+   },
+   "note": "each value is the mean over the split's applicable queries of a per-query score (n = queries); no CI computed",
+   "state_conformance": {
+    "all:conformance": {
+     "mean": null,
+     "n": 0
+    },
+    "all:retirement_recall": {
+     "mean": null,
+     "n": 0
+    },
+    "all:false_retirement": {
+     "mean": null,
+     "n": 0
+    },
+    "dev:conformance": {
+     "mean": null,
+     "n": 0
+    },
+    "dev:retirement_recall": {
+     "mean": null,
+     "n": 0
+    },
+    "dev:false_retirement": {
+     "mean": null,
+     "n": 0
+    },
+    "holdout:conformance": {
+     "mean": null,
+     "n": 0
+    },
+    "holdout:retirement_recall": {
+     "mean": null,
+     "n": 0
+    },
+    "holdout:false_retirement": {
+     "mean": null,
+     "n": 0
+    }
+   }
+  },
+  "note": "observe == off on every metric (compare p1/compare.md)",
+  "compare": "tasks/adaptive-memory/eval/lifecycle-bench/p1/compare.md"
+ },
+ "amb_longmemeval_retrieval_noobs": {
+  "dataset": "LongMemEval-s cleaned (AMB loader), knowledge-update 72 + temporal-reasoning 127 non-abstention questions; frozen arm-A banks imported into every arm",
+  "endpoint_definitions": "tasks/adaptive-memory/eval/arms/score_endpoints.py",
+  "reference_arm": "B",
+  "endpoints": {
+   "knowledge-update:earlier@10": {
+    "value": 0.9861,
+    "x": 71,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.925,
+     0.9996
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.9861,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:earlier@20": {
+    "value": 1.0,
+    "x": 72,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.9501,
+     1.0
+    ],
+    "reference_arm": "B",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:earlier@5": {
+    "value": 0.9861,
+    "x": 71,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.925,
+     0.9996
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.9861,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:latest@10": {
+    "value": 1.0,
+    "x": 72,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.9501,
+     1.0
+    ],
+    "reference_arm": "B",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:latest@20": {
+    "value": 1.0,
+    "x": 72,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.9501,
+     1.0
+    ],
+    "reference_arm": "B",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:latest@5": {
+    "value": 1.0,
+    "x": 72,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.9501,
+     1.0
+    ],
+    "reference_arm": "B",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:latest_first": {
+    "value": 0.8194,
+    "x": 59,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.7111,
+     0.9002
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.8194,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:all_gold@10": {
+    "value": 0.8268,
+    "x": 105,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.7496,
+     0.8881
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.8268,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:all_gold@20": {
+    "value": 0.9134,
+    "x": 116,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.8503,
+     0.956
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.9134,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:all_gold@5": {
+    "value": 0.7008,
+    "x": 89,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.6132,
+     0.7788
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.7008,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:gold@10": {
+    "value": 0.9843,
+    "x": 125,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.9443,
+     0.9981
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.9843,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:gold@20": {
+    "value": 0.9921,
+    "x": 126,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.9569,
+     0.9998
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.9921,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:gold@5": {
+    "value": 0.9764,
+    "x": 124,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.9325,
+     0.9951
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.9764,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   }
+  }
+ },
+ "judged": "not run judged (PREREGISTRATION amendment 2026-10-17 20:34: retrieval identical to B by construction, 0 discordant measured)",
+ "tests": {
+  "api": [
+   "tests/test_adaptive_recall_integration.py::test_off_and_observe_return_the_same_recall",
+   "tests/test_context_admission_recall.py::test_observe_changes_nothing_visible_and_reports_the_shadow"
+  ],
+  "system": [
+   "hindsight-system-tests/tests/test_103_observe_mode.py (observe bank answers exactly like the off bank; consolidation delete leaves a shadow, no claim)"
+  ],
+  "source": "tasks/adaptive-memory/eval/R59-CHECKLIST.md"
+ },
+ "limitation": "observe does not run lifecycle classification (would change the prompt or need an extra LLM call); it shadows base-schema deletes only (DESIGN.md section 2, 13)",
+ "performance": {
+  "source": "tasks/adaptive-memory/eval/perf/performance.json",
+  "report": "tasks/adaptive-memory/eval/perf/REPORT.md",
+  "recall_noobs_vs_B": {
+   "seq": {
+    "pooled": {
+     "p50": {
+      "overhead": 0.1233,
+      "ci95": [
+       0.1078,
+       0.139
+      ],
+      "delta_ms": 8.94
+     },
+     "p95": {
+      "overhead": 0.0786,
+      "ci95": [
+       0.0383,
+       0.1092
+      ],
+      "delta_ms": 20.61
+     },
+     "p99": {
+      "overhead": 0.2133,
+      "ci95": [
+       0.1469,
+       0.3104
+      ],
+      "delta_ms": 68.95
+     },
+     "mean": {
+      "overhead": 0.1603,
+      "ci95": [
+       0.1349,
+       0.1871
+      ],
+      "delta_ms": 15.79
+     }
+    },
+    "per_round_p95_overhead": {
+     "1": 0.258,
+     "2": 0.0728,
+     "3": 0.0468,
+     "4": 0.0413
+    }
+   },
+   "conc": {
+    "pooled": {
+     "p50": {
+      "overhead": 0.0938,
+      "ci95": [
+       0.0636,
+       0.1128
+      ],
+      "delta_ms": 50.25
+     },
+     "p95": {
+      "overhead": 0.0282,
+      "ci95": [
+       -0.1076,
+       0.1322
+      ],
+      "delta_ms": 22.61
+     },
+     "p99": {
+      "overhead": -0.034,
+      "ci95": [
+       -0.1612,
+       0.1381
+      ],
+      "delta_ms": -34.54
+     },
+     "mean": {
+      "overhead": 0.0615,
+      "ci95": [
+       0.0223,
+       0.102
+      ],
+      "delta_ms": 31.88
+     }
+    },
+    "per_round_p95_overhead": {
+     "1": 0.0563,
+     "2": 0.1405,
+     "3": -0.0714,
+     "4": 0.0523
+    }
+   }
+  },
+  "recall_obs_vs_B": {
+   "seq": {
+    "pooled": {
+     "p50": {
+      "overhead": 0.073,
+      "ci95": [
+       0.0683,
+       0.0796
+      ],
+      "delta_ms": 5.27
+     },
+     "p95": {
+      "overhead": 0.0253,
+      "ci95": [
+       0.0133,
+       0.0369
+      ],
+      "delta_ms": 6.55
+     },
+     "p99": {
+      "overhead": 0.0174,
+      "ci95": [
+       -0.0431,
+       0.0795
+      ],
+      "delta_ms": 4.87
+     },
+     "mean": {
+      "overhead": 0.0587,
+      "ci95": [
+       0.0416,
+       0.0744
+      ],
+      "delta_ms": 5.71
+     }
+    },
+    "per_round_p95_overhead": {
+     "1": 0.0237,
+     "2": 0.029,
+     "3": 0.0386,
+     "4": -0.0227
+    }
+   },
+   "conc": {
+    "pooled": {
+     "p50": {
+      "overhead": 0.1221,
+      "ci95": [
+       0.1006,
+       0.153
+      ],
+      "delta_ms": 62.55
+     },
+     "p95": {
+      "overhead": 0.0706,
+      "ci95": [
+       0.0096,
+       0.2497
+      ],
+      "delta_ms": 46.71
+     },
+     "p99": {
+      "overhead": 0.0425,
+      "ci95": [
+       -0.0688,
+       0.1756
+      ],
+      "delta_ms": 35.25
+     },
+     "mean": {
+      "overhead": 0.1147,
+      "ci95": [
+       0.0782,
+       0.1533
+      ],
+      "delta_ms": 54.14
+     }
+    },
+    "per_round_p95_overhead": {
+     "1": 0.1463,
+     "2": 0.1362,
+     "3": 0.0769,
+     "4": 0.115
+    }
+   }
+  },
+  "run_level": {
+   "recall_noobs": {
+    "seq": {
+     "p95_per_round": [
+      0.2581,
+      0.0728,
+      0.0468,
+      0.0413
+     ],
+     "p95_run_level_mean": 0.1047,
+     "p95_run_level_t95": [
+      -0.0594,
+      0.2688
+     ],
+     "p50_per_round": [
+      0.2908,
+      0.1171,
+      0.07,
+      0.1095
+     ],
+     "p50_run_level_mean": 0.1469,
+     "p50_run_level_t95": [
+      -0.0094,
+      0.3031
+     ],
+     "median_of_run_p95": 0.0598,
+     "pooled_p95": 0.0786,
+     "pooled_p95_cluster_ci95": [
+      0.0383,
+      0.1092
+     ]
+    },
+    "conc": {
+     "p95_per_round": [
+      0.0563,
+      0.1405,
+      -0.0714,
+      0.0523
+     ],
+     "p95_run_level_mean": 0.0444,
+     "p95_run_level_t95": [
+      -0.0944,
+      0.1833
+     ],
+     "p50_per_round": [
+      -0.0484,
+      0.0998,
+      0.0918,
+      0.1756
+     ],
+     "p50_run_level_mean": 0.0797,
+     "p50_run_level_t95": [
+      -0.0689,
+      0.2282
+     ],
+     "median_of_run_p95": 0.0281,
+     "pooled_p95": 0.0282,
+     "pooled_p95_cluster_ci95": [
+      -0.1076,
+      0.1322
+     ]
+    }
+   },
+   "recall_obs": {
+    "seq": {
+     "p95_per_round": [
+      0.0237,
+      0.029,
+      0.0386,
+      -0.0227
+     ],
+     "p95_run_level_mean": 0.0172,
+     "p95_run_level_t95": [
+      -0.0262,
+      0.0605
+     ],
+     "p50_per_round": [
+      0.0663,
+      0.0631,
+      0.0967,
+      0.0437
+     ],
+     "p50_run_level_mean": 0.0675,
+     "p50_run_level_t95": [
+      0.0326,
+      0.1023
+     ],
+     "median_of_run_p95": 0.0312,
+     "pooled_p95": 0.0253,
+     "pooled_p95_cluster_ci95": [
+      0.0133,
+      0.0369
+     ]
+    },
+    "conc": {
+     "p95_per_round": [
+      0.1463,
+      0.1362,
+      0.0769,
+      0.115
+     ],
+     "p95_run_level_mean": 0.1186,
+     "p95_run_level_t95": [
+      0.0697,
+      0.1675
+     ],
+     "p50_per_round": [
+      0.1035,
+      0.0852,
+      0.1514,
+      0.1485
+     ],
+     "p50_run_level_mean": 0.1221,
+     "p50_run_level_t95": [
+      0.0696,
+      0.1746
+     ],
+     "median_of_run_p95": 0.1119,
+     "pooled_p95": 0.0706,
+     "pooled_p95_cluster_ci95": [
+      0.0096,
+      0.2497
+     ]
+    }
+   }
+  },
+  "recall_pooled_ms": {
+   "noobs": {
+    "seq": {
+     "n": 1600,
+     "p50_ms": 81.44,
+     "p95_ms": 282.97,
+     "p99_ms": 392.19,
+     "mean_ms": 114.27
+    },
+    "conc": {
+     "n": 800,
+     "p50_ms": 585.83,
+     "p95_ms": 823.29,
+     "p99_ms": 981.45,
+     "mean_ms": 550.53
+    }
+   },
+   "obs": {
+    "seq": {
+     "n": 1600,
+     "p50_ms": 77.51,
+     "p95_ms": 264.98,
+     "p99_ms": 285.49,
+     "mean_ms": 103.03
+    },
+    "conc": {
+     "n": 800,
+     "p50_ms": 574.99,
+     "p95_ms": 708.31,
+     "p99_ms": 863.96,
+     "mean_ms": 526.16
+    }
+   }
+  },
+  "official_suites_medium": {
+   "retain_items_per_s": [
+    122.9,
+    120.78,
+    110.59
+   ],
+   "consolidation_memories_per_s": [
+    23.94,
+    23.7,
+    24.23
+   ],
+   "retain_s": [
+    8.137,
+    8.28,
+    9.043
+   ],
+   "consolidation_s": [
+    4.178,
+    4.219,
+    4.126
+   ],
+   "git_sha": "2f4c7daae",
+   "scale": "medium",
+   "retain_items_per_s_median": 120.78,
+   "consolidation_memories_per_s_median": 23.94,
+   "retain_s_median": 8.28,
+   "consolidation_s_median": 4.178,
+   "retain_s_vs_B": -0.0084,
+   "consolidation_s_vs_B": -0.0067
+  },
+  "obs_runs_consolidation_s": {
+   "per_round": [
+    5.084,
+    5.587,
+    5.428,
+    4.338
+   ],
+   "median": 5.256
+  },
+  "storage_after_100_observations": {
+   "rows": {
+    "async_operations": {
+     "min": 1,
+     "max": 1
+    },
+    "banks": {
+     "min": 1,
+     "max": 1
+    },
+    "chunks": {
+     "min": 1000,
+     "max": 1000
+    },
+    "documents": {
+     "min": 2,
+     "max": 2
+    },
+    "entities": {
+     "min": 517,
+     "max": 519
+    },
+    "entity_cooccurrences": {
+     "min": 2171,
+     "max": 2172
+    },
+    "llm_requests": {
+     "min": 1022,
+     "max": 1022
+    },
+    "memory_links": {
+     "min": 30227,
+     "max": 30327
+    },
+    "memory_units": {
+     "min": 1100,
+     "max": 1100
+    },
+    "unit_entities": {
+     "min": 2999,
+     "max": 2999
+    }
+   },
+   "bytes_round1": {
+    "async_operations": 319488,
+    "banks": 114688,
+    "chunks": 753664,
+    "documents": 139264,
+    "entities": 1277952,
+    "entity_cooccurrences": 901120,
+    "llm_requests": 1247019008,
+    "memory_links": 21741568,
+    "memory_units": 7094272,
+    "unit_entities": 1351680
+   }
+  },
+  "note": "observe computes R, the adaptive factor and the would-change top-k on every recall; round 1 was slow for C (+40% sequential p50) as well as B, cause unknown; without round 1 (exploratory) C's sequential p50 overhead is +10.2% vs D's +12.1% (eval/perf/REPORT.md)"
+ }
+}

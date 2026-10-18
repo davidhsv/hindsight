@@ -206,6 +206,67 @@ operation's result, and the consolidation log summary prints a warning line
 whenever it is non-zero. Both count *attempts* — one batch call retried three times
 contributes three — so they are not bounded by the number of batches in the run.
 
+### Adaptive Memory Metrics
+
+Recorded only for banks whose [adaptive memory](./adaptive-memory.md) mode is not `off` (settings under [Adaptive memory](./configuration.md#adaptive-memory)); a server with the feature off exports none of them. Exported names are the OTel instrument name with dots turned into underscores and `_total` added to counters; histograms export `_bucket`, `_sum` and `_count`. The first column is a short name for each signal; operational counters, which report the machinery rather than memory behaviour, have none. To evaluate `observe` mode, compare `top_k_changed_total` with your recall count: it is how often `rank` would have changed the results callers saw.
+
+| Signal | Exported (Prometheus) | OTel instrument | Type | Labels | Recorded when |
+|--------|-----------------------|-----------------|------|--------|---------------|
+| `adaptive_memory_state_initialized_total` | `hindsight_adaptive_memory_state_initialized_total` | `hindsight.adaptive_memory.state_initialized` | Counter | - | A reinforcement or an explicit retention setting created a memory's retention row |
+| `reinforcement_events_total` | `hindsight_adaptive_memory_reinforcement_events_total` | `hindsight.adaptive_memory.reinforcement_events` | Counter | source_type, outcome | A reinforcement event was applied, anchored a new row (`initial`) or fell in the cooldown |
+| `reinforcement_events_deduplicated_total` | `hindsight_adaptive_memory_reinforcement_events_deduplicated_total` | `hindsight.adaptive_memory.reinforcement_events_deduplicated` | Counter | source_type | An event's key had already reinforced the memory; nothing changed |
+| (operational) | `hindsight_adaptive_memory_reinforcement_dropped_total` | `hindsight.adaptive_memory.reinforcement_dropped` | Counter | producer, reason | A producer gave up on a reinforcement (`error`, or `overflow` of in-flight background writes) |
+| `supersessions_total` | `hindsight_adaptive_memory_supersessions_total` | `hindsight.adaptive_memory.supersessions` | Counter | origin | A claim was superseded (its compare-and-set won) |
+| `refutations_total` | `hindsight_adaptive_memory_refutations_total` | `hindsight.adaptive_memory.refutations` | Counter | origin | A claim was refuted |
+| `uncertain_claims_total` | `hindsight_adaptive_memory_uncertain_claims_total` | `hindsight.adaptive_memory.uncertain_claims` | Counter | origin | A claim was marked uncertain |
+| `splits_total` | `hindsight_adaptive_memory_splits_total` | `hindsight.adaptive_memory.splits` | Counter | origin | An observation was split into narrower ones |
+| `merges_total` | `hindsight_adaptive_memory_merges_total` | `hindsight.adaptive_memory.merges` | Counter | origin | An observation was merged into a survivor |
+| (operational) | `hindsight_adaptive_memory_lifecycle_transitions_dropped_total` | `hindsight.adaptive_memory.lifecycle_transitions_dropped` | Counter | reason | Consolidation dropped a lifecycle label that failed validation; `reason` says which check refused it |
+| `recall_superseded_filtered_total` | `hindsight_adaptive_memory_recall_superseded_filtered_total` | `hindsight.adaptive_memory.recall_superseded_filtered` | Counter | view | A lifecycle-mode recall removed candidates because their claim is superseded |
+| `recall_refuted_filtered_total` | `hindsight_adaptive_memory_recall_refuted_filtered_total` | `hindsight.adaptive_memory.recall_refuted_filtered` | Counter | view | A lifecycle-mode recall removed candidates because their claim is refuted |
+| (operational) | `hindsight_adaptive_memory_historical_cue_fired_total` | `hindsight.adaptive_memory.historical_cue_fired` | Counter | cue | The historical-cue detector turned an external recall historical |
+| `archive_suppressed_total` | `hindsight_adaptive_memory_archive_suppressed_total` | `hindsight.adaptive_memory.archive_suppressed` | Counter | - | `rank`/`lifecycle` with archiving on: a recall dropped archived memories after scoring (normalized reranker score below `ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE`) |
+| `archived_total` | `hindsight_adaptive_memory_archived_total` | `hindsight.adaptive_memory.archived` | Counter | - | The `adaptive_memory_maintenance` job archived memories |
+| `pruned_total` | `hindsight_adaptive_memory_pruned_total` | `hindsight.adaptive_memory.pruned` | Counter | - | The `adaptive_memory_maintenance` job deleted long-archived memories (prune on) |
+| `retrievability_distribution` | `hindsight_adaptive_memory_retrievability_bucket` | `hindsight.adaptive_memory.retrievability` | Histogram (0.05 to 1.0, step 0.05) | mode | Once per scored recall, one value per returned memory |
+| `stability_days_distribution` | `hindsight_adaptive_memory_stability_days_bucket` | `hindsight.adaptive_memory.stability_days` | Histogram (log, 1 to 3650 days) | mode | Once per scored recall, one value per returned memory |
+| `adaptive_memory_rerank_changes_total` | `hindsight_adaptive_memory_rerank_changes_total` | `hindsight.adaptive_memory.rerank_changes` | Counter | mode | `rank`/`lifecycle`: the returned ids differ from the factor-free order's |
+| `top_k_changed_total` | `hindsight_adaptive_memory_top_k_changed_total` | `hindsight.adaptive_memory.top_k_changed` | Counter | mode | `observe`: the simulated factor-applied ids differ from the ones returned |
+| (operational) | `hindsight_adaptive_memory_state_load_errors_total` | `hindsight.adaptive_memory.state_load_errors` | Counter | mode | A recall's retention state could not be loaded (it continued with factor 1) |
+| (operational) | `hindsight_adaptive_memory_carry_forward_matched_total` | `hindsight.adaptive_memory.carry_forward_matched` | Counter | - | A re-ingested fact's lifecycle state moved to its re-extracted twin |
+| (operational) | `hindsight_adaptive_memory_carry_forward_unmatched_total` | `hindsight.adaptive_memory.carry_forward_unmatched` | Counter | - | A re-ingested fact with lifecycle state had no re-extracted twin (its state was dropped) |
+| (operational) | `hindsight_adaptive_memory_claims_reverted_total` | `hindsight.adaptive_memory.claims_reverted` | Counter | reason | A retired claim returned to active because all its evidence was deleted (`evidence_deleted`) or not re-extracted (`reingest_unmatched`) |
+
+**Labels:**
+- `mode`: The bank's effective adaptive memory mode (`observe`, `rank`, `lifecycle`)
+- `origin`: Who decided the transition (`consolidation`, or `explicit` for the lifecycle PATCH API)
+- `view`: The claim view the recall applied (`current`, `historical`, `as_of`)
+- `cue`: The historical-cue pattern that matched (a fixed list, e.g. `used_to`, `before_change`, `before_date`)
+- `source_type`, `outcome`, `producer`, `reason`: Bounded enums, listed in the descriptions above
+
+A recall in `lifecycle` mode whose claim state cannot be read fails with HTTP 503 rather than return unchecked memories; those show up in the HTTP metrics below as `status_code="503"` on the recall endpoint.
+
+### Context Admission Metrics
+
+Recorded only for external recalls in banks whose [context admission](./configuration.md#context-admission) mode is not `off`; a server with the feature off exports none of them. They carry ids and counts only, never memory text, and `bank_id` only when bank ids are enabled on metrics. The gate's latency is the `context_admission` phase of the recall phase histogram.
+
+| Exported (Prometheus) | OTel instrument | Type | Labels | Recorded when |
+|-----------------------|-----------------|------|--------|---------------|
+| `hindsight_context_admission_recalls_total` | `hindsight.context_admission.recalls` | Counter | mode, scorer | An external recall was judged by the gate |
+| `hindsight_context_admission_candidates_total` | `hindsight.context_admission.candidates` | Counter | mode | Candidates judged, summed over recalls |
+| `hindsight_context_admission_admitted_total` | `hindsight.context_admission.admitted` | Counter | mode | Candidates admitted |
+| `hindsight_context_admission_rejected_total` | `hindsight.context_admission.rejected` | Counter | mode, reason | Candidates rejected (`wrong_scope`, `below_threshold`, `superseded`, `refuted`, `redundant`, `budget`) |
+| `hindsight_context_admission_abstained_total` | `hindsight.context_admission.abstained` | Counter | mode | A recall judged candidates and admitted none (`filter`/`strict` return no results) |
+| `hindsight_context_admission_cross_scope_candidates_detected_total` | `hindsight.context_admission.cross_scope_candidates_detected` | Counter | mode | Candidates whose metadata disagreed with the request on a hard scope key |
+| `hindsight_context_admission_would_drop_count_total` | `hindsight.context_admission.would_drop_count` | Counter | mode | `observe`: returned memories the simulated gate would have left out |
+| `hindsight_context_admission_would_abstain_count_total` | `hindsight.context_admission.would_abstain_count` | Counter | mode | `observe`: recalls the simulated gate would have answered with no memories |
+| `hindsight_context_admission_would_change_top_k_total` | `hindsight.context_admission.would_change_top_k` | Counter | mode | `observe`: recalls whose returned ids the simulated gate would have changed |
+
+**Labels:**
+- `mode`: The bank's context admission mode (`observe`, `filter`, `strict`)
+- `scorer`: The server's scorer (`deterministic`, `jev`, `hybrid`)
+- `reason`: Why a candidate was rejected, from the fixed list above
+
 ### HTTP Request Metrics
 
 | Metric | Type | Labels | Description |

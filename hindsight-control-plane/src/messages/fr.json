@@ -695,6 +695,7 @@
       "webhookDelivery": "Livraison de webhook",
       "graphMaintenance": "Maintenance du graphe",
       "vectorIndexMaintenance": "Maintenance de l'index vectoriel",
+      "adaptiveMemoryMaintenance": "Maintenance de la mémoire adaptative",
       "exportDocuments": "Exporter les documents",
       "importDocuments": "Importer les documents",
       "exportBank": "Exporter la banque",
@@ -2021,7 +2022,9 @@
         "retain": "Impossible d'exécuter Retain par lot",
         "retainAsync": "Impossible d'exécuter Retain par lot de manière asynchrone",
         "history": "Impossible de récupérer l'historique des observations",
-        "update": "Échec de la mise à jour de la mémoire"
+        "update": "Échec de la mise à jour de la mémoire",
+        "confirm": "Échec de la confirmation de la mémoire",
+        "lifecycle": "Échec de la mise à jour du cycle de vie de la mémoire"
       },
       "documents": {
         "fetchList": "Impossible de récupérer les documents",
@@ -2259,5 +2262,32 @@
     "pausedTitle": "La dernière actualisation a échoué : ce modèle ne s'actualise plus tout seul — actualisez-le pour reprendre",
     "retrying": "Nouvel essai",
     "retryingTitle": "La dernière tentative a échoué et une autre est en file — les actualisations automatiques ne s'arrêtent que si celle-ci échoue aussi"
+  },
+  "memoryLifecycle": {
+    "sectionTitle": "Mémoire adaptative",
+    "truthStatus": "Statut de vérité",
+    "status": {
+      "active": "Active",
+      "uncertain": "Incertaine",
+      "superseded": "Remplacée",
+      "refuted": "Réfutée"
+    },
+    "until": "jusqu'au {date}",
+    "supersededByTitle": "Remplacée par {id}",
+    "validity": "Valide",
+    "unknownStart": "avant tout enregistrement",
+    "openEnd": "maintenant",
+    "supersededBy": "Remplacée par",
+    "retiredVia": "Retirée via",
+    "reason": "Raison",
+    "retrievability": "Récupérabilité",
+    "stability": "Stabilité",
+    "stabilityValue": "{days} jours",
+    "reinforcements": "Renforcements",
+    "importance": "Importance",
+    "exempt": "Exemptée de l'oubli",
+    "yes": "Oui",
+    "archived": "Archivée",
+    "observeShadow": "Le mode observation la marquerait"
   }
 }

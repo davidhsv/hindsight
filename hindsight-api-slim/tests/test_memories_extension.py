@@ -30,7 +30,6 @@ from unittest.mock import patch
 import pytest
 
 from hindsight_api.engine.chunk_ids import build_chunk_id
-from hindsight_api.extensions import OperationValidationError
 from hindsight_api.engine.memories import create_memories, get_memories, set_memories
 from hindsight_api.engine.memories.base import (
     DOC_META_FILE_STORAGE_KEY,
@@ -49,6 +48,7 @@ from hindsight_api.engine.memories.base import (
 )
 from hindsight_api.engine.memories.postgres import PostgresMemories
 from hindsight_api.engine.schema import fq_store_table
+from hindsight_api.extensions import OperationValidationError
 
 
 class InMemoryMemories(MemoriesExtension):
@@ -293,8 +293,9 @@ class InMemoryMemories(MemoriesExtension):
         min_keyword=None,
         enable_text_search=True,
         enable_graph=True,
+        exclude_non_active=False,
     ):
-        # The one recall interface. This store owns its links (no separate graph arm), so it
+        # The one recall interface. ``exclude_non_active`` is moot here: this store keeps no claims. This store owns its links (no separate graph arm), so it
         # answers dense/keyword from its own ``search`` and, when a window is given, temporal from
         # its own ``temporal_search`` — the same seam the engine drove per-arm before it unified.
         self.calls.append("recall_unified")
@@ -870,7 +871,16 @@ class InMemoryMemories(MemoriesExtension):
         ]
 
     async def restore_archived_memories(
-        self, *, conn, fq_table, bank_id, rows, unit_id_map, document_id_map, bank_rows_json_encoding
+        self,
+        *,
+        conn,
+        fq_table,
+        bank_id,
+        rows,
+        unit_id_map,
+        document_id_map,
+        bank_rows_json_encoding,
+        relation_id_map=None,
     ):
         for row in rows:
             unit_id = str(uuid.uuid4())

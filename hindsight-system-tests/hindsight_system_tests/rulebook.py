@@ -44,6 +44,9 @@ class ChatRequest:
     call is billed to."""
     headers: dict[str, str] = field(default_factory=dict, compare=False)
     """The request headers, lowercased."""
+    body: dict[str, Any] = field(default_factory=dict, compare=False)
+    """The request body as it arrived, for asserting on what the server sent beyond the
+    messages — the response schema it asked for, its sampling parameters."""
 
     @property
     def user_text(self) -> str:

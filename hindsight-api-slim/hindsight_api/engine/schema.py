@@ -22,6 +22,14 @@ STORE_TABLES = frozenset(
         "entities",
         "entity_cooccurrences",
         "invalidated_memory_units",
+        # Adaptive-memory state: keyed by memory id with FKs to memory_units, so a
+        # store that keeps the memories elsewhere has nothing for these rows to name.
+        "memory_retention_state",
+        "memory_claim_state",
+        "memory_claim_evidence",
+        "memory_lifecycle_relations",
+        "memory_reinforcement_events",
+        "memory_claim_shadow",
     }
 )
 

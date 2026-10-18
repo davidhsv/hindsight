@@ -343,7 +343,7 @@ def test_fixed_type_call_sites_drop_the_candidate_guard():
     assert "bank_peer.operation_type = 'consolidation'" in fixed
 
     mixed = bank_serialization_sql("async_operations", "o")
-    assert "o.operation_type NOT IN ('graph_maintenance', 'consolidation')" in mixed
+    assert "o.operation_type NOT IN ('graph_maintenance', 'consolidation', 'adaptive_memory_maintenance')" in mixed
     assert "bank_peer.operation_type = o.operation_type" in mixed
 
 

@@ -34,7 +34,8 @@ import os
 import random
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from collections.abc import Awaitable, Callable
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -60,6 +61,15 @@ class Fact:
     #: SHOWN when this fact was consolidated: the recall surfaced the fact's twin.
     #: Read from the public LLM trace, so it separates a recall miss from a model miss.
     twin: tuple[str, ...] = ()
+    #: Retain metadata as ``(key, value)`` pairs (hashable, so the fact stays frozen) —
+    #: e.g. ``(("environment", "test"),)``, which lifecycle mode reads as the fact's scope.
+    metadata: tuple[tuple[str, str], ...] = ()
+
+
+#: Given a bank and memory ids, the ones whose claim is retired (superseded or refuted).
+#: A bank in lifecycle mode keeps retired observations as rows; recall leaves them out,
+#: so the snapshot that is graded does too.
+RetiredFn = Callable[[str, list[str]], Awaitable[set[str]]]
 
 
 @dataclass(frozen=True)
@@ -325,7 +335,17 @@ def _relevant(fact: Fact, focus: tuple[str, ...]) -> bool:
     return not focus or any(term.lower() in fact.text.lower() for term in focus)
 
 
-async def run_scenario(client: Hindsight, bank_id: str, settled: SettleFn, scenario: Scenario) -> ConsolidationOutcome:
+async def run_scenario(
+    client: Hindsight,
+    bank_id: str,
+    settled: SettleFn,
+    scenario: Scenario,
+    *,
+    adaptive_memory_mode: str | None = None,
+    retired: RetiredFn | None = None,
+) -> ConsolidationOutcome:
+    """Run the scenario; ``retired`` drops retired observations from every snapshot (the
+    current view a lifecycle-mode bank serves), and ``adaptive_memory_mode`` sets the bank's mode."""
     outcome = ConsolidationOutcome(scenario_id=scenario.id, bank_id=bank_id)
     await client.aupdate_bank_config(
         bank_id,
@@ -333,6 +353,7 @@ async def run_scenario(client: Hindsight, bank_id: str, settled: SettleFn, scena
         enable_observations=True,
         enable_auto_consolidation=True,
         **({"observations_mission": scenario.mission} if scenario.mission else {}),
+        **({"adaptive_memory_mode": adaptive_memory_mode} if adaptive_memory_mode else {}),
     )
 
     for wave_no, wave in enumerate(scenario.waves, 1):
@@ -346,6 +367,8 @@ async def run_scenario(client: Hindsight, bank_id: str, settled: SettleFn, scena
             }
             if wave.tags:
                 item["tags"] = list(wave.tags)
+            if fact.metadata:
+                item["metadata"] = dict(fact.metadata)
             if scenario.observation_scopes:
                 item["observation_scopes"] = scenario.observation_scopes
             items.append(item)
@@ -360,6 +383,9 @@ async def run_scenario(client: Hindsight, bank_id: str, settled: SettleFn, scena
         facts = await _list(client, bank_id, "world") + await _list(client, bank_id, "experience")
         facts_by_id = {f.id: f for f in facts}
         observations = await _observations(client, bank_id)
+        if retired is not None:
+            gone = await retired(bank_id, [o.id for o in observations])
+            observations = [o for o in observations if o.id not in gone]
         _check_snapshot(wave_no, observations, facts_by_id, outcome)
 
         # Every durable fact of this wave must land in some observation: a fact the
@@ -546,6 +572,23 @@ def noisy_service_bank() -> Scenario:
     )
 
 
+def noisy_service_bank_with_mission() -> Scenario:
+    """The service bank again under a bank's own mission, the common setup (#525, #4619 set one):
+    the mission's wording must not change what lands, and chatter it does not ask for stays out."""
+    scenario = noisy_service_bank()
+    return replace(
+        scenario,
+        id="noisy-service-catalogue-mission",
+        mission=(
+            "Keep a catalogue of the platform's services: which team owns each one, what language it is "
+            "written in, the port it listens on and where its pages go. Leave out small talk."
+        ),
+        # The chatter's own words join the focus so the judge sees any observation it left.
+        focus=(*scenario.focus, "coffee", "wifi", "thanks", "Grafana", "stand-up"),
+        traps=(*scenario.traps, "Some observation records small talk: a coffee break, the wifi, a thank-you."),
+    )
+
+
 #: Twenty people whose names come in lookalike pairs, the way a real contact list does.
 _PEOPLE = (
     ("Maria", "sister"),
@@ -629,7 +672,10 @@ def noisy_personal_bank() -> Scenario:
             twin=("lucia", spec["Lucia"].birthday.split()[0].lower()),
         ),
         Fact(
-            f"Franco is based in {spec['Franco'].city}.", later, ("Franco",), twin=("franco", spec["Franco"].city.lower())
+            f"Franco is based in {spec['Franco'].city}.",
+            later,
+            ("Franco",),
+            twin=("franco", spec["Franco"].city.lower()),
         ),
     )
     return Scenario(

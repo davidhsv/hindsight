@@ -457,7 +457,7 @@ def _render_retain(config: "HindsightConfig") -> PromptPreview:
     )
 
 
-def _render_consolidation(config: "HindsightConfig") -> PromptPreview:
+def _render_consolidation(config: "HindsightConfig", *, lifecycle: bool) -> PromptPreview:
     from .consolidation.prompts import (
         _DEFAULT_LANGUAGE_RULE,
         build_consolidation_input,
@@ -465,7 +465,9 @@ def _render_consolidation(config: "HindsightConfig") -> PromptPreview:
         build_mission_section,
     )
 
-    system_prompt = build_consolidation_system_prompt(llm_output_language=config.llm_output_language)
+    system_prompt = build_consolidation_system_prompt(
+        llm_output_language=config.llm_output_language, lifecycle=lifecycle
+    )
     user_prompt = build_consolidation_input(
         facts_text=PLACEHOLDER_CONSOLIDATION_FACTS,
         observations_text=PLACEHOLDER_CONSOLIDATION_OBSERVATIONS,
@@ -498,6 +500,8 @@ def _render_reflect(
     config: "HindsightConfig",
     bank_profile: dict[str, Any],
     directives: list[dict[str, Any]] | None,
+    *,
+    lifecycle: bool,
 ) -> PromptPreview:
     from .reflect.prompts import (
         _TOOLS_LANGUAGE_RULE,
@@ -523,6 +527,7 @@ def _render_reflect(
         include_observations=PREVIEW_REFLECT_INCLUDE_OBSERVATIONS,
         budget=None,
         llm_output_language=config.llm_output_language,
+        lifecycle=lifecycle,
     )
     mission = (profile.get("mission") or "").strip()
     user_prompt = build_agent_user_prompt(PLACEHOLDER_REFLECT_QUERY, config.llm_output_language, mission)
@@ -563,6 +568,8 @@ def render_prompt_preview(
     config: "HindsightConfig",
     bank_profile: dict[str, Any],
     directives: list[dict[str, Any]] | None = None,
+    *,
+    lifecycle: bool = False,
 ) -> PromptPreview:
     """Render ``operation``'s prompts for this bank — no LLM call, no writes.
 
@@ -570,14 +577,19 @@ def render_prompt_preview(
     profile, its directives. The runtime data an operation would be given is a fixed
     bracketed placeholder, so what comes back is this bank's prompt and nothing else.
 
+    ``lifecycle``: the bank's effective adaptive memory mode is ``lifecycle``, so
+    consolidation sends its lifecycle prompt variant and reflect its claim-reading
+    rules. The caller resolves it (it needs the store's per-bank support), the same
+    way both operations do.
+
     Raises ``ValueError`` for an unknown operation.
     """
     if operation == "retain":
         preview = _render_retain(config)
     elif operation == "consolidation":
-        preview = _render_consolidation(config)
+        preview = _render_consolidation(config, lifecycle=lifecycle)
     elif operation == "reflect":
-        preview = _render_reflect(config, bank_profile, directives)
+        preview = _render_reflect(config, bank_profile, directives, lifecycle=lifecycle)
     else:
         raise ValueError(f"Unknown prompt preview operation '{operation}'. Allowed: {sorted(PREVIEW_OPERATIONS)}")
 

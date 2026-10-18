@@ -1110,7 +1110,9 @@ class _RRFReranker:
     async def ensure_initialized(self) -> None:
         pass
 
-    async def rerank(self, query: str, candidates: list["MergedCandidate"]) -> "RerankResult":
+    async def rerank(
+        self, query: str, candidates: list["MergedCandidate"], now: "datetime | None" = None
+    ) -> "RerankResult":
         from hindsight_api.engine.search.reranking import RerankResult
         from hindsight_api.engine.search.types import ScoredResult
 

@@ -19,14 +19,17 @@ import (
 // checks if the MentalModelRetraction type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &MentalModelRetraction{}
 
-// MentalModelRetraction Facts the document cited that no longer exist, and what was done about them.  A retraction is the one refresh input that is *invisible* in every other report: the fact is gone from the bank, so it appears in no recall, no tool call, and no supporting-fact list. Without this, a refresh that quietly deleted a paragraph — or quietly declined to — leaves no evidence of why.
+// MentalModelRetraction Facts the document cited that no longer exist, and what was done about them.  A retraction is the one refresh input that is *invisible* in every other report: the fact is gone from the bank, so it appears in no recall, no tool call, and no supporting-fact list. Without this, a refresh that quietly deleted a paragraph — or quietly declined to — leaves no evidence of why.  In adaptive memory ``lifecycle`` mode a cited memory whose claim was superseded or refuted counts too: it is still a row, but no longer a current answer. ``cause`` and ``successor_ids`` say so; both are omitted when no such citation was found.
 type MentalModelRetraction struct {
-	// Ids the document's based_on cites that no longer exist in the bank.
+	// Ids the document's based_on cites that no longer exist in the bank, or (lifecycle mode) whose claim was superseded or refuted.
 	FactIds []string `json:"fact_ids,omitempty"`
 	// What those facts said, as the document recorded them. The rows themselves are gone — an observation swept away with its source keeps no history — so this copy is the only surviving record.
 	FactTexts []string `json:"fact_texts,omitempty"`
-	// Whether the pass that removes them ran to completion (zero edits still counts).
+	// Whether the pass that removes them ran to completion (zero edits still counts). For retired claims that pass is the full regeneration: true when it produced the document.
 	Applied bool `json:"applied"`
+	Cause NullableString `json:"cause,omitempty"`
+	// Lifecycle mode: the memories that replaced the retired citations. Omitted when none.
+	SuccessorIds []string `json:"successor_ids,omitempty"`
 	DeferredReason NullableString `json:"deferred_reason,omitempty"`
 }
 
@@ -138,6 +141,80 @@ func (o *MentalModelRetraction) SetApplied(v bool) {
 	o.Applied = v
 }
 
+// GetCause returns the Cause field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *MentalModelRetraction) GetCause() string {
+	if o == nil || IsNil(o.Cause.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.Cause.Get()
+}
+
+// GetCauseOk returns a tuple with the Cause field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *MentalModelRetraction) GetCauseOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Cause.Get(), o.Cause.IsSet()
+}
+
+// HasCause returns a boolean if a field has been set.
+func (o *MentalModelRetraction) HasCause() bool {
+	if o != nil && o.Cause.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetCause gets a reference to the given NullableString and assigns it to the Cause field.
+func (o *MentalModelRetraction) SetCause(v string) {
+	o.Cause.Set(&v)
+}
+// SetCauseNil sets the value for Cause to be an explicit nil
+func (o *MentalModelRetraction) SetCauseNil() {
+	o.Cause.Set(nil)
+}
+
+// UnsetCause ensures that no value is present for Cause, not even an explicit nil
+func (o *MentalModelRetraction) UnsetCause() {
+	o.Cause.Unset()
+}
+
+// GetSuccessorIds returns the SuccessorIds field value if set, zero value otherwise.
+func (o *MentalModelRetraction) GetSuccessorIds() []string {
+	if o == nil || IsNil(o.SuccessorIds) {
+		var ret []string
+		return ret
+	}
+	return o.SuccessorIds
+}
+
+// GetSuccessorIdsOk returns a tuple with the SuccessorIds field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *MentalModelRetraction) GetSuccessorIdsOk() ([]string, bool) {
+	if o == nil || IsNil(o.SuccessorIds) {
+		return nil, false
+	}
+	return o.SuccessorIds, true
+}
+
+// HasSuccessorIds returns a boolean if a field has been set.
+func (o *MentalModelRetraction) HasSuccessorIds() bool {
+	if o != nil && !IsNil(o.SuccessorIds) {
+		return true
+	}
+
+	return false
+}
+
+// SetSuccessorIds gets a reference to the given []string and assigns it to the SuccessorIds field.
+func (o *MentalModelRetraction) SetSuccessorIds(v []string) {
+	o.SuccessorIds = v
+}
+
 // GetDeferredReason returns the DeferredReason field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MentalModelRetraction) GetDeferredReason() string {
 	if o == nil || IsNil(o.DeferredReason.Get()) {
@@ -197,6 +274,12 @@ func (o MentalModelRetraction) ToMap() (map[string]interface{}, error) {
 		toSerialize["fact_texts"] = o.FactTexts
 	}
 	toSerialize["applied"] = o.Applied
+	if o.Cause.IsSet() {
+		toSerialize["cause"] = o.Cause.Get()
+	}
+	if !IsNil(o.SuccessorIds) {
+		toSerialize["successor_ids"] = o.SuccessorIds
+	}
 	if o.DeferredReason.IsSet() {
 		toSerialize["deferred_reason"] = o.DeferredReason.Get()
 	}

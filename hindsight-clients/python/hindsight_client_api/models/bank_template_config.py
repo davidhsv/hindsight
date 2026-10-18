@@ -83,8 +83,25 @@ class BankTemplateConfig(BaseModel):
     recall_prefer_observations: Optional[StrictBool] = None
     recall_max_tokens: Optional[StrictInt] = None
     recall_chunks_max_tokens: Optional[StrictInt] = None
+    adaptive_memory_mode: Optional[StrictStr] = None
+    adaptive_memory_score_alpha: Optional[Union[Annotated[float, Field(le=1.0, strict=True, ge=0.0)], Annotated[int, Field(le=1, strict=True, ge=0)]]] = None
+    adaptive_memory_score_floor: Optional[Union[Annotated[float, Field(le=1.0, strict=True, ge=0.0)], Annotated[int, Field(le=1, strict=True, ge=0)]]] = None
+    adaptive_memory_reinforcement_enabled: Optional[StrictBool] = None
+    adaptive_memory_base_stability_days: Optional[Union[StrictFloat, StrictInt]] = None
+    adaptive_memory_max_stability_days: Optional[Union[StrictFloat, StrictInt]] = None
+    adaptive_memory_default_view: Optional[StrictStr] = None
+    adaptive_memory_historical_cues: Optional[StrictBool] = None
+    context_admission_mode: Optional[StrictStr] = None
+    context_admission_threshold_auto: Optional[Union[Annotated[float, Field(le=1.0, strict=True, ge=0.0)], Annotated[int, Field(le=1, strict=True, ge=0)]]] = None
+    context_admission_threshold_explicit: Optional[Union[Annotated[float, Field(le=1.0, strict=True, ge=0.0)], Annotated[int, Field(le=1, strict=True, ge=0)]]] = None
+    context_admission_reference_bonus: Optional[Union[Annotated[float, Field(le=1.0, strict=True, ge=0.0)], Annotated[int, Field(le=1, strict=True, ge=0)]]] = None
+    context_admission_candidates: Optional[Annotated[int, Field(strict=True, ge=1)]] = None
+    context_admission_max_memories: Optional[Annotated[int, Field(strict=True, ge=1)]] = None
+    context_admission_max_tokens: Optional[Annotated[int, Field(strict=True, ge=1)]] = None
+    context_admission_mmr_lambda: Optional[Union[Annotated[float, Field(le=1.0, strict=True, ge=0.0)], Annotated[int, Field(le=1, strict=True, ge=0)]]] = None
+    context_admission_dup_similarity: Optional[Union[Annotated[float, Field(le=1.0, strict=True, ge=0.0)], Annotated[int, Field(le=1, strict=True, ge=0)]]] = None
     memory_defense: Optional[Dict[str, Any]] = None
-    __properties: ClassVar[List[str]] = ["reflect_mission", "retain_mission", "retain_extraction_mode", "retain_custom_instructions", "retain_chunk_size", "retain_structured_chunk_size", "enable_observations", "observations_mission", "enable_text_search", "enable_temporal_retrieval", "enable_graph_retrieval", "enable_reranking", "reflect_use_decision_model", "mental_model_refresh_use_decision_model", "disposition_skepticism", "disposition_literalism", "disposition_empathy", "entity_labels", "entities_allow_free_form", "retain_default_strategy", "retain_strategies", "retain_chunk_batch_size", "retain_max_attachments_per_chunk", "mcp_enabled_tools", "consolidation_llm_batch_size", "consolidation_source_facts_max_tokens", "consolidation_source_facts_max_tokens_per_observation", "max_observations_per_scope", "observation_scope_limits", "consolidation_strategies", "reflect_source_facts_max_tokens", "knowledge_page_default_trigger", "reflect_default_options", "mental_model_min_refresh_interval_seconds", "llm_gemini_safety_settings", "recall_budget_function", "recall_budget_fixed_low", "recall_budget_fixed_mid", "recall_budget_fixed_high", "recall_budget_adaptive_low", "recall_budget_adaptive_mid", "recall_budget_adaptive_high", "recall_budget_min", "recall_budget_max", "audit_log_enabled", "store_document_text", "enable_auto_consolidation", "consolidation_use_decision_model", "consolidation_max_memories_per_round", "consolidation_llm_parallelism", "recall_include_chunks", "recall_prefer_observations", "recall_max_tokens", "recall_chunks_max_tokens", "memory_defense"]
+    __properties: ClassVar[List[str]] = ["reflect_mission", "retain_mission", "retain_extraction_mode", "retain_custom_instructions", "retain_chunk_size", "retain_structured_chunk_size", "enable_observations", "observations_mission", "enable_text_search", "enable_temporal_retrieval", "enable_graph_retrieval", "enable_reranking", "reflect_use_decision_model", "mental_model_refresh_use_decision_model", "disposition_skepticism", "disposition_literalism", "disposition_empathy", "entity_labels", "entities_allow_free_form", "retain_default_strategy", "retain_strategies", "retain_chunk_batch_size", "retain_max_attachments_per_chunk", "mcp_enabled_tools", "consolidation_llm_batch_size", "consolidation_source_facts_max_tokens", "consolidation_source_facts_max_tokens_per_observation", "max_observations_per_scope", "observation_scope_limits", "consolidation_strategies", "reflect_source_facts_max_tokens", "knowledge_page_default_trigger", "reflect_default_options", "mental_model_min_refresh_interval_seconds", "llm_gemini_safety_settings", "recall_budget_function", "recall_budget_fixed_low", "recall_budget_fixed_mid", "recall_budget_fixed_high", "recall_budget_adaptive_low", "recall_budget_adaptive_mid", "recall_budget_adaptive_high", "recall_budget_min", "recall_budget_max", "audit_log_enabled", "store_document_text", "enable_auto_consolidation", "consolidation_use_decision_model", "consolidation_max_memories_per_round", "consolidation_llm_parallelism", "recall_include_chunks", "recall_prefer_observations", "recall_max_tokens", "recall_chunks_max_tokens", "adaptive_memory_mode", "adaptive_memory_score_alpha", "adaptive_memory_score_floor", "adaptive_memory_reinforcement_enabled", "adaptive_memory_base_stability_days", "adaptive_memory_max_stability_days", "adaptive_memory_default_view", "adaptive_memory_historical_cues", "context_admission_mode", "context_admission_threshold_auto", "context_admission_threshold_explicit", "context_admission_reference_bonus", "context_admission_candidates", "context_admission_max_memories", "context_admission_max_tokens", "context_admission_mmr_lambda", "context_admission_dup_similarity", "memory_defense"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -409,6 +426,91 @@ class BankTemplateConfig(BaseModel):
         if self.recall_chunks_max_tokens is None and "recall_chunks_max_tokens" in self.model_fields_set:
             _dict['recall_chunks_max_tokens'] = None
 
+        # set to None if adaptive_memory_mode (nullable) is None
+        # and model_fields_set contains the field
+        if self.adaptive_memory_mode is None and "adaptive_memory_mode" in self.model_fields_set:
+            _dict['adaptive_memory_mode'] = None
+
+        # set to None if adaptive_memory_score_alpha (nullable) is None
+        # and model_fields_set contains the field
+        if self.adaptive_memory_score_alpha is None and "adaptive_memory_score_alpha" in self.model_fields_set:
+            _dict['adaptive_memory_score_alpha'] = None
+
+        # set to None if adaptive_memory_score_floor (nullable) is None
+        # and model_fields_set contains the field
+        if self.adaptive_memory_score_floor is None and "adaptive_memory_score_floor" in self.model_fields_set:
+            _dict['adaptive_memory_score_floor'] = None
+
+        # set to None if adaptive_memory_reinforcement_enabled (nullable) is None
+        # and model_fields_set contains the field
+        if self.adaptive_memory_reinforcement_enabled is None and "adaptive_memory_reinforcement_enabled" in self.model_fields_set:
+            _dict['adaptive_memory_reinforcement_enabled'] = None
+
+        # set to None if adaptive_memory_base_stability_days (nullable) is None
+        # and model_fields_set contains the field
+        if self.adaptive_memory_base_stability_days is None and "adaptive_memory_base_stability_days" in self.model_fields_set:
+            _dict['adaptive_memory_base_stability_days'] = None
+
+        # set to None if adaptive_memory_max_stability_days (nullable) is None
+        # and model_fields_set contains the field
+        if self.adaptive_memory_max_stability_days is None and "adaptive_memory_max_stability_days" in self.model_fields_set:
+            _dict['adaptive_memory_max_stability_days'] = None
+
+        # set to None if adaptive_memory_default_view (nullable) is None
+        # and model_fields_set contains the field
+        if self.adaptive_memory_default_view is None and "adaptive_memory_default_view" in self.model_fields_set:
+            _dict['adaptive_memory_default_view'] = None
+
+        # set to None if adaptive_memory_historical_cues (nullable) is None
+        # and model_fields_set contains the field
+        if self.adaptive_memory_historical_cues is None and "adaptive_memory_historical_cues" in self.model_fields_set:
+            _dict['adaptive_memory_historical_cues'] = None
+
+        # set to None if context_admission_mode (nullable) is None
+        # and model_fields_set contains the field
+        if self.context_admission_mode is None and "context_admission_mode" in self.model_fields_set:
+            _dict['context_admission_mode'] = None
+
+        # set to None if context_admission_threshold_auto (nullable) is None
+        # and model_fields_set contains the field
+        if self.context_admission_threshold_auto is None and "context_admission_threshold_auto" in self.model_fields_set:
+            _dict['context_admission_threshold_auto'] = None
+
+        # set to None if context_admission_threshold_explicit (nullable) is None
+        # and model_fields_set contains the field
+        if self.context_admission_threshold_explicit is None and "context_admission_threshold_explicit" in self.model_fields_set:
+            _dict['context_admission_threshold_explicit'] = None
+
+        # set to None if context_admission_reference_bonus (nullable) is None
+        # and model_fields_set contains the field
+        if self.context_admission_reference_bonus is None and "context_admission_reference_bonus" in self.model_fields_set:
+            _dict['context_admission_reference_bonus'] = None
+
+        # set to None if context_admission_candidates (nullable) is None
+        # and model_fields_set contains the field
+        if self.context_admission_candidates is None and "context_admission_candidates" in self.model_fields_set:
+            _dict['context_admission_candidates'] = None
+
+        # set to None if context_admission_max_memories (nullable) is None
+        # and model_fields_set contains the field
+        if self.context_admission_max_memories is None and "context_admission_max_memories" in self.model_fields_set:
+            _dict['context_admission_max_memories'] = None
+
+        # set to None if context_admission_max_tokens (nullable) is None
+        # and model_fields_set contains the field
+        if self.context_admission_max_tokens is None and "context_admission_max_tokens" in self.model_fields_set:
+            _dict['context_admission_max_tokens'] = None
+
+        # set to None if context_admission_mmr_lambda (nullable) is None
+        # and model_fields_set contains the field
+        if self.context_admission_mmr_lambda is None and "context_admission_mmr_lambda" in self.model_fields_set:
+            _dict['context_admission_mmr_lambda'] = None
+
+        # set to None if context_admission_dup_similarity (nullable) is None
+        # and model_fields_set contains the field
+        if self.context_admission_dup_similarity is None and "context_admission_dup_similarity" in self.model_fields_set:
+            _dict['context_admission_dup_similarity'] = None
+
         # set to None if memory_defense (nullable) is None
         # and model_fields_set contains the field
         if self.memory_defense is None and "memory_defense" in self.model_fields_set:
@@ -480,6 +582,23 @@ class BankTemplateConfig(BaseModel):
             "recall_prefer_observations": obj.get("recall_prefer_observations"),
             "recall_max_tokens": obj.get("recall_max_tokens"),
             "recall_chunks_max_tokens": obj.get("recall_chunks_max_tokens"),
+            "adaptive_memory_mode": obj.get("adaptive_memory_mode"),
+            "adaptive_memory_score_alpha": obj.get("adaptive_memory_score_alpha"),
+            "adaptive_memory_score_floor": obj.get("adaptive_memory_score_floor"),
+            "adaptive_memory_reinforcement_enabled": obj.get("adaptive_memory_reinforcement_enabled"),
+            "adaptive_memory_base_stability_days": obj.get("adaptive_memory_base_stability_days"),
+            "adaptive_memory_max_stability_days": obj.get("adaptive_memory_max_stability_days"),
+            "adaptive_memory_default_view": obj.get("adaptive_memory_default_view"),
+            "adaptive_memory_historical_cues": obj.get("adaptive_memory_historical_cues"),
+            "context_admission_mode": obj.get("context_admission_mode"),
+            "context_admission_threshold_auto": obj.get("context_admission_threshold_auto"),
+            "context_admission_threshold_explicit": obj.get("context_admission_threshold_explicit"),
+            "context_admission_reference_bonus": obj.get("context_admission_reference_bonus"),
+            "context_admission_candidates": obj.get("context_admission_candidates"),
+            "context_admission_max_memories": obj.get("context_admission_max_memories"),
+            "context_admission_max_tokens": obj.get("context_admission_max_tokens"),
+            "context_admission_mmr_lambda": obj.get("context_admission_mmr_lambda"),
+            "context_admission_dup_similarity": obj.get("context_admission_dup_similarity"),
             "memory_defense": obj.get("memory_defense")
         })
         return _obj
