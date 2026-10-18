@@ -1525,14 +1525,14 @@ Every request is retried on its own when it is rate-limited (429) or fails trans
 
 | Provider | API | Default model | Default base URL |
 |----------|-----|---------------|------------------|
-| `typesafe` | [TypeSafe](https://typesafe.ai) System One (`/v1/systemone`) | `jev-1.13.0` | `https://api.typesafe.ai` |
+| `typesafe` | [TypeSafe](https://typesafe.ai) System One (`/v1/systemone`) | `jev-1.14.0` | `https://api.typesafe.ai` |
 | `cloudflare` | [Clef](https://blog.cloudflare.com/clef-decision-models) on Workers AI (System One body, `/@cf/cloudflare/<model>`) | `clef` (or `clef-flash`) | none: set `https://api.cloudflare.com/client/v4/accounts/<account_id>/ai/run`, or an AI Gateway `https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway>/workers-ai` |
 | `openai` | [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) (`/v1/decisions`, public beta) | `gpt-6-luna` | `https://api.openai.com` |
 
 The `typesafe` default is an explicit Jev release, not the `jev-latest` alias, so no decision
-changes when TypeSafe moves the alias to a new release. It is `jev-1.13.0`, the release the
-decision-model questions below were developed and measured on; the TypeSafe reranker, measured
-separately, defaults to `jev-1.14.0`. Set `HINDSIGHT_API_DECISION_MODEL_MODEL` to move it.
+changes when TypeSafe moves the alias to a new release. It is `jev-1.14.0`, the same release
+the TypeSafe reranker defaults to; the recall checks' questions were developed on `jev-1.13.0`
+and re-measured unchanged on `jev-1.14.0`. Set `HINDSIGHT_API_DECISION_MODEL_MODEL` to move it.
 
 **Per-operation overrides.** `HINDSIGHT_API_{RECALL,REFLECT,CONSOLIDATION,CONTEXT_ADMISSION,RECALL_CHECKS}_DECISION_MODEL_{PROVIDER,API_KEY,MODEL,BASE_URL}`
 replace the global value for that operation only. Key, model and URL fall back to the global

@@ -19,8 +19,8 @@ consolidation and reflect make for themselves, which would pay for a check whose
 ignore. They ask the ``recall_checks`` decision model (HINDSIGHT_API_DECISION_MODEL_*, with
 HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_* overrides), separate from the ``recall`` one so the
 checks can run beside the cross-encoder reranker, and only on the typesafe provider: the
-wordings and thresholds below were measured on TypeSafe's jev-1.13.0, the provider's default,
-and are not known to hold for another model.
+wordings and thresholds below were developed on TypeSafe's jev-1.13.0 and re-measured unchanged
+on jev-1.14.0, the provider's default; they are not known to hold for another model.
 """
 
 from __future__ import annotations

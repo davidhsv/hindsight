@@ -113,7 +113,7 @@ class TestResolve:
         checks = resolve_recall_checks({"recall_relevance_check": True, "recall_conditional_recency": True})
         assert checks is not None
         assert (checks.relevance, checks.conditional_recency, checks.injection_gate) == (True, True, False)
-        assert checks.model.model == "jev-1.13.0"
+        assert checks.model.model == "jev-1.14.0"
         assert recall_checks.get_config().decision_model_config("recall") is None
 
     def test_the_global_decision_model_reaches_the_checks(self, server_config):

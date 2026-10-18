@@ -375,7 +375,7 @@ def test_the_profiles_optional_recall_checks_start_and_keep_the_local_reranker(c
     assert checks is not None
     assert (checks.injection_gate, checks.conditional_recency, checks.relevance) == (True, True, True)
     setup = config.decision_model_config("recall_checks")
-    assert setup is not None and (setup.provider, setup.model) == ("typesafe", "jev-1.13.0")
+    assert setup is not None and (setup.provider, setup.model) == ("typesafe", "jev-1.14.0")
     assert config.reranker_provider == "local"
     assert [op for op in DECISION_MODEL_OPERATIONS if config.decision_model_config(op) is not None] == ["recall_checks"]
     # The rest of the profile resolves as it does without the optional lines.

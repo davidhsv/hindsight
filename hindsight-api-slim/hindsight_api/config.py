@@ -1766,12 +1766,12 @@ class _DecisionProviderDefaults:
 # typesafe and cloudflare speak the System One API; openai has its own Decisions API.
 #
 # typesafe is pinned to an explicit Jev release for the reason the reranker is (see
-# DEFAULT_RERANKER_TYPESAFE_MODEL), but to jev-1.13.0, not 1.14.0. 1.13.0 is what jev-latest
-# served when the pin was made, so triage and reflect keep the model they run on today; the
-# recall checks' wordings and thresholds were measured on it; and 1.14.0 has only been measured
-# to tie it on per-memory relevance. Move it together with a re-measurement of those questions.
+# DEFAULT_RERANKER_TYPESAFE_MODEL). jev-1.14.0 was re-measured on the recall checks with their
+# questions and thresholds unchanged (relevance flag, current-state routing, injection gate) and
+# was not worse than jev-1.13.0, where they were developed, on any of them; the differences were
+# within run-to-run noise. Consolidation triage and reflect were not re-measured on it.
 DECISION_MODEL_PROVIDER_DEFAULTS = {
-    "typesafe": _DecisionProviderDefaults(model="jev-1.13.0", base_url="https://api.typesafe.ai"),
+    "typesafe": _DecisionProviderDefaults(model="jev-1.14.0", base_url="https://api.typesafe.ai"),
     "cloudflare": _DecisionProviderDefaults(model="clef", base_url=None),
     "openai": _DecisionProviderDefaults(model="gpt-6-luna", base_url="https://api.openai.com"),
 }
@@ -1780,7 +1780,7 @@ DEFAULT_DECISION_MODEL_PROVIDER = "none"
 DEFAULT_DECISION_MODEL_TIMEOUT = 60.0
 DEFAULT_DECISION_MODEL_MAX_CONCURRENT = 24
 # Most tokens one request may carry, counted on the whole JSON body. It follows the context
-# window of the model the endpoint serves (32k for jev-1.13.0), less a margin: the endpoint
+# window of the model the endpoint serves (32k for Jev), less a margin: the endpoint
 # counted 14% more than we do on the same body (42.3k vs 37.3k, 95.2k vs 83.5k), so 26k
 # here is about 29.6k there. A request has to hold the state and at least one question,
 # hence the floor.

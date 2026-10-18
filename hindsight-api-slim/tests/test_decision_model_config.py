@@ -46,7 +46,7 @@ def test_the_typesafe_default_is_an_explicit_jev_release(monkeypatch):
     """Not an alias: jev-latest moves to each new release, and every decision would move with it."""
     config = _config(monkeypatch, _GLOBAL)
     setup = config.decision_model_config("reflect")
-    assert setup is not None and setup.model == "jev-1.13.0"
+    assert setup is not None and setup.model == "jev-1.14.0"
     assert re.fullmatch(r"jev-\d+\.\d+\.\d+", setup.model)
 
     overridden = _config(monkeypatch, {**_GLOBAL, "HINDSIGHT_API_DECISION_MODEL_MODEL": "jev-1.14.0"})
@@ -67,7 +67,7 @@ def test_recall_checks_can_run_beside_the_reranker(monkeypatch):
     )
     assert config.decision_model_config("recall") is None
     checks = config.decision_model_config("recall_checks")
-    assert checks is not None and (checks.api_key, checks.model) == ("checks-key", "jev-1.13.0")
+    assert checks is not None and (checks.api_key, checks.model) == ("checks-key", "jev-1.14.0")
 
 
 def test_global_setup_reaches_every_operation(monkeypatch):
@@ -76,7 +76,7 @@ def test_global_setup_reaches_every_operation(monkeypatch):
         assert config.decision_model_config(operation) == DecisionModelConfig(
             provider="typesafe",
             api_key="global-key",
-            model="jev-1.13.0",
+            model="jev-1.14.0",
             base_url="https://api.typesafe.ai",
             timeout=60.0,
             max_concurrent=24,
@@ -102,7 +102,7 @@ def test_operation_override_wins_and_falls_back_per_setting(monkeypatch):
     )
     recall = config.decision_model_config("recall")
     assert recall is not None
-    assert (recall.model, recall.api_key) == ("jev-1.13.0", "global-key")
+    assert (recall.model, recall.api_key) == ("jev-1.14.0", "global-key")
 
 
 def test_operation_can_opt_out(monkeypatch):

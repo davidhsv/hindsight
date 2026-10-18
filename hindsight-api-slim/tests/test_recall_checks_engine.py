@@ -25,7 +25,7 @@ class _DecisionModel:
     questions, and ``planted`` by memory text (a substring) for the gate."""
 
     max_request_tokens = 26_000
-    model = "jev-1.13.0"
+    model = "jev-1.14.0"
 
     def __init__(self) -> None:
         self.current_state = 0.9
