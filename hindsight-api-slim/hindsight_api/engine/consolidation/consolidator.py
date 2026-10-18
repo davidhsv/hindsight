@@ -1429,6 +1429,8 @@ async def _fetch_unconsolidated_rows(
             "observation_scopes": m.observation_scopes,
             # Read-time version: the write re-checks it (see _sources_changed_since_read).
             "updated_at": m.updated_at,
+            # The prompt shows only its scope keys (see _scope_label).
+            "metadata": m.metadata or {},
         }
         for m in ordered
     ]
@@ -3369,6 +3371,34 @@ async def _find_related_observations(
     return recall_result
 
 
+#: Retain-metadata keys that say *where* a fact holds rather than what it says. The same
+#: setting in two environments (reminders at 06:00 on staging, at 09:00 on dev) is two true
+#: facts; with no environment in the prompt the second reads as a state change and the model
+#: rewrites the first in place. Shown as each fact's ``scope``, which the SCOPES STAY APART
+#: processing rule keeps apart. Only these keys reach the prompt: the rest of a fact's metadata
+#: is mostly provenance (source, session, harness) that would spend tokens on every fact line
+#: and invite splits on what is not a scope.
+_SCOPE_METADATA_KEYS = ("environment", "service", "module")
+#: A scope value is an identifier; cap it so a pasted blob in metadata cannot bloat every line.
+_SCOPE_VALUE_MAX_CHARS = 120
+
+
+def _scope_label(metadata: dict[str, Any] | None) -> str | None:
+    """``key=value, ...`` over the fact's non-empty scope keys, or None when it names no scope.
+
+    Whitespace is collapsed so a value cannot break the one-fact-per-line input format.
+    """
+    if not metadata:
+        return None
+    parts: list[str] = []
+    for key in _SCOPE_METADATA_KEYS:
+        value = metadata.get(key)
+        words = str(value).split() if value is not None else []
+        if words:
+            parts.append(f"{key}={' '.join(words)[:_SCOPE_VALUE_MAX_CHARS]}")
+    return ", ".join(parts) or None
+
+
 def _build_observations_for_llm(
     observations: "list[MemoryFact]",
     source_facts: "dict[str, MemoryFact]",
@@ -3397,6 +3427,8 @@ def _build_observations_for_llm(
             sf_data: dict[str, Any] = {"text": sf.text}
             if sf.context:
                 sf_data["context"] = truncate_context_for_prompt(sf.context)
+            if scope := _scope_label(sf.metadata):
+                sf_data["scope"] = scope
             if sf.occurred_start:
                 sf_data["occurred_start"] = sf.occurred_start
             if sf.occurred_end:
@@ -3542,6 +3574,8 @@ async def _consolidate_batch_with_llm(
             temporal_parts.append(f"mentioned_at={m['mentioned_at']}")
         if temporal_parts:
             text += f" ({', '.join(temporal_parts)})"
+        if scope := _scope_label(m.get("metadata")):
+            text += f" [scope: {scope}]"
         return text
 
     facts_lines = "\n".join(_fact_line(m) for m in memories)
