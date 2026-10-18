@@ -9,6 +9,7 @@ wedge the bank.
 
 import dataclasses
 import math
+import os
 import uuid
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import pytest_asyncio
 from hindsight_api.api import create_app
 from hindsight_api.config import (
     ADAPTIVE_MEMORY_MODES,
+    DECISION_MODEL_OPERATIONS,
     DEFAULT_ADAPTIVE_MEMORY_SOURCE_WEIGHTS,
     DEFAULT_ADAPTIVE_MEMORY_TYPE_STABILITY,
     ConfigFieldAccessError,
@@ -29,6 +31,7 @@ from hindsight_api.config_resolver import ConfigResolver, _coerce_stored_bank_ov
 from hindsight_api.engine.adaptive.models import AdaptiveMode
 from hindsight_api.engine.adaptive.settings import AdaptiveSettings
 from hindsight_api.engine.context_admission import AdmissionMode, ContextAdmissionSettings, ScorerKind
+from hindsight_api.engine.search import recall_checks
 
 from .test_hierarchical_config import FakeBankConfigBackend
 
@@ -270,12 +273,34 @@ def test_max_stability_equal_to_base_is_allowed(clean_env):
 # --- The personal profile ----------------------------------------------------------
 
 
-def _personal_profile() -> dict[str, str]:
-    """The commented "Personal profile" block of the repo's env template, as env assignments."""
+def _env_template_block(header: str) -> dict[str, str]:
+    """The commented env template block that starts with ``header``, as env assignments."""
     template = (Path(__file__).resolve().parents[2] / ".env.example").read_text(encoding="utf-8")
-    block = template.split("\n# Personal profile:", 1)[1].split("\n\n", 1)[0]
+    block = template.split(f"\n{header}", 1)[1].split("\n\n", 1)[0]
     lines = [line.removeprefix("# ") for line in block.splitlines() if line.startswith("# HINDSIGHT_API_")]
     return dict(line.split("=", 1) for line in lines)
+
+
+def _personal_profile() -> dict[str, str]:
+    """The commented "Personal profile" block of the repo's env template, as env assignments."""
+    return _env_template_block("# Personal profile:")
+
+
+def _personal_profile_recall_checks() -> dict[str, str]:
+    """The optional recall-check lines that follow the profile block in the env template."""
+    return _env_template_block("# Personal profile, optional recall checks:")
+
+
+def _without_recall_check_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset what a developer's environment could add to the profile: any decision model, the
+    recall checks and the reranker provider."""
+    for name in list(os.environ):
+        if (
+            "DECISION_MODEL" in name
+            or name.startswith("HINDSIGHT_API_RECALL_")
+            or name == "HINDSIGHT_API_RERANKER_PROVIDER"
+        ):
+            monkeypatch.delenv(name, raising=False)
 
 
 def test_the_personal_profile_starts_and_resolves_as_documented(clean_env):
@@ -303,6 +328,59 @@ def test_the_personal_profile_starts_and_resolves_as_documented(clean_env):
     # Neither a bank nor a tenant can put retention back into ranking under the profile.
     raised = AdaptiveSettings.resolve({**resolved, "adaptive_memory_score_alpha": 0.5}, config, store_supports=True)
     assert raised.score_alpha == 0.0
+    admission = ContextAdmissionSettings.resolve(resolved, config)
+    assert (admission.mode, admission.scorer) == (AdmissionMode.OBSERVE, ScorerKind.DETERMINISTIC)
+
+
+def test_the_profile_alone_runs_no_recall_check(clean_env, monkeypatch):
+    _without_recall_check_env(clean_env)
+    for name, value in _personal_profile().items():
+        clean_env.setenv(name, value)
+    config = HindsightConfig.from_env()
+    config.validate()
+    resolved = {f.name: getattr(config, f.name) for f in dataclasses.fields(config)}
+    monkeypatch.setattr(recall_checks, "get_config", lambda: config)
+
+    assert (config.recall_injection_gate, config.recall_conditional_recency, config.recall_relevance_check) == (
+        False,
+        False,
+        False,
+    )
+    assert recall_checks.resolve_recall_checks(resolved) is None
+    assert config.decision_model_config("recall_checks") is None
+
+
+def test_the_profiles_optional_recall_checks_start_and_keep_the_local_reranker(clean_env, monkeypatch):
+    """The optional lines, applied as-is on top of the profile: all three checks run on Jev
+    through the recall-checks operation only, so recall keeps the local reranker and no other
+    operation gets a decision model."""
+    optional = _personal_profile_recall_checks()
+    assert optional == {
+        "HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_PROVIDER": "typesafe",
+        "HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_API_KEY": "your-typesafe-api-key",
+        "HINDSIGHT_API_RECALL_INJECTION_GATE": "true",
+        "HINDSIGHT_API_RECALL_CONDITIONAL_RECENCY": "true",
+        "HINDSIGHT_API_RECALL_RELEVANCE_CHECK": "true",
+    }
+    assert not set(optional) & set(_personal_profile())
+    _without_recall_check_env(clean_env)
+    for name, value in {**_personal_profile(), **optional}.items():
+        clean_env.setenv(name, value)
+    config = HindsightConfig.from_env()
+    config.validate()
+    resolved = {f.name: getattr(config, f.name) for f in dataclasses.fields(config)}
+    monkeypatch.setattr(recall_checks, "get_config", lambda: config)
+
+    checks = recall_checks.resolve_recall_checks(resolved)
+    assert checks is not None
+    assert (checks.injection_gate, checks.conditional_recency, checks.relevance) == (True, True, True)
+    setup = config.decision_model_config("recall_checks")
+    assert setup is not None and (setup.provider, setup.model) == ("typesafe", "jev-1.13.0")
+    assert config.reranker_provider == "local"
+    assert [op for op in DECISION_MODEL_OPERATIONS if config.decision_model_config(op) is not None] == ["recall_checks"]
+    # The rest of the profile resolves as it does without the optional lines.
+    adaptive = AdaptiveSettings.resolve(resolved, config, store_supports=True)
+    assert (adaptive.effective_mode, adaptive.score_alpha) == (AdaptiveMode.LIFECYCLE, 0.0)
     admission = ContextAdmissionSettings.resolve(resolved, config)
     assert (admission.mode, admission.scorer) == (AdmissionMode.OBSERVE, ScorerKind.DETERMINISTIC)
 

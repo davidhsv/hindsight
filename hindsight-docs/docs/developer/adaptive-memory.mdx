@@ -78,6 +78,26 @@ The same block is in `.env.example`, commented out. The first four settings are 
 
 Everything else stays at its default: archiving, pruning, recall reinforcement and the historical-cue detector are off, and a conflict stays `uncertain` until a later consolidation or an explicit `PATCH` settles it. The profile costs a larger consolidation prompt and schema, the claim and retention reads of every lifecycle recall, and the admission decisions of every external recall, which show most in tail latency under concurrent recalls.
 
+### Optional: recall checks
+
+Three [recall checks](./configuration#recall-checks) passed their benchmark bar and can be added to the profile, each on its own. They need a TypeSafe key, and they are the only part of the profile that sends anything to a decision model: the query for all three, and the recalled memories for the gate and the flag.
+
+```bash
+HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_PROVIDER=typesafe
+HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_API_KEY=your-typesafe-api-key
+HINDSIGHT_API_RECALL_INJECTION_GATE=true
+HINDSIGHT_API_RECALL_CONDITIONAL_RECENCY=true
+HINDSIGHT_API_RECALL_RELEVANCE_CHECK=true
+```
+
+The provider is set for the `recall_checks` operation only, not through `HINDSIGHT_API_DECISION_MODEL_PROVIDER`: the global setting would also replace recall's local reranker with the decision model and change consolidation and reflect. The model stays at the `typesafe` default, `jev-1.13.0`, the release the checks' questions and thresholds were measured on. The three check settings are hierarchical, so a bank can take them through the bank config API instead (`recall_injection_gate`, `recall_conditional_recency`, `recall_relevance_check`). The evidence for each:
+
+- **Poisoning guard** (`recall_injection_gate`). On jevmem's held-out set it withheld 40 of 42 planted instructions and none of its 42 legitimate rules, nor any of 519 ordinary memories (detection's 95% interval starts at 0.84). It changes what recall returns, and it fails closed: while TypeSafe does not answer, recall on that bank returns nothing.
+- **Conditional recency** (`recall_conditional_recency`). Applying the recency boost only to questions about the current or latest state raised LoCoMo temporal gold@5 from 0.916 to 0.947 (10 queries gained, none lost, exact McNemar p = 0.002) and left LongMemEval's knowledge-update latest@5 and earlier@5 and temporal-reasoning gold@5 unchanged; on the held-out half alone the gain (3 queries, none lost) is not significant. Every other question is ranked without the recency boost.
+- **Nothing-relevant flag** (`recall_relevance_check`). It sets the response's `nothing_relevant` and removes nothing. On held-out coding-agent queries it flagged 7 of 8 that needed no memory and 3 of 38 that did, and 4 of 38 when the same requests were sent again, so treat it as a hint.
+
+Each check adds TypeSafe requests to every REST and MCP recall on the bank: one for conditional recency, asked while retrieval runs; one for the flag; and one per ten screened memories (results and their source facts) for the gate. The gate and the flag run after retrieval, so their round trips add to recall latency.
+
 ## Event time vs memory time
 
 Five timestamps describe a memory, and they answer different questions. Mixing them up is the most common way to get history wrong.
