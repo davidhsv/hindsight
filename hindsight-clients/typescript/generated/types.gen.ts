@@ -607,6 +607,12 @@ export type BankTemplateConfig = {
    */
   recall_injection_gate?: boolean | null;
   /**
+   * Recall Jev Rerank
+   *
+   * Have the recall-checks decision model reorder the reranker's top 100 results, told the question date and each memory's date; its order is final for those 100
+   */
+  recall_jev_rerank?: boolean | null;
+  /**
    * Reflect Use Decision Model
    *
    * When the server has a decision model, reflect lets it prune evidence and decide when to stop

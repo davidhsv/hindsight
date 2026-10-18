@@ -34,6 +34,7 @@ type BankTemplateConfig struct {
 	RecallRelevanceCheck NullableBool `json:"recall_relevance_check,omitempty"`
 	RecallConditionalRecency NullableBool `json:"recall_conditional_recency,omitempty"`
 	RecallInjectionGate NullableBool `json:"recall_injection_gate,omitempty"`
+	RecallJevRerank NullableBool `json:"recall_jev_rerank,omitempty"`
 	ReflectUseDecisionModel NullableBool `json:"reflect_use_decision_model,omitempty"`
 	MentalModelRefreshUseDecisionModel NullableBool `json:"mental_model_refresh_use_decision_model,omitempty"`
 	DispositionSkepticism NullableInt32 `json:"disposition_skepticism,omitempty"`
@@ -741,6 +742,48 @@ func (o *BankTemplateConfig) SetRecallInjectionGateNil() {
 // UnsetRecallInjectionGate ensures that no value is present for RecallInjectionGate, not even an explicit nil
 func (o *BankTemplateConfig) UnsetRecallInjectionGate() {
 	o.RecallInjectionGate.Unset()
+}
+
+// GetRecallJevRerank returns the RecallJevRerank field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BankTemplateConfig) GetRecallJevRerank() bool {
+	if o == nil || IsNil(o.RecallJevRerank.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.RecallJevRerank.Get()
+}
+
+// GetRecallJevRerankOk returns a tuple with the RecallJevRerank field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BankTemplateConfig) GetRecallJevRerankOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.RecallJevRerank.Get(), o.RecallJevRerank.IsSet()
+}
+
+// HasRecallJevRerank returns a boolean if a field has been set.
+func (o *BankTemplateConfig) HasRecallJevRerank() bool {
+	if o != nil && o.RecallJevRerank.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRecallJevRerank gets a reference to the given NullableBool and assigns it to the RecallJevRerank field.
+func (o *BankTemplateConfig) SetRecallJevRerank(v bool) {
+	o.RecallJevRerank.Set(&v)
+}
+// SetRecallJevRerankNil sets the value for RecallJevRerank to be an explicit nil
+func (o *BankTemplateConfig) SetRecallJevRerankNil() {
+	o.RecallJevRerank.Set(nil)
+}
+
+// UnsetRecallJevRerank ensures that no value is present for RecallJevRerank, not even an explicit nil
+func (o *BankTemplateConfig) UnsetRecallJevRerank() {
+	o.RecallJevRerank.Unset()
 }
 
 // GetReflectUseDecisionModel returns the ReflectUseDecisionModel field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -3236,6 +3279,9 @@ func (o BankTemplateConfig) ToMap() (map[string]interface{}, error) {
 	}
 	if o.RecallInjectionGate.IsSet() {
 		toSerialize["recall_injection_gate"] = o.RecallInjectionGate.Get()
+	}
+	if o.RecallJevRerank.IsSet() {
+		toSerialize["recall_jev_rerank"] = o.RecallJevRerank.Get()
 	}
 	if o.ReflectUseDecisionModel.IsSet() {
 		toSerialize["reflect_use_decision_model"] = o.ReflectUseDecisionModel.Get()

@@ -80,7 +80,7 @@ Everything else stays at its default: archiving, pruning, recall reinforcement a
 
 ### Optional: recall checks
 
-Three [recall checks](./configuration#recall-checks) passed their benchmark bar and can be added to the profile, each on its own. They need a TypeSafe key, and they are the only part of the profile that sends anything to a decision model: the query for all three, and the recalled memories for the gate and the flag.
+Three [recall checks](./configuration#recall-checks) passed their benchmark bar and can be added to the profile, each on its own. A fourth, the Jev rerank, can be added as well for its retrieval gains, although it missed its bar on one endpoint (below). They need a TypeSafe key, and they are the only part of the profile that sends anything to a decision model: the query for all four, and the recalled memories for the gate, the flag and the rerank.
 
 ```bash
 HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_PROVIDER=typesafe
@@ -88,15 +88,17 @@ HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_API_KEY=your-typesafe-api-key
 HINDSIGHT_API_RECALL_INJECTION_GATE=true
 HINDSIGHT_API_RECALL_CONDITIONAL_RECENCY=true
 HINDSIGHT_API_RECALL_RELEVANCE_CHECK=true
+HINDSIGHT_API_RECALL_JEV_RERANK=true
 ```
 
-The provider is set for the `recall_checks` operation only, not through `HINDSIGHT_API_DECISION_MODEL_PROVIDER`: the global setting would also replace recall's local reranker with the decision model and change consolidation and reflect. The model stays at the `typesafe` default, `jev-1.14.0`; the checks' questions and thresholds were developed on `jev-1.13.0` and re-measured unchanged on `jev-1.14.0`, where none of the three got worse. The three check settings are hierarchical, so a bank can take them through the bank config API instead (`recall_injection_gate`, `recall_conditional_recency`, `recall_relevance_check`). The evidence for each:
+The provider is set for the `recall_checks` operation only, not through `HINDSIGHT_API_DECISION_MODEL_PROVIDER`: the global setting would also replace recall's local reranker with the decision model and change consolidation and reflect. The model stays at the `typesafe` default, `jev-1.14.0`; the checks' questions and thresholds were developed on `jev-1.13.0` and re-measured unchanged on `jev-1.14.0`, where none of the three got worse, and the rerank was measured on `jev-1.14.0`. The four check settings are hierarchical, so a bank can take them through the bank config API instead (`recall_injection_gate`, `recall_conditional_recency`, `recall_relevance_check`, `recall_jev_rerank`). The evidence for each:
 
 - **Poisoning guard** (`recall_injection_gate`). On jevmem's held-out set it withheld 40 of 42 planted instructions and none of its 42 legitimate rules, nor any of 519 ordinary memories (detection's 95% interval starts at 0.84). It changes what recall returns, and it fails closed: while TypeSafe does not answer, recall on that bank returns nothing.
 - **Conditional recency** (`recall_conditional_recency`). Applying the recency boost only to questions about the current or latest state raised LoCoMo temporal gold@5 from 0.916 to 0.947 (10 queries gained, none lost, exact McNemar p = 0.002) and left LongMemEval's knowledge-update latest@5 and earlier@5 and temporal-reasoning gold@5 unchanged; on the held-out half alone the gain (3 queries, none lost) is not significant. Every other question is ranked without the recency boost.
 - **Nothing-relevant flag** (`recall_relevance_check`). It sets the response's `nothing_relevant` and removes nothing. On held-out coding-agent queries it flagged 7 of 8 that needed no memory and 3 of 38 that did, and 4 of 38 when the same requests were sent again, so treat it as a hint.
+- **Jev rerank** (`recall_jev_rerank`). The local reranker's top 100 go to Jev in one request, with the date of the question and of each memory, and Jev's order replaces theirs; a failed request keeps the local order. On recorded LoCoMo and LongMemEval pools it put a gold memory in the top five for 0.961 of LoCoMo questions against 0.902 for the local order (114 gained, 23 lost, exact McNemar p < 0.001) and all of a temporal-reasoning question's evidence in the top five for 0.827 against 0.701 (18 gained, 2 lost). It missed its bar on knowledge updates: the latest value came first for 0.764 of those questions against 0.819 (8 gained, 12 lost, not significant), so where the newest value of a fact is what matters most, measure on your own bank before keeping it.
 
-Each check adds TypeSafe requests to every REST and MCP recall on the bank: one for conditional recency, asked while retrieval runs; one for the flag; and one per ten screened memories (results and their source facts) for the gate. The gate and the flag run after retrieval, so their round trips add to recall latency.
+Each check adds TypeSafe requests to every REST and MCP recall on the bank: one for conditional recency, asked while retrieval runs; one for the flag; one for the rerank, about 10,000 input tokens for 100 memories; and one per ten screened memories (results and their source facts) for the gate. The rerank, the gate and the flag run after retrieval, one after the other, so their round trips add to recall latency.
 
 ## Event time vs memory time
 

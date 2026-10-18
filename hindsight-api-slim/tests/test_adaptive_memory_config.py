@@ -341,19 +341,20 @@ def test_the_profile_alone_runs_no_recall_check(clean_env, monkeypatch):
     resolved = {f.name: getattr(config, f.name) for f in dataclasses.fields(config)}
     monkeypatch.setattr(recall_checks, "get_config", lambda: config)
 
-    assert (config.recall_injection_gate, config.recall_conditional_recency, config.recall_relevance_check) == (
-        False,
-        False,
-        False,
-    )
+    assert (
+        config.recall_injection_gate,
+        config.recall_conditional_recency,
+        config.recall_relevance_check,
+        config.recall_jev_rerank,
+    ) == (False, False, False, False)
     assert recall_checks.resolve_recall_checks(resolved) is None
     assert config.decision_model_config("recall_checks") is None
 
 
 def test_the_profiles_optional_recall_checks_start_and_keep_the_local_reranker(clean_env, monkeypatch):
-    """The optional lines, applied as-is on top of the profile: all three checks run on Jev
-    through the recall-checks operation only, so recall keeps the local reranker and no other
-    operation gets a decision model."""
+    """The optional lines, applied as-is on top of the profile: all four checks run on Jev
+    through the recall-checks operation only, so recall keeps the local reranker (the Jev rerank
+    reorders its top results) and no other operation gets a decision model."""
     optional = _personal_profile_recall_checks()
     assert optional == {
         "HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_PROVIDER": "typesafe",
@@ -361,6 +362,7 @@ def test_the_profiles_optional_recall_checks_start_and_keep_the_local_reranker(c
         "HINDSIGHT_API_RECALL_INJECTION_GATE": "true",
         "HINDSIGHT_API_RECALL_CONDITIONAL_RECENCY": "true",
         "HINDSIGHT_API_RECALL_RELEVANCE_CHECK": "true",
+        "HINDSIGHT_API_RECALL_JEV_RERANK": "true",
     }
     assert not set(optional) & set(_personal_profile())
     _without_recall_check_env(clean_env)
@@ -376,6 +378,7 @@ def test_the_profiles_optional_recall_checks_start_and_keep_the_local_reranker(c
     assert (checks.injection_gate, checks.conditional_recency, checks.relevance) == (True, True, True)
     setup = config.decision_model_config("recall_checks")
     assert setup is not None and (setup.provider, setup.model) == ("typesafe", "jev-1.14.0")
+    assert checks.jev_reranker is not None and checks.jev_reranker.model == "jev-1.14.0"
     assert config.reranker_provider == "local"
     assert [op for op in DECISION_MODEL_OPERATIONS if config.decision_model_config(op) is not None] == ["recall_checks"]
     # The rest of the profile resolves as it does without the optional lines.

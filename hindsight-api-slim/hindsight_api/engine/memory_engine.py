@@ -765,6 +765,7 @@ from .retain.attachment_content import (
 from .retain.fact_storage import _normalize_scopes
 from .retain.fold import FoldMemberRef
 from .retain.types import RetainBatchResult, RetainContentDict, merge_processed_content_tokens
+from .search.jev_rerank import jev_rerank, ranked_first
 from .search.lifecycle_filter import (
     NAMED_VIEWS as LIFECYCLE_NAMED_VIEWS,
 )
@@ -9243,8 +9244,8 @@ class MemoryEngine(MemoryEngineInterface):
                   higher; it does not exclude memories dated outside it, and it does
                   nothing when the bank has ``enable_temporal_retrieval`` off.
             recall_checks: Run the bank's recall checks (relevance flag, conditional recency,
-                  injection gate; see search/recall_checks.py). The HTTP and MCP recall pass
-                  True; the recalls consolidation and reflect make for themselves leave them off.
+                  injection gate, Jev rerank; see search/recall_checks.py). The HTTP and MCP recall
+                  pass True; the recalls consolidation and reflect make for themselves leave them off.
             lifecycle_view: Which claims a recall in a bank whose adaptive memory mode is
                   ``lifecycle`` shows: ``"current"`` (superseded and refuted memories are left
                   out), ``"historical"`` (superseded ones are shown, annotated; refuted and
@@ -9588,6 +9589,7 @@ class MemoryEngine(MemoryEngineInterface):
                             enable_temporal_retrieval=enable_temporal_retrieval,
                             enable_graph_retrieval=enable_graph_retrieval,
                             recency_route=recency_route,
+                            jev_reranker=checks.jev_reranker if checks is not None else None,
                             adaptive_settings=adaptive_settings,
                             lifecycle_view=lifecycle_view,
                             as_of=as_of,
@@ -10227,6 +10229,7 @@ class MemoryEngine(MemoryEngineInterface):
         enable_temporal_retrieval: bool = True,
         enable_graph_retrieval: bool = True,
         recency_route: "asyncio.Task[bool | None] | None" = None,
+        jev_reranker: TypeSafeCrossEncoder | None = None,
         adaptive_settings: AdaptiveSettings | None = None,
         lifecycle_view: str | None = None,
         as_of: datetime | None = None,
@@ -11159,6 +11162,36 @@ class MemoryEngine(MemoryEngineInterface):
                     f"  [4.9] min_scores(reranker={min_reranker}, final={min_final}): "
                     f"{before_min_score}->{len(scored_results)} results"
                 )
+
+            # Step 4.92: the Jev rerank (a recall check, see search/jev_rerank.py). After the floors,
+            # so the pool is the top of what survives them; before the trace and everything below,
+            # which then read the final order. Not for a reranker that already scored the pool by
+            # rank (typesafe, a decision model), nor for the rrf / interleave orders.
+            if (
+                jev_reranker is not None
+                and scored_results
+                and reranking == "cross_encoder"
+                and served_provider not in RANK_SCORE_PROVIDERS
+            ):
+                jev_start = time.perf_counter()
+                jev = await jev_rerank(jev_reranker, query, scored_results, _recall_scoring_now(question_date))
+                scored_results = jev.results
+                if jev.ranked_ids and adaptive is not None and adaptive.counterfactual is not None:
+                    # The counterfactual takes the same order, so adaptive memory still compares
+                    # like with like (exact while its factor leaves the top of the list as it is).
+                    adaptive.counterfactual = ranked_first(adaptive.counterfactual, jev.ranked_ids)
+                jev_seconds = time.perf_counter() - jev_start
+                log_buffer.append(
+                    f"  [4.92] Jev rerank: top {len(jev.ranked_ids)} reordered by {jev_reranker.model}"
+                    if jev.ranked_ids
+                    else f"  [4.92] Jev rerank: local order kept ({jev.error or 'nothing to order'})"
+                )
+                tracer.add_phase_metric(
+                    "jev_rerank",
+                    jev_seconds,
+                    {"model": jev_reranker.model, "reordered": len(jev.ranked_ids), "error": jev.error},
+                )
+                get_metrics_collector().record_recall_phase("jev_rerank", jev_seconds, diagnostic=True)
 
             # Add reranked results to tracer AFTER combined scoring (so normalized values are included)
             # `enable_trace`, NOT `if tracer`: see the retrieval-results guard above.

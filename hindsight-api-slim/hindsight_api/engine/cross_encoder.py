@@ -1241,10 +1241,18 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
                 await raise_for_status(response)
                 return await response.json(content_type=None)
 
-    async def _rank_once(self, query: str, docs: list[str], indices: list[int]) -> list[int]:
+    @staticmethod
+    def _rank_state(query: str, current_date: str | None) -> str:
+        """The rank question's state: the question, then the date it is asked when one is given."""
+        state = f"Question: {query}"
+        return f"{state}\nCurrent date: {current_date}" if current_date else state
+
+    async def _rank_once(
+        self, query: str, docs: list[str], indices: list[int], current_date: str | None = None
+    ) -> list[int]:
         """Rank one group of candidates, returning their indices best first."""
         body = {
-            "state": f"Question: {query}",
+            "state": self._rank_state(query, current_date),
             "model": self.model,
             "questions": {
                 "rank": {
@@ -1261,7 +1269,9 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
         by_probability = sorted(range(len(indices)), key=lambda position: -float(probabilities[f"c{position}"]))
         return [indices[position] for position in by_probability]
 
-    async def _rank(self, query: str, docs: list[str], indices: list[int]) -> list[int]:
+    async def _rank(
+        self, query: str, docs: list[str], indices: list[int], current_date: str | None = None
+    ) -> list[int]:
         """Rank a whole pool best first, in rounds when it exceeds option or token limits.
 
         Each round's probabilities are normalised within its own call, so the winners
@@ -1274,7 +1284,7 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
             return []
 
         # Available token budget for candidate options in one choice question.
-        state_tokens = count_tokens(f"Question: {query}")
+        state_tokens = count_tokens(self._rank_state(query, current_date))
         # +30: cushion for the question's JSON framing (type, keys) around the instructions.
         instr_tokens = count_tokens(f"{_RANK_INSTRUCTIONS_PREFIX}{query}") + 30
         net_budget = max(50, self.MAX_QUESTION_TOKENS - state_tokens - instr_tokens)
@@ -1309,7 +1319,7 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
 
         # Fast path: all candidates fit into a single group.
         if len(groups) == 1:
-            return await self._rank_once(query, effective_docs, groups[0])
+            return await self._rank_once(query, effective_docs, groups[0], current_date)
 
         # Groups with >= 2 candidates are ranked via Jev Choice questions in parallel.
         # Single-candidate groups skip the preliminary round: a 1-candidate Choice
@@ -1318,7 +1328,7 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
         ranked_groups: list[list[int]] = [list(g) for g in groups]
         if multi_indices:
             ranked_multi = await asyncio.gather(
-                *(self._rank_once(query, effective_docs, groups[i]) for i in multi_indices)
+                *(self._rank_once(query, effective_docs, groups[i], current_date) for i in multi_indices)
             )
             for i, r in zip(multi_indices, ranked_multi):
                 ranked_groups[i] = r
@@ -1343,7 +1353,7 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
                 if doc_tokens[idx] > cap:
                     effective_docs[idx] = truncate_to_tokens(effective_docs[idx], cap).text
 
-        ranked_finalists = await self._rank_once(query, effective_docs, finalists)
+        ranked_finalists = await self._rank_once(query, effective_docs, finalists, current_date)
         return ranked_finalists + rest
 
     # Ordered verdicts for the reflect sufficiency question; only the last one ends
@@ -1434,18 +1444,42 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
         depth = self.CUT_DEPTHS[min(len(self.CUT_DEPTHS) - 1, max(0, level))]
         return len(shortlist) if depth is None else min(depth, len(shortlist))
 
+    def _capped_query(self, query: str) -> str:
+        """``query`` within the defensive ceiling every rank and cut question shares.
+
+        The query appears in both the state and the instructions, so it is bounded once and the
+        same bounded text goes to the rank and the cut, preventing context overflow in the cut
+        and any drift between the two questions.
+        """
+        max_allowed_query = max(50, (self.MAX_QUESTION_TOKENS - 200) // 2)
+        effective_query_cap = min(_MAX_QUERY_TOKENS, max_allowed_query)
+        if count_tokens(query) > effective_query_cap:
+            return truncate_to_tokens(query, effective_query_cap).text
+        return query
+
+    async def rank(self, query: str, docs: list[str], *, current_date: str | None = None) -> list[int]:
+        """Positions of ``docs`` best first: the rank question alone, never the cut.
+
+        ``current_date`` (``YYYY-MM-DD``) adds the line ``Current date: <date>`` to the question's
+        state, so the model can weigh how recent each candidate is against when the question is
+        asked; the candidates carry their own dates in their text. Retried like :meth:`predict`.
+        """
+        query = self._capped_query(query)
+        indices = list(range(len(docs)))
+        if self.retry_policy is None:
+            return await self._rank(query, list(docs), indices, current_date)
+        return await acall_with_retry(
+            lambda: self._rank(query, list(docs), indices, current_date),
+            policy=self.retry_policy,
+            budget=self.retry_policy.new_budget(),
+            provider=self.provider_name,
+        )
+
     async def _rank_group(self, query: str, docs: list[str], indices: list[int], scores: list[float]) -> None:
         if not indices:
             return
 
-        # Query appears in both State and instructions across rank and cut.
-        # Defensively bound query tokens so that _rank and _cut share the identical
-        # bounded query, preventing context overflow in _cut and eliminating semantic drift.
-        max_allowed_query = max(50, (self.MAX_QUESTION_TOKENS - 200) // 2)
-        effective_query_cap = min(_MAX_QUERY_TOKENS, max_allowed_query)
-        if count_tokens(query) > effective_query_cap:
-            query = truncate_to_tokens(query, effective_query_cap).text
-
+        query = self._capped_query(query)
         order = await self._rank(query, docs, indices)
         keep = await self._cut(query, docs, order) if self.prunes_candidates else len(order)
         keep = max(keep, min(self.MIN_KEEP, len(order)))

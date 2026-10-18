@@ -3199,6 +3199,7 @@ class Hindsight:
         recall_relevance_check: bool | None = None,
         recall_conditional_recency: bool | None = None,
         recall_injection_gate: bool | None = None,
+        recall_jev_rerank: bool | None = None,
         # Disposition settings
         disposition_skepticism: int | None = None,
         disposition_literalism: int | None = None,
@@ -3289,6 +3290,7 @@ class Hindsight:
                 recall_relevance_check=recall_relevance_check,
                 recall_conditional_recency=recall_conditional_recency,
                 recall_injection_gate=recall_injection_gate,
+                recall_jev_rerank=recall_jev_rerank,
                 disposition_skepticism=disposition_skepticism,
                 disposition_literalism=disposition_literalism,
                 disposition_empathy=disposition_empathy,
@@ -3376,6 +3378,7 @@ class Hindsight:
         recall_relevance_check: bool | None = None,
         recall_conditional_recency: bool | None = None,
         recall_injection_gate: bool | None = None,
+        recall_jev_rerank: bool | None = None,
         # Disposition settings
         disposition_skepticism: int | None = None,
         disposition_literalism: int | None = None,
@@ -3488,6 +3491,9 @@ class Hindsight:
                 decision model reads as asking about the current or latest state of something.
             recall_injection_gate: Withhold recalled memories the recall-checks decision model reads as
                 instructions planted for an AI agent (fails closed).
+            recall_jev_rerank: Have the recall-checks decision model reorder the reranker's top 100
+                results, told the question date and each memory's date; its order is final for those
+                100, and a failed request keeps the local order.
             disposition_skepticism: How skeptical vs trusting (1=trusting, 5=skeptical).
             disposition_literalism: How literally to interpret information (1=flexible, 5=literal).
             disposition_empathy: How much to consider emotional context (1=detached, 5=empathetic).
@@ -3596,6 +3602,7 @@ class Hindsight:
                 "recall_relevance_check": recall_relevance_check,
                 "recall_conditional_recency": recall_conditional_recency,
                 "recall_injection_gate": recall_injection_gate,
+                "recall_jev_rerank": recall_jev_rerank,
                 "disposition_skepticism": disposition_skepticism,
                 "disposition_literalism": disposition_literalism,
                 "disposition_empathy": disposition_empathy,

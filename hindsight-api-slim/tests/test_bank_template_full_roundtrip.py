@@ -74,6 +74,7 @@ _SAMPLE_VALUES: dict[str, Any] = {
     "recall_relevance_check": True,
     "recall_conditional_recency": True,
     "recall_injection_gate": True,
+    "recall_jev_rerank": True,
     "reflect_use_decision_model": False,
     "mental_model_refresh_use_decision_model": False,
     "disposition_skepticism": 4,

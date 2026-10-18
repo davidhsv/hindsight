@@ -1090,6 +1090,7 @@ ENV_ENABLE_RERANKING = "HINDSIGHT_API_ENABLE_RERANKING"
 ENV_RECALL_RELEVANCE_CHECK = "HINDSIGHT_API_RECALL_RELEVANCE_CHECK"
 ENV_RECALL_CONDITIONAL_RECENCY = "HINDSIGHT_API_RECALL_CONDITIONAL_RECENCY"
 ENV_RECALL_INJECTION_GATE = "HINDSIGHT_API_RECALL_INJECTION_GATE"
+ENV_RECALL_JEV_RERANK = "HINDSIGHT_API_RECALL_JEV_RERANK"
 
 # Recall budget mapping (budget enum -> thinking_budget integer)
 ENV_RECALL_BUDGET_FUNCTION = "HINDSIGHT_API_RECALL_BUDGET_FUNCTION"
@@ -2316,6 +2317,9 @@ DEFAULT_RECALL_RELEVANCE_CHECK = False
 DEFAULT_RECALL_CONDITIONAL_RECENCY = False
 # Withhold recalled memories the decision model reads as instructions planted for an AI agent.
 DEFAULT_RECALL_INJECTION_GATE = False
+# Have the decision model reorder the reranker's top 100, told the question date and each
+# memory's date; its order is final for those 100 (see engine/search/jev_rerank.py).
+DEFAULT_RECALL_JEV_RERANK = False
 
 # Recall budget mapping
 # "fixed": thinking_budget = recall_budget_fixed_<level> (preserves legacy behavior)
@@ -4139,6 +4143,7 @@ class HindsightConfig:
     recall_relevance_check: bool
     recall_conditional_recency: bool
     recall_injection_gate: bool
+    recall_jev_rerank: bool
 
     # Default for REST/MCP recall's prefer_observations when the request omits it
     recall_prefer_observations: bool
@@ -4511,6 +4516,7 @@ class HindsightConfig:
         "recall_relevance_check",
         "recall_conditional_recency",
         "recall_injection_gate",
+        "recall_jev_rerank",
         # Consolidation settings
         "enable_observations",
         "enable_auto_consolidation",
@@ -6310,6 +6316,8 @@ class HindsightConfig:
             ).lower()
             in ("true", "1", "yes"),
             recall_injection_gate=os.getenv(ENV_RECALL_INJECTION_GATE, str(DEFAULT_RECALL_INJECTION_GATE)).lower()
+            in ("true", "1", "yes"),
+            recall_jev_rerank=os.getenv(ENV_RECALL_JEV_RERANK, str(DEFAULT_RECALL_JEV_RERANK)).lower()
             in ("true", "1", "yes"),
             recall_prefer_observations=os.getenv(
                 ENV_RECALL_PREFER_OBSERVATIONS, str(DEFAULT_RECALL_PREFER_OBSERVATIONS)

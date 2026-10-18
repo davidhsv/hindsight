@@ -522,21 +522,30 @@ class RecallChecksStub:
 
     ``current_state`` answers conditional recency ("is the query about the current state?"),
     ``any_helps`` the relevance check ("does any listed memory help?"); the injection gate
-    scores a memory 0.9 when its text contains one of ``planted``, else 0.01. The defaults let
-    every check pass through: recency kept, something relevant, nothing planted. ``asked``
-    records which check each request was, in arrival order.
+    scores a memory 0.9 when its text contains one of ``planted``, else 0.01. The Jev rerank's
+    Choice puts the options containing ``jev_first`` first and keeps the rest in the order they
+    were sent; ``jev_fails`` answers it with a 401 instead, and ``jev_requests`` keeps each one's
+    state and options. The defaults let every check pass through: recency kept, something
+    relevant, nothing planted, the order unchanged. ``asked`` records which check each request
+    was, in arrival order.
     """
 
     def __init__(self) -> None:
         self.current_state = 0.9
         self.any_helps = 0.95
         self.planted: set[str] = set()
+        self.jev_first: str | None = None
+        self.jev_fails = False
+        self.jev_requests: list[dict] = []
         self.asked: list[str] = []
 
     def reset(self) -> None:
         self.current_state = 0.9
         self.any_helps = 0.95
         self.planted.clear()
+        self.jev_first = None
+        self.jev_fails = False
+        self.jev_requests.clear()
         self.asked.clear()
 
 

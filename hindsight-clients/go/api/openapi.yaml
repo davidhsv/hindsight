@@ -6503,6 +6503,9 @@ components:
         recall_injection_gate:
           nullable: true
           type: boolean
+        recall_jev_rerank:
+          nullable: true
+          type: boolean
         reflect_use_decision_model:
           nullable: true
           type: boolean

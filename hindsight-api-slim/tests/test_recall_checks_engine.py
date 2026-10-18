@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 import pytest
 
 from hindsight_api import config as config_module
+from hindsight_api.engine.cross_encoder import TypeSafeCrossEncoder
 from hindsight_api.engine.decision_model import DecisionAnswer, DecisionResponse
 from hindsight_api.engine.memory_engine import Budget
 from hindsight_api.engine.search import recall_checks
@@ -62,6 +63,31 @@ def decision_model(monkeypatch) -> _DecisionModel:
     fake = _DecisionModel()
     monkeypatch.setattr(recall_checks, "get_config", lambda: server)
     monkeypatch.setattr(recall_checks, "_client", lambda setup: fake)
+    return fake
+
+
+class _JevRanker(TypeSafeCrossEncoder):
+    """The Jev rerank's client with its one exit faked: it likes each option more than the one
+    before, so its answer reverses the order it was sent; ``fail`` makes it raise instead."""
+
+    def __init__(self) -> None:
+        super().__init__(api_key="k")
+        self.fail = False
+        self.bodies: list[dict] = []
+
+    async def _ask(self, body: dict) -> dict:
+        self.bodies.append(body)
+        if self.fail:
+            raise RuntimeError("TypeSafe is down")
+        criteria = body["questions"]["rank"]["criteria"]
+        return {"answers": {"rank": {"probabilities": {key: float(i + 1) for i, key in enumerate(criteria)}}}}
+
+
+@pytest.fixture
+def jev(monkeypatch, decision_model) -> _JevRanker:
+    """The rank client the Jev rerank asks, built from the same recall-checks setup."""
+    fake = _JevRanker()
+    monkeypatch.setattr(recall_checks, "_reranker", lambda setup: fake)
     return fake
 
 
@@ -170,5 +196,64 @@ async def test_conditional_recency_scores_without_recency_unless_the_query_is_ab
         assert scored and all(s.final == pytest.approx(s.reranker) for s in scored)
         boosted = [f.scores for f in with_recency.results if f.scores and f.scores.reranker]
         assert boosted and all(s.final == pytest.approx(s.reranker * 1.1) for s in boosted)
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_the_jev_rerank_orders_only_a_recall_that_answers_a_caller(memory, request_context, jev):
+    bank_id = "test-recall-checks-jev-rerank"
+    try:
+        await _bank(memory, request_context, bank_id, {"recall_jev_rerank": True})
+
+        local = await _recall(memory, request_context, bank_id)
+        assert jev.bodies == []
+
+        reranked = await _recall(memory, request_context, bank_id, recall_checks=True)
+        assert len(jev.bodies) == 1
+        body = jev.bodies[0]
+        assert body["state"] == "Question: What does Alice work on?\nCurrent date: 2026-10-01"
+        options = list(body["questions"]["rank"]["criteria"].values())
+        local_ids = [fact.id for fact in local.results]
+        assert len(options) == len(local_ids) >= 2
+        assert all(option.startswith("[Memory date: ") for option in options)
+        # The fake reverses what it is sent, and its order is final: no boost re-sorts it.
+        assert [fact.id for fact in reranked.results] == local_ids[::-1]
+        finals = [fact.scores.final for fact in reranked.results if fact.scores]
+        assert finals == sorted(finals, reverse=True)
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_jev_rerank_keeps_the_local_order(memory, request_context, jev):
+    bank_id = "test-recall-checks-jev-rerank-down"
+    try:
+        await _bank(memory, request_context, bank_id, {"recall_jev_rerank": True})
+        local = await _recall(memory, request_context, bank_id)
+
+        jev.fail = True
+        answered = await _recall(memory, request_context, bank_id, recall_checks=True)
+
+        assert len(jev.bodies) == 1
+        assert [fact.id for fact in answered.results] == [fact.id for fact in local.results]
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_adaptive_memory_replays_its_counterfactual_in_the_jev_order(memory, request_context, jev):
+    """At alpha 0 the factor moves nothing, so the factor-free counterfactual must come out as the
+    recall did: in Jev's order too, not the local one."""
+    bank_id = "test-recall-checks-jev-rerank-adaptive"
+    try:
+        await _bank(memory, request_context, bank_id, {"recall_jev_rerank": True, "adaptive_memory_mode": "rank"})
+        local = await _recall(memory, request_context, bank_id)
+
+        reranked = await _recall(memory, request_context, bank_id, recall_checks=True, enable_trace=True)
+
+        assert [fact.id for fact in reranked.results] == [fact.id for fact in local.results][::-1]
+        adaptive = reranked.trace["adaptive"]
+        assert (adaptive["mode"], adaptive["scored"], adaptive["rerank_changed"]) == ("rank", True, False)
     finally:
         await memory.delete_bank(bank_id, request_context=request_context)

@@ -154,6 +154,7 @@ async def test_hierarchical_fields_categorization():
     assert "recall_relevance_check" in configurable
     assert "recall_conditional_recency" in configurable
     assert "recall_injection_gate" in configurable
+    assert "recall_jev_rerank" in configurable
     assert "recall_prefer_observations" in configurable
     assert "mental_model_min_refresh_interval_seconds" in configurable
     assert "knowledge_page_default_trigger" in configurable
@@ -171,7 +172,7 @@ async def test_hierarchical_fields_categorization():
     assert "context_admission_weights" in static
 
     # Verify count is correct
-    assert len(configurable) == 75
+    assert len(configurable) == 76
 
     # Verify credential fields (NEVER exposed)
     assert "llm_api_key" in credentials

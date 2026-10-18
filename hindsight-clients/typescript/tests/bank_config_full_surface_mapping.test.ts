@@ -179,6 +179,7 @@ describe("full bank config surface mapping", () => {
       recallRelevanceCheck: true,
       recallConditionalRecency: false,
       recallInjectionGate: true,
+      recallJevRerank: true,
     });
 
     const body = mockedUpdateConfig.mock.calls[0][0].body as any;
@@ -186,6 +187,7 @@ describe("full bank config surface mapping", () => {
       recall_relevance_check: true,
       recall_conditional_recency: false,
       recall_injection_gate: true,
+      recall_jev_rerank: true,
     });
   });
 

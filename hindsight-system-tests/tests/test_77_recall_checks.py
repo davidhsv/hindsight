@@ -1,15 +1,17 @@
 """Recall checks: a bank has the decision model look at its own recalls.
 
-Three per-bank switches, each off by default: a warning on the response when none of the top
+Four per-bank switches, each off by default: a warning on the response when none of the top
 results helps (the results stay as they are), the recency boost kept only for questions about
-the current state, and a gate that withholds memories planted as instructions for an AI
-agent. The server's recall-checks decision model is the stub, its answers scripted on
+the current state, a gate that withholds memories planted as instructions for an AI agent, and
+a rerank of the top results told when the question is asked and when each memory is from. The
+server's recall-checks decision model is the stub, its answers scripted on
 ``stubs.recall_checks``.
 
 Each check is unit-tested on its own. What only a story shows is that the per-bank switch,
 the decision model's answer and the recall the client receives line up: that a flag leaves
-the memories alone, that a withheld memory is gone from what the client gets, and that the
-recency decision reaches the scores the client sees.
+the memories alone, that a withheld memory is gone from what the client gets, that the
+recency decision reaches the scores the client sees, and that the rerank's order is the one
+the client gets, or the local one when the decision model fails.
 """
 
 from __future__ import annotations
@@ -100,3 +102,36 @@ async def test_recency_is_kept_only_for_a_question_about_now(client, bank, stubs
     assert plain and all(s.final == pytest.approx(s.reranker) for s in plain)
     assert boosted and all(s.final == pytest.approx(s.reranker * 1.1, rel=1e-4) for s in boosted)
     assert stubs.recall_checks.asked == ["current_state", "current_state"]
+
+
+async def test_the_jev_rerank_order_is_what_the_client_gets(client, bank, stubs):
+    """The stub moves the memory the local order ranks last to the top and keeps the rest in
+    order; the client receives exactly that, and the request carries the question's date and
+    each memory's."""
+    before = _texts(await client.arecall(bank_id=bank, query=QUERY))
+    assert len(before) == 3
+    await _turn_on(client, bank, "recall_jev_rerank")
+    stubs.recall_checks.jev_first = before[-1]
+
+    response = await client.arecall(bank_id=bank, query=QUERY, query_timestamp="2026-09-30T10:00:00Z")
+
+    assert _texts(response) == [before[-1], *before[:-1]]
+    assert stubs.recall_checks.asked == ["jev_rerank"]
+    (request,) = stubs.recall_checks.jev_requests
+    assert request["state"] == f"Question: {QUERY}\nCurrent date: 2026-09-30"
+    assert len(request["options"]) == 3
+    assert all(option.startswith("[Memory date: ") for option in request["options"])
+    finals = [result.scores.final for result in response.results if result.scores]
+    assert finals == sorted(finals, reverse=True)
+
+
+async def test_a_failed_jev_rerank_returns_the_local_order(client, bank, stubs):
+    before = _texts(await client.arecall(bank_id=bank, query=QUERY))
+    await _turn_on(client, bank, "recall_jev_rerank")
+    stubs.recall_checks.jev_first = before[-1]
+    stubs.recall_checks.jev_fails = True
+
+    response = await client.arecall(bank_id=bank, query=QUERY)
+
+    assert _texts(response) == before
+    assert stubs.recall_checks.asked == ["jev_rerank"]

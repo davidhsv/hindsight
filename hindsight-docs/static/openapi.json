@@ -9424,6 +9424,18 @@
             "title": "Recall Injection Gate",
             "description": "Withhold recalled memories the recall-checks decision model reads as instructions planted for an AI agent"
           },
+          "recall_jev_rerank": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recall Jev Rerank",
+            "description": "Have the recall-checks decision model reorder the reranker's top 100 results, told the question date and each memory's date; its order is final for those 100"
+          },
           "reflect_use_decision_model": {
             "anyOf": [
               {

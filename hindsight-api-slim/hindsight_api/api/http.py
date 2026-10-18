@@ -4237,6 +4237,11 @@ class BankTemplateConfig(BaseModel):
         description="Withhold recalled memories the recall-checks decision model reads as instructions planted "
         "for an AI agent",
     )
+    recall_jev_rerank: bool | None = Field(
+        default=None,
+        description="Have the recall-checks decision model reorder the reranker's top 100 results, told the "
+        "question date and each memory's date; its order is final for those 100",
+    )
     reflect_use_decision_model: bool | None = Field(
         default=None,
         description="When the server has a decision model, reflect lets it prune evidence and decide when to stop",

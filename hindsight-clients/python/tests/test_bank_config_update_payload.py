@@ -389,6 +389,7 @@ def test_update_bank_config_forwards_the_recall_check_settings(monkeypatch):
         "recall_relevance_check": True,
         "recall_conditional_recency": False,
         "recall_injection_gate": True,
+        "recall_jev_rerank": True,
     }
     client = Hindsight(base_url="http://example.invalid")
     client.update_bank_config("test-bank", **settings)

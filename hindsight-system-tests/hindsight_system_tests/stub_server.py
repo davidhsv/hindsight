@@ -240,6 +240,10 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
                 answers[question_id] = {"type": "choice", "choice": pick, "probabilities": probabilities}
             return JSONResponse({"model": "stub", "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 1}})
 
+        jev_rerank = _jev_rerank_response(stubs, state, body)
+        if jev_rerank is not None:
+            return jev_rerank
+
         checks = _recall_check_answers(stubs, state, body["questions"])
         if checks is not None:
             return JSONResponse(
@@ -293,6 +297,35 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
         return JSONResponse({"id": "rerank-stub", "results": results})
 
     return app
+
+
+def _jev_rerank_response(stubs: Stubs, state: object, body: dict) -> JSONResponse | None:
+    """The answer to the Jev rerank's Choice, or None when the request is not one.
+
+    Told apart from the typesafe reranker's own rank question by the date line its state ends
+    with (see hindsight_api/engine/search/jev_rerank.py).
+    """
+    questions = body["questions"]
+    if not (set(questions) == {"rank"} and isinstance(state, str) and "\nCurrent date: " in state):
+        return None
+    checks = stubs.recall_checks
+    checks.asked.append("jev_rerank")
+    options = questions["rank"]["criteria"]
+    checks.jev_requests.append({"state": state, "options": list(options.values())})
+    if checks.jev_fails:
+        return _provider_error("invalid API key", code="unauthorized", status=401)
+    n = len(options)
+    scores = {
+        key: (1.0 if checks.jev_first and checks.jev_first in text else 0.0) + (n - position) * 1e-3
+        for position, (key, text) in enumerate(options.items())
+    }
+    total = sum(scores.values())
+    probabilities = {key: value / total for key, value in scores.items()}
+    best = max(probabilities, key=lambda key: probabilities[key])
+    answer = {"type": "choice", "choice": best, "probabilities": probabilities, "confidence": probabilities[best]}
+    return JSONResponse(
+        {"model": body.get("model", "stub"), "answers": {"rank": answer}, "usage": {"input_tokens": 1, "output_tokens": 1}}
+    )
 
 
 def _recall_check_answers(stubs: Stubs, state: object, questions: dict) -> dict | None:

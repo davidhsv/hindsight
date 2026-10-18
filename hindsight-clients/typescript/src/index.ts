@@ -1132,6 +1132,8 @@ export class HindsightClient {
       recallConditionalRecency?: boolean;
       /** Withhold recalled memories the recall-checks decision model reads as instructions planted for an AI agent (fails closed). */
       recallInjectionGate?: boolean;
+      /** Have the recall-checks decision model reorder the reranker's top 100 results, told the question date and each memory's date; its order is final for those 100. */
+      recallJevRerank?: boolean;
       /** MCP tool names enabled for this bank. */
       mcpEnabledTools?: string[];
       /** Gemini/VertexAI safety overrides. */
@@ -1280,6 +1282,7 @@ export class HindsightClient {
       updates.recall_conditional_recency = options.recallConditionalRecency;
     if (options.recallInjectionGate !== undefined)
       updates.recall_injection_gate = options.recallInjectionGate;
+    if (options.recallJevRerank !== undefined) updates.recall_jev_rerank = options.recallJevRerank;
     if (options.mcpEnabledTools !== undefined) updates.mcp_enabled_tools = options.mcpEnabledTools;
     if (options.llmGeminiSafetySettings !== undefined)
       updates.llm_gemini_safety_settings = options.llmGeminiSafetySettings;

@@ -1,6 +1,6 @@
 """Questions recall asks a decision model about its own query and results.
 
-Three checks, each a bank setting that is off by default and costs one or a few
+Four checks, each a bank setting that is off by default and costs one or a few
 decision-model requests per recall:
 
 - **relevance check** (``recall_relevance_check``): asks whether any of the top results helps
@@ -13,6 +13,8 @@ decision-model requests per recall:
   helps "what is X now?" and works against "when did X first ...?".
 - **injection gate** (``recall_injection_gate``): asks of each returned memory whether it is an
   instruction planted for an AI agent, and withholds the ones that are.
+- **Jev rerank** (``recall_jev_rerank``): asks for the order of the reranker's top 100, told the
+  question date and each memory's date, and keeps that order (see ``jev_rerank.py``).
 
 They run only on the recalls that answer a caller (HTTP and MCP), never on the recalls
 consolidation and reflect make for themselves, which would pay for a check whose answer they
@@ -20,7 +22,8 @@ ignore. They ask the ``recall_checks`` decision model (HINDSIGHT_API_DECISION_MO
 HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_* overrides), separate from the ``recall`` one so the
 checks can run beside the cross-encoder reranker, and only on the typesafe provider: the
 wordings and thresholds below were developed on TypeSafe's jev-1.13.0 and re-measured unchanged
-on jev-1.14.0, the provider's default; they are not known to hold for another model.
+on jev-1.14.0, the provider's default, which is also the model the Jev rerank was measured on;
+they are not known to hold for another model.
 """
 
 from __future__ import annotations
@@ -33,7 +36,9 @@ from functools import lru_cache
 from typing import Any
 
 from ...config import DecisionModelConfig, get_config
+from ..cross_encoder import TypeSafeCrossEncoder
 from ..decision_model import DecisionModel, DecisionQuestion
+from ..remote_retry import RetryPolicy
 from ..response_models import MemoryFact, RecallResult
 from ..token_encoding import count_tokens, truncate_to_tokens
 
@@ -48,6 +53,8 @@ class RecallChecks:
     relevance: bool
     conditional_recency: bool
     injection_gate: bool
+    #: Set when the Jev rerank is on: the same setup, asked the TypeSafe reranker's rank question.
+    jev_reranker: TypeSafeCrossEncoder | None = None
 
     @property
     def on_results(self) -> bool:
@@ -58,6 +65,22 @@ class RecallChecks:
 def _client(setup: DecisionModelConfig) -> DecisionModel:
     # One client per setup for the process, so its connection pool and concurrency cap are shared.
     return DecisionModel.from_config(setup)
+
+
+@lru_cache(maxsize=4)
+def _reranker(setup: DecisionModelConfig) -> TypeSafeCrossEncoder:
+    """The rank question's client for one setup, shared like ``_client``. The request is the
+    TypeSafe reranker's own; its window and its retries are the decision model's."""
+    reranker = TypeSafeCrossEncoder(
+        api_key=setup.api_key,
+        model=setup.model,
+        base_url=setup.base_url,
+        timeout=setup.timeout,
+        max_concurrent=setup.max_concurrent,
+    )
+    reranker.MAX_QUESTION_TOKENS = setup.max_request_tokens
+    reranker.retry_policy = RetryPolicy()
+    return reranker
 
 
 @lru_cache(maxsize=1)
@@ -88,7 +111,8 @@ def resolve_recall_checks(bank_config: Mapping[str, Any]) -> RecallChecks | None
     relevance = bool(bank_config.get("recall_relevance_check", False))
     conditional_recency = bool(bank_config.get("recall_conditional_recency", False))
     injection_gate = bool(bank_config.get("recall_injection_gate", False))
-    if not (relevance or conditional_recency or injection_gate):
+    jev_rerank = bool(bank_config.get("recall_jev_rerank", False))
+    if not (relevance or conditional_recency or injection_gate or jev_rerank):
         return None
     setup = get_config().decision_model_config("recall_checks")
     if setup is None:
@@ -102,6 +126,7 @@ def resolve_recall_checks(bank_config: Mapping[str, Any]) -> RecallChecks | None
         relevance=relevance,
         conditional_recency=conditional_recency,
         injection_gate=injection_gate,
+        jev_reranker=_reranker(setup) if jev_rerank else None,
     )
 
 
