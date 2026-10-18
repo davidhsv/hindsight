@@ -56,7 +56,11 @@ _STATIC_FIELDS = (
 
 
 def _static(**values) -> SimpleNamespace:
-    return SimpleNamespace(**{**{name: None for name in _STATIC_FIELDS}, **values})
+    """A server config with the decay switch on, so a bank's alpha applies as given (the ranking
+    tests below are about the factor itself; the switch has tests of its own)."""
+    return SimpleNamespace(
+        **{**{name: None for name in _STATIC_FIELDS}, "adaptive_memory_decay_experimental": True, **values}
+    )
 
 
 def _settings(mode: str = "rank", **bank) -> AdaptiveSettings:
@@ -123,8 +127,23 @@ def _words(text: str) -> int:
 
 # --------------------------------------------------------------------------- ranking
 
-#: An alpha a bank opts into: the default (0) keeps retention out of ranking altogether.
+#: An alpha a bank opts into on a server with the decay switch: the default (0) keeps retention
+#: out of ranking altogether.
 OPTED_IN_ALPHA = 0.1
+
+
+@pytest.mark.parametrize("switch", [None, False, "true"])
+def test_without_the_decay_switch_any_alpha_resolves_to_zero(switch):
+    """Missing, off, or not a real boolean: the bank's alpha, however large, never reaches ranking."""
+    settings = AdaptiveSettings.resolve(
+        {"adaptive_memory_mode": "rank", "adaptive_memory_score_alpha": 0.9},
+        _static(adaptive_memory_decay_experimental=switch),
+        store_supports=True,
+    )
+    assert settings.score_alpha == 0.0
+    results = [_result("faded", 0.50, age_days=3650), _result("fresh", 0.49, age_days=0)]
+    attach_adaptive(results, {}, settings, NOW)
+    assert [r.adaptive_factor for r in results] == [1.0, 1.0]
 
 
 @pytest.mark.parametrize("mode", ["rank", "lifecycle"])

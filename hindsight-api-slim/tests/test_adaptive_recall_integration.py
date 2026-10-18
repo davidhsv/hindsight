@@ -6,7 +6,9 @@ prefer_observations dedups over a window the counterfactual alone fills), that t
 to drop a weak memory (``min_scores.final``, the token budget) still return an exact cue, that a
 failed state load is isolated, that the load running beside the reranker is cancelled with it and
 never starts for an order the factor does not touch, that a store without adaptive state resolves
-to off, and that the loader's SQL probes the primary keys.
+to off, that a stored positive alpha ranks as off once the server's decay switch is off, and that
+the loader's SQL probes the primary keys. Ranking by retention needs that switch
+(``adaptive_memory_decay_experimental``), so the tests that rank by it turn it on.
 
 Seeding uses raw SQL, and the module is therefore ``memory_backend_incompatible``:
 - memories go straight into ``memory_units`` because the ranking predictions need exact texts
@@ -25,6 +27,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from hindsight_api.config import clear_config_cache
 from hindsight_api.engine import memory_engine as memory_engine_module
 from hindsight_api.engine.memories import get_memories
 from hindsight_api.engine.memories.postgres import PostgresMemories
@@ -150,7 +153,7 @@ def _components(result) -> dict[str, dict[str, float]]:
     return {r["node_id"]: r["score_components"] for r in result.trace["reranked"]}
 
 
-async def test_off_and_observe_return_the_same_recall(memory, request_context):
+async def test_off_and_observe_return_the_same_recall(memory, request_context, adaptive_memory_decay_experimental):
     bank_id = _bank()
     try:
         ids = await _seed_units(
@@ -216,7 +219,7 @@ async def test_at_the_default_alpha_rank_and_lifecycle_rank_active_memories_as_o
         await memory.delete_bank(bank_id, request_context=request_context)
 
 
-async def test_rank_reorders_exactly_as_observe_predicted(memory, request_context):
+async def test_rank_reorders_exactly_as_observe_predicted(memory, request_context, adaptive_memory_decay_experimental):
     bank_id = _bank()
     try:
         # One mention age for all, so recency boosts are equal and only the retention rows differ.
@@ -249,7 +252,42 @@ async def test_rank_reorders_exactly_as_observe_predicted(memory, request_contex
         await memory.delete_bank(bank_id, request_context=request_context)
 
 
-async def test_an_exact_cue_recovers_a_faded_memory_past_min_scores_and_the_token_budget(memory, request_context):
+async def test_without_the_decay_switch_a_stored_alpha_ranks_as_off(
+    memory, request_context, adaptive_memory_decay_experimental
+):
+    """The server's decay switch is the only door: a bank given a positive alpha while the switch was
+    on ranks exactly as off once the server runs without it, whatever the bank still stores."""
+    bank_id = _bank()
+    try:
+        ids = await _seed_units(
+            memory, request_context, bank_id, [(text, QDATE - timedelta(days=10)) for text in DEPLOY_TEXTS]
+        )
+        off = await _recall(memory, request_context, bank_id, DEPLOY_QUERY)
+        assert set(_ids(off)) == set(ids)
+        top = _ids(off)[0]
+        await _seed_retention(memory, bank_id, top, last=QDATE - timedelta(days=3650), stability=1.0)
+
+        await _configure(memory, bank_id, mode="rank", score_alpha=1.0)
+        decayed = await _recall(memory, request_context, bank_id, DEPLOY_QUERY)
+        assert _ids(decayed)[0] != top, "with the switch on, the faded winner is down-weighted"
+
+        adaptive_memory_decay_experimental.delenv("HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL")
+        clear_config_cache()
+        ranked = await _recall(memory, request_context, bank_id, DEPLOY_QUERY, enable_trace=True)
+
+        assert [(str(r.id), r.text, r.scores) for r in ranked.results] == [
+            (str(r.id), r.text, r.scores) for r in off.results
+        ]
+        trace = ranked.trace["adaptive"]
+        assert (trace["mode"], trace["alpha"], trace["scored"], trace["rerank_changed"]) == ("rank", 0.0, True, False)
+        assert {c["adaptive_factor"] for c in _components(ranked).values()} == {1.0}
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
+async def test_an_exact_cue_recovers_a_faded_memory_past_min_scores_and_the_token_budget(
+    memory, request_context, adaptive_memory_decay_experimental
+):
     bank_id = _bank()
     try:
         vault, *_ = await _seed_units(
@@ -281,7 +319,9 @@ async def test_an_exact_cue_recovers_a_faded_memory_past_min_scores_and_the_toke
         await memory.delete_bank(bank_id, request_context=request_context)
 
 
-async def test_a_failed_state_load_is_isolated(memory, request_context, monkeypatch):
+async def test_a_failed_state_load_is_isolated(
+    memory, request_context, monkeypatch, adaptive_memory_decay_experimental
+):
     bank_id = _bank()
     try:
         await _seed_units(
@@ -308,7 +348,9 @@ async def test_a_failed_state_load_is_isolated(memory, request_context, monkeypa
         await memory.delete_bank(bank_id, request_context=request_context)
 
 
-async def test_a_store_without_adaptive_state_resolves_to_off(memory, request_context, monkeypatch):
+async def test_a_store_without_adaptive_state_resolves_to_off(
+    memory, request_context, monkeypatch, adaptive_memory_decay_experimental
+):
     bank_id = _bank()
     try:
         await _seed_units(
@@ -330,7 +372,7 @@ async def test_a_store_without_adaptive_state_resolves_to_off(memory, request_co
 
 
 async def test_rank_matches_observe_when_only_the_counterfactual_window_holds_an_observation(
-    memory, request_context, monkeypatch
+    memory, request_context, monkeypatch, adaptive_memory_decay_experimental
 ):
     """prefer_observations drops the raw facts of observations inside the window. Observe replays
     that over its counterfactual order, whose window can hold an observation the real one does
@@ -472,7 +514,9 @@ async def test_a_failed_rerank_cancels_the_state_load_and_releases_its_connectio
 
 
 @pytest.mark.parametrize("order", ["interleave", "decision_model_primary"])
-async def test_an_authoritative_order_never_starts_the_state_load(memory, request_context, monkeypatch, order):
+async def test_an_authoritative_order_never_starts_the_state_load(
+    memory, request_context, monkeypatch, order, adaptive_memory_decay_experimental
+):
     bank_id = _bank()
     try:
         await _seed_units(
@@ -508,7 +552,9 @@ async def test_an_authoritative_order_never_starts_the_state_load(memory, reques
         await memory.delete_bank(bank_id, request_context=request_context)
 
 
-async def test_a_failover_onto_the_decision_model_cancels_the_state_load(memory, request_context, monkeypatch):
+async def test_a_failover_onto_the_decision_model_cancels_the_state_load(
+    memory, request_context, monkeypatch, adaptive_memory_decay_experimental
+):
     bank_id = _bank()
     loader = _BlockingLoader()
     try:

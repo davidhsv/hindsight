@@ -142,6 +142,21 @@ def context_admission_experimental(monkeypatch):
     return monkeypatch
 
 
+@pytest.fixture
+def adaptive_memory_decay_experimental(monkeypatch):
+    """A server with ``HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL`` on.
+
+    A positive ``adaptive_memory_score_alpha`` is refused (and a stored one reads as 0) without it;
+    a test that ranks by retention asks for this fixture. The cache is cleared after the env
+    changes, as in ``context_admission_experimental``.
+    """
+    from hindsight_api.config import clear_config_cache
+
+    monkeypatch.setenv("HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL", "true")
+    clear_config_cache()
+    return monkeypatch
+
+
 @pytest.fixture(autouse=True)
 def _cleanup_leaked_span_recorders():
     """Fail-safe for the process-global LLM-trace recorder registry (#2229).

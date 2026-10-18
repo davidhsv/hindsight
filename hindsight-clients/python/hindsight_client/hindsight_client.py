@@ -3483,10 +3483,12 @@ class Hindsight:
             adaptive_memory_mode: Adaptive memory mode: 'off' (default; recall is unchanged),
                 'observe' (compute retention and report it in traces and metrics only), 'rank'
                 (retention and reinforcement state; rarely reinforced memories are down-weighted
-                only when adaptive_memory_score_alpha is above 0) or 'lifecycle' (rank plus claim
-                lifecycle: superseded and refuted memories stop answering current recall).
+                only when adaptive_memory_score_alpha is above 0, which the server must allow) or
+                'lifecycle' (rank plus claim lifecycle: superseded and refuted memories stop
+                answering current recall).
             adaptive_memory_score_alpha: Weight of the retention factor in the final recall score,
-                in [0, 1] (0, the default, = no decay).
+                in [0, 1] (0, the default, = no decay). A value above 0 is experimental: it is
+                accepted only when the server sets HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL.
             adaptive_memory_score_floor: Lowest retention factor a fully-forgotten memory can
                 reach, in [0, 1].
             adaptive_memory_reinforcement_enabled: Let reinforcement events raise a memory's

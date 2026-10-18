@@ -23,6 +23,7 @@ from hindsight_api.config import (
     DEFAULT_ADAPTIVE_MEMORY_DEFAULT_VIEW,
     DEFAULT_ADAPTIVE_MEMORY_MODE,
     DEFAULT_CONTEXT_ADMISSION_MODE,
+    ENV_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL,
     RECALL_BUDGET_FUNCTIONS,
     HindsightConfig,
     _get_raw_config,
@@ -941,6 +942,7 @@ def _coerce_stored_bank_overrides(bank_id: str, overrides: dict[str, Any], where
     for key in _STORED_CHOICE_FALLBACKS.keys() & coerced.keys():
         if coerced[key] is not None:
             coerced[key] = _coerce_stored_choice(bank_id, key, coerced[key])
+    _coerce_stored_score_alpha(bank_id, coerced, where)
 
     # Strategy overrides are spliced onto the resolved config by apply_strategy(),
     # so a bad value nested there wedges the bank just as a top-level one does.
@@ -1041,11 +1043,13 @@ def _validate_adaptive_memory_updates(updates: dict[str, Any]) -> None:
 
     Same rules as the env (``normalize_adaptive_memory_value``). Choice values are
     rewritten to their lower-case canonical form before they are persisted, so the
-    stored override and every later read agree on one spelling.
+    stored override and every later read agree on one spelling. A positive score alpha is
+    refused unless the server runs with ``adaptive_memory_decay_experimental``.
     """
+    decay_experimental = get_config().adaptive_memory_decay_experimental
     for key in ADAPTIVE_MEMORY_CONSTRAINED_FIELDS & updates.keys():
         if updates[key] is not None:
-            updates[key] = normalize_adaptive_memory_value(key, updates[key])
+            updates[key] = normalize_adaptive_memory_value(key, updates[key], decay_experimental=decay_experimental)
 
     # The one-sided case is checked against the committed state in
     # _validate_projected_bank_config; this catches a self-contradictory update
@@ -1087,7 +1091,9 @@ def _coerce_stored_choice(bank_id: str, key: str, value: Any) -> Any:
             return normalize_context_admission_value(
                 key, value, experimental=get_config().context_admission_experimental
             )
-        return normalize_adaptive_memory_value(key, value)
+        return normalize_adaptive_memory_value(
+            key, value, decay_experimental=get_config().adaptive_memory_decay_experimental
+        )
     except ValueError:
         fallback = _STORED_CHOICE_FALLBACKS[key]
         logger.warning(
@@ -1095,6 +1101,26 @@ def _coerce_stored_choice(bank_id: str, key: str, value: Any) -> Any:
             f"using {fallback!r}. Re-save this field to silence this warning."
         )
         return fallback
+
+
+def _coerce_stored_score_alpha(bank_id: str, coerced: dict[str, Any], where: str) -> None:
+    """Read a stored positive score alpha as 0 on a server without the decay switch.
+
+    Such a value was written while the switch was on (or before it existed); applying it would put
+    retention decay back into the bank's ranking, which only the server may allow. Out-of-range
+    values are left to ``AdaptiveSettings.resolve``, which clamps them.
+    """
+    alpha = coerced.get("adaptive_memory_score_alpha")
+    if not isinstance(alpha, int | float) or isinstance(alpha, bool) or not alpha > 0:
+        return
+    if get_config().adaptive_memory_decay_experimental:
+        return
+    coerced["adaptive_memory_score_alpha"] = 0.0
+    logger.warning(
+        f"Bank {bank_id} config field 'adaptive_memory_score_alpha'{where} holds {alpha!r}, but a positive alpha "
+        f"needs {ENV_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL}=true on the server; using 0.0. Re-save this field to "
+        f"silence this warning."
+    )
 
 
 def apply_strategy(config: HindsightConfig, strategy_name: str) -> HindsightConfig:

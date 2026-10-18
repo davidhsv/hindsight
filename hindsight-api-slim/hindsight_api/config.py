@@ -1149,6 +1149,7 @@ ENV_ADAPTIVE_MEMORY_PRUNE_ENABLED = "HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_ENABLED
 ENV_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS = "HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS"
 ENV_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS = "HINDSIGHT_API_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS"
 ENV_ADAPTIVE_MEMORY_SCOPE_KEYS = "HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS"
+ENV_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL = "HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL"
 
 # Context admission: the stage that decides which recalled memories enter an agent's
 # context (and may admit none), after retrieval, ranking and the lifecycle view. Prefixed
@@ -1474,9 +1475,14 @@ DEFAULT_ADAPTIVE_MEMORY_MODE = "off"
 # Weight of the retention factor in the final score: adaptive_factor =
 # (1 - alpha) + alpha * retention_factor. At 0 the factor is exactly 1, so retention
 # never changes ranking and rank/lifecycle order live memories as off does. Decay showed
-# no measured ranking benefit, so a bank opts in with a positive alpha; it is penalty-only,
-# and the worst case is 1 - alpha * (1 - floor).
+# no measured ranking benefit, so a positive alpha is experimental: it is accepted only
+# while the server-level decay switch below is on. It is penalty-only, and the worst case
+# is 1 - alpha * (1 - floor).
 DEFAULT_ADAPTIVE_MEMORY_SCORE_ALPHA = 0.0
+# The server-level switch that allows a positive score alpha (retention decay in ranking).
+# Without it a positive alpha fails start-up (env) or the bank-config write, and a stored or
+# tenant value reads as 0, so no bank can put retention back into ranking on its own.
+DEFAULT_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL = False
 # Lowest retention_factor a fully-forgotten memory can reach (raised per memory by importance).
 DEFAULT_ADAPTIVE_MEMORY_SCORE_FLOOR = 0.3
 DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_ENABLED = True
@@ -2744,14 +2750,17 @@ ADAPTIVE_MEMORY_CONSTRAINED_FIELDS = frozenset(
 )
 
 
-def normalize_adaptive_memory_value(field_name: str, value: Any, *, name: str | None = None) -> Any:
+def normalize_adaptive_memory_value(
+    field_name: str, value: Any, *, decay_experimental: bool, name: str | None = None
+) -> Any:
     """Validate one hierarchical adaptive-memory value and return its normalized form.
 
     The single rule set for both doors: ``HindsightConfig.validate`` (env, reported by
     env name) and the bank-config API (reported by field name, via ``name``). Choice
     fields are matched case-insensitively and normalized to lower case, so the engine
     compares against the canonical spelling only. Fields without a value constraint
-    pass through unchanged.
+    pass through unchanged. ``decay_experimental`` is the server's
+    ``adaptive_memory_decay_experimental``: without it a positive score alpha is rejected.
     """
     label = name or field_name
     choices = _ADAPTIVE_MEMORY_CHOICE_FIELDS.get(field_name)
@@ -2762,6 +2771,12 @@ def normalize_adaptive_memory_value(field_name: str, value: Any, *, name: str | 
         return normalized
     if field_name in _ADAPTIVE_MEMORY_UNIT_INTERVAL_FIELDS:
         _require_number_in_range(label, value, minimum=0.0, maximum=1.0)
+        if field_name == "adaptive_memory_score_alpha" and value > 0 and not decay_experimental:
+            raise ValueError(
+                f"{label}={value!r} is experimental: a positive alpha puts retention decay into recall "
+                f"ranking. Set {ENV_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL}=true on the server to allow it; "
+                f"without it the alpha is 0"
+            )
     elif field_name in _ADAPTIVE_MEMORY_POSITIVE_FIELDS:
         _require_number_in_range(label, value, minimum=0.0, exclusive_minimum=True)
     return value
@@ -3856,6 +3871,7 @@ class HindsightConfig:
     adaptive_memory_prune_after_days: float
     adaptive_memory_maintenance_interval_seconds: int
     adaptive_memory_scope_keys: list[str]
+    adaptive_memory_decay_experimental: bool
     context_admission_mode: str
     context_admission_threshold_auto: float
     context_admission_threshold_explicit: float
@@ -4918,12 +4934,16 @@ class HindsightConfig:
         benchmark of an arm that never ran. Per-bank values are held to the same
         rules by ``normalize_adaptive_memory_value`` in the bank-config API.
         """
+        decay_experimental = bool(self.adaptive_memory_decay_experimental)
         for field_name in sorted(ADAPTIVE_MEMORY_CONSTRAINED_FIELDS):
             setattr(
                 self,
                 field_name,
                 normalize_adaptive_memory_value(
-                    field_name, getattr(self, field_name), name=f"HINDSIGHT_API_{field_name.upper()}"
+                    field_name,
+                    getattr(self, field_name),
+                    decay_experimental=decay_experimental,
+                    name=f"HINDSIGHT_API_{field_name.upper()}",
                 ),
             )
         validate_adaptive_memory_stability_bounds(
@@ -5633,6 +5653,9 @@ class HindsightConfig:
             # An unset or empty value means the default keys.
             adaptive_memory_scope_keys=_parse_str_list(os.getenv(ENV_ADAPTIVE_MEMORY_SCOPE_KEYS) or "")
             or list(DEFAULT_ADAPTIVE_MEMORY_SCOPE_KEYS),
+            adaptive_memory_decay_experimental=_parse_boolean_env(
+                ENV_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL, DEFAULT_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL
+            ),
             context_admission_mode=(
                 (os.getenv(ENV_CONTEXT_ADMISSION_MODE) or DEFAULT_CONTEXT_ADMISSION_MODE).strip().lower()
             ),

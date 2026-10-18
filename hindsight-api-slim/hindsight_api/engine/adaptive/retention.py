@@ -188,9 +188,10 @@ def retention_factor(r: float, floor_i: float) -> float:
 def adaptive_factor(r: float, alpha: float, floor_i: float) -> float:
     """The ranking multiplier ``(1 − α) + α·retention_factor``, in ``[1 − α·(1 − floor_i), 1]``.
 
-    ``α = 0`` (the default) makes it exactly 1, so retention never moves a score. A bank that
-    raises α gets a penalty-only, bounded factor: at α 0.1 and floor 0.3 the worst case is 0.93,
-    so relevance still dominates and a precise cue recovers an old memory.
+    ``α = 0`` (the default, and the only value without the server's decay switch) makes it exactly
+    1, so retention never moves a score. A positive α gives a penalty-only, bounded factor: at α 0.1
+    and floor 0.3 the worst case is 0.93, so relevance still dominates and a precise cue recovers an
+    old memory.
     """
     return (1.0 - alpha) + alpha * retention_factor(r, floor_i)
 

@@ -17,9 +17,13 @@ and recall months later ranks by what was learned.
 
 R wins the proof count (ten sources against three), so the ranking at day 200 is not an artefact
 of evidence volume; S's later mentions also help it through the recency boost, which is why the
-story also asserts the retrievability the adaptive factor scored, read from the trace. Ranking by
-retention is opt-in (``adaptive_memory_score_alpha`` defaults to 0, which leaves every score as
-it is), so the bank sets an alpha.
+story also asserts the retrievability the adaptive factor scored, read from the trace.
+
+Ranking by retention is experimental: ``adaptive_memory_score_alpha`` defaults to 0, which leaves
+every score as it is, and a positive one needs the server's decay switch. So the bank is
+configured and recalled through a server started with the switch, and the story also shows the
+default server's side: the same alpha is refused there, and the stored one ranks at 0, with the
+retention the ledger built still scored and reported.
 """
 
 from __future__ import annotations
@@ -27,6 +31,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+
+from hindsight_client_api.exceptions import ApiException
 
 from hindsight_system_tests.payloads import (
     Consolidation,
@@ -45,6 +51,8 @@ SPACED = "Team Alpha deploys on Fridays"
 REPEATED = "Team Omega deploys on Fridays"
 #: Equal lexical overlap with both claims: neither "Alpha" nor "Omega" is in it.
 CUE = "Which team deploys on Fridays?"
+#: Rank mode with retention in the ranking, which only a server with the decay switch accepts.
+RANK_WITH_DECAY = {"adaptive_memory_mode": "rank", "adaptive_memory_score_alpha": 0.1}
 
 
 def day(n: float) -> datetime:
@@ -68,11 +76,9 @@ def _consolidate(request) -> Consolidation:
 
 
 @pytest.fixture
-async def two_claims(client, llm, bank_id, settled) -> dict[str, str]:
+async def two_claims(client, experimental_decay_client, llm, bank_id, settled) -> dict[str, str]:
     """The bank after both histories; maps each claim to its observation id."""
-    await client.banks.update_bank_config(
-        bank_id, {"updates": {"adaptive_memory_mode": "rank", "adaptive_memory_score_alpha": 0.1}}
-    )
+    await experimental_decay_client.banks.update_bank_config(bank_id, {"updates": RANK_WITH_DECAY})
     llm.on_step("extract_facts", contains=SPACED).returns(extracted(fact(SPACED)))
     llm.on_step("extract_facts", contains=REPEATED).returns(extracted(fact(REPEATED)))
     llm.on_step("consolidate").answers_with(_consolidate)
@@ -119,15 +125,40 @@ async def test_independent_sessions_build_stability_and_one_session_does_not(cli
     assert datetime.fromisoformat(repeated["retention"]["last_reinforced_at"]) == day(0)
 
 
-async def test_months_later_the_spaced_claim_outranks_the_repeated_one(client, bank_id, two_claims):
-    response = await client.arecall(
+async def _recall_months_later(client, bank_id: str):
+    return await client.arecall(
         bank_id=bank_id, query=CUE, types=["observation"], query_timestamp=day(200).isoformat(), trace=True
     )
 
+
+async def test_months_later_the_spaced_claim_outranks_the_repeated_one(experimental_decay_client, bank_id, two_claims):
+    response = await _recall_months_later(experimental_decay_client, bank_id)
+
     assert [r.text for r in response.results] == [SPACED, REPEATED]
+    assert response.trace["adaptive"]["alpha"] == 0.1
     components = {r["text"]: r["score_components"] for r in response.trace["reranked"]}
     assert components[SPACED]["retrievability"] > components[REPEATED]["retrievability"]
     assert components[SPACED]["adaptive_factor"] > components[REPEATED]["adaptive_factor"]
+
+
+async def test_on_a_default_server_retention_never_moves_a_score(client, bank_id, two_claims):
+    """Without the decay switch a bank cannot raise its alpha, and the one it stores ranks at 0."""
+    with pytest.raises(ApiException) as refused:
+        await client.banks.update_bank_config(bank_id, {"updates": RANK_WITH_DECAY})
+    assert refused.value.status == 400
+    assert "HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL" in str(refused.value.body)
+
+    response = await _recall_months_later(client, bank_id)
+
+    assert {r.text for r in response.results} == {SPACED, REPEATED}
+    assert response.trace["adaptive"]["alpha"] == 0.0
+    components = {r["text"]: r["score_components"] for r in response.trace["reranked"]}
+    # Retention is still scored and reported, and still tells the claims apart...
+    assert components[SPACED]["retrievability"] > components[REPEATED]["retrievability"]
+    # ...but it moves no score: every factor is exactly 1 and every final score is the factor-free one.
+    assert {c["adaptive_factor"] for c in components.values()} == {1.0}
+    for result in response.results:
+        assert result.scores.final == pytest.approx(components[result.text]["adaptive_base_score"], abs=1e-9)
 
 
 async def test_an_explicit_confirmation_retried_with_its_key_counts_once(client, llm, bank_id, settled):

@@ -4375,7 +4375,7 @@ class BankTemplateConfig(BaseModel):
         default=None,
         description="Adaptive memory mode: 'off' (default; recall is unchanged), 'observe' (compute retention "
         "and report it in traces and metrics only), 'rank' (retention and reinforcement state; rarely reinforced "
-        "memories are down-weighted only when adaptive_memory_score_alpha is above 0) "
+        "memories are down-weighted only when adaptive_memory_score_alpha is above 0, which the server must allow) "
         "or 'lifecycle' (rank plus claim lifecycle: superseded and refuted memories stop answering current "
         "recall, and history is available through recall's lifecycle_view and as_of)",
     )
@@ -4383,7 +4383,9 @@ class BankTemplateConfig(BaseModel):
         default=None,
         ge=0,
         le=1,
-        description="Weight of the retention factor in the final recall score (0, the default, = no decay)",
+        description="Weight of the retention factor in the final recall score (0, the default, = no decay). A "
+        "value above 0 is experimental: it is accepted only when the server sets "
+        "HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL, and without it a stored value reads as 0",
     )
     adaptive_memory_score_floor: float | None = Field(
         default=None,

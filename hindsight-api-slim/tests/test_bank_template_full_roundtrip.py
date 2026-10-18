@@ -216,8 +216,13 @@ def test_sample_values_cover_every_exportable_field():
 
 
 @pytest.mark.asyncio
-async def test_every_exportable_field_survives_export_then_import(api_client, bank_id):
-    """Set every exportable field, export it, and import into a fresh bank."""
+async def test_every_exportable_field_survives_export_then_import(
+    api_client, bank_id, adaptive_memory_decay_experimental
+):
+    """Set every exportable field, export it, and import into a fresh bank.
+
+    The sample alpha is positive, which only a server with the decay switch accepts.
+    """
     source_id = f"{bank_id}_source"
     clone_id = f"{bank_id}_clone"
 

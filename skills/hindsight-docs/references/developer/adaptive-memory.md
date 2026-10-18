@@ -8,7 +8,7 @@ A memory bank keeps everything it is told. That is the right default for an audi
 | Question | Is this still the current state? | How readily does it come back without a strong cue? |
 | State | A **claim**: `active`, `uncertain`, `superseded` or `refuted`, with the interval it was current | **Retention**: stability, last reinforcement, importance, exemption |
 | Changed by | Consolidation's lifecycle labels, or the lifecycle `PATCH` API | Reinforcement events only (confirmations, independent restatements, successful use) |
-| Used by recall as | A filter (and an annotation) | A ranking penalty, off by default (`adaptive_memory_score_alpha` is `0`) |
+| Used by recall as | A filter (and an annotation) | A ranking penalty, experimental and off by default (`adaptive_memory_score_alpha` is `0`) |
 
 Neither axis is derived from the other. A memory that faded is still true, and a memory that was confirmed a hundred times can still be superseded. The forgetting curve never decides truth.
 
@@ -55,7 +55,7 @@ client.BanksAPI.UpdateBankConfig(ctx, memBankID).
 |---|---|---|---|
 | `off` (default) | Nothing | Nothing | Byte-identical to a server without the feature: the same recall payloads, traces, consolidation prompt and schema, MCP tool list, metrics and transfer archives. |
 | `observe` | Retention state for recall candidates | Only observe-mode shadow records (see [below](#enabling-observe-mode-safely)) | Results and their order are unchanged. The recall trace and the metrics report what `rank` would have done. |
-| `rank` | Retention state | Retention rows and reinforcement events; archive state when archiving is on | Confirmations, importance and exemptions are accepted. The final recall score is multiplied by a retention factor only when `adaptive_memory_score_alpha` is above `0`; at the default `0` ranking is the same as `off`. |
+| `rank` | Retention state | Retention rows and reinforcement events; archive state when archiving is on | Confirmations, importance and exemptions are accepted. The final recall score is multiplied by a retention factor only when `adaptive_memory_score_alpha` is above `0`, which needs the server-level `HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL`; at the default `0` ranking is the same as `off`. |
 | `lifecycle` | Retention and claim state | Everything `rank` writes, plus claims, claim evidence and lifecycle relations | `rank`, plus: consolidation labels state changes, superseded and refuted memories leave current recall, results carry a `lifecycle` annotation, history is available through `lifecycle_view` and `as_of`, and mental models citing retired memories are refreshed. |
 
 Every mode above `off` applies only to banks whose store keeps adaptive state; the built-in PostgreSQL and Oracle stores do, a custom memories extension does not unless it says so, and on such a bank every mode behaves as `off`.
@@ -71,15 +71,17 @@ HINDSIGHT_API_ADAPTIVE_MEMORY_SCORE_ALPHA=0
 HINDSIGHT_API_CONTEXT_ADMISSION_MODE=observe
 HINDSIGHT_API_CONTEXT_ADMISSION_SCORER=deterministic
 HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL=false
+HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL=false
 ```
 
-The same block is in `.env.example`, commented out. The first four settings are hierarchical, so a single bank can take the profile through the [bank config API](./api/memory-banks.md) instead (`enable_observations`, `adaptive_memory_mode`, `adaptive_memory_score_alpha`, `context_admission_mode`); the last two are server-level. What each line does:
+The same block is in `.env.example`, commented out. The first four settings are hierarchical, so a single bank can take the profile through the [bank config API](./api/memory-banks.md) instead (`enable_observations`, `adaptive_memory_mode`, `adaptive_memory_score_alpha`, `context_admission_mode`); the last three are server-level. What each line does:
 
 - **Observations on.** Lifecycle labels come from consolidation, which builds observations. Without observations consolidation labels nothing, and only the explicit lifecycle `PATCH` changes a claim.
 - **`lifecycle` mode.** The [truth lifecycle](#truth-lifecycle): `active`, `uncertain`, `superseded` and `refuted` claims with their validity interval, current recall without retired claims, history through `lifecycle_view` and `as_of`, lifecycle relations and claim evidence that link an old claim to what replaced it (with snapshots of both ends), raw facts that inherit a retirement, scope-aware contradictions (a fact from another `environment`, `service` or `module` never retires a claim), and mental models refreshed when a memory they cite is retired.
 - **Alpha `0`.** Retention state and reinforcement are still recorded and shown (`GET` on a memory, the trace's `score_components`, the metrics), but they never change ranking: while every candidate is active, a lifecycle-mode recall returns the same memories in the same order as `off`. It is the default; the line only makes it explicit.
 - **Admission in `observe` with the deterministic scorer.** Every external recall reports in `trace.context_admission` and the metrics what `strict` would have injected, and returns exactly what it would without admission. No memory is sent to a decision model.
-- **Experimental switch off.** `filter`, `strict`, `jev` and `hybrid` are rejected, so a bank-config write cannot turn automatic filtering on.
+- **Admission's experimental switch off.** `filter`, `strict`, `jev` and `hybrid` are rejected, so a bank-config write cannot turn automatic filtering on.
+- **Decay switch off.** A positive `adaptive_memory_score_alpha` is rejected, and a stored or tenant one reads as `0`, so a bank-config write cannot put retention back into ranking either.
 
 Everything else stays at its default: archiving, pruning, recall reinforcement and the historical-cue detector are off, and a conflict stays `uncertain` until a later consolidation or an explicit `PATCH` settles it. The profile costs a larger consolidation prompt and schema, the claim and retention reads of every lifecycle recall, and the admission decisions of every external recall, which show most in tail latency under concurrent recalls.
 
@@ -243,7 +245,7 @@ Retention models how readily a memory comes back without a strong cue. It is com
 
 **Initial stability** is deterministic and costs no LLM call: `base_stability_days × type multiplier × (0.5 + importance)`. With the defaults (30 days; experience `0.5`, world `1.0`, observation `2.0`; importance `0.5`), an unreinforced world fact has a stability of 30 days and an observation 60. A raw fact with no stored row is anchored on its `mentioned_at`.
 
-**Ranking.** In `rank` and `lifecycle` the final recall score is multiplied by `(1 - alpha) + alpha × (floor + (1 - floor) × R)`. The default alpha is `0`, which makes the factor exactly `1`: retention is tracked and reported but never moves a score, because decay showed no measured ranking benefit in the benchmarks. A bank that raises `adaptive_memory_score_alpha` opts in: with alpha `0.1` and the default floor `0.3` the factor is between `0.93` and `1`. It only penalises, and it never removes a memory, so an old memory that matches a precise query is still found. Importance above `0.5` raises a memory's own floor.
+**Ranking.** In `rank` and `lifecycle` the final recall score is multiplied by `(1 - alpha) + alpha × (floor + (1 - floor) × R)`. The default alpha is `0`, which makes the factor exactly `1`: retention is tracked and reported but never moves a score, because decay showed no measured ranking benefit in the benchmarks. A positive `adaptive_memory_score_alpha` is experimental: the server must set `HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL=true`, and without it a positive alpha fails start-up or the bank-config write, and a stored or tenant one reads as `0`. With it, alpha `0.1` and the default floor `0.3` give a factor between `0.93` and `1`. It only penalises, and it never removes a memory, so an old memory that matches a precise query is still found. Importance above `0.5` raises a memory's own floor.
 
 **Reinforcement** raises stability. Each event has a source weight:
 
@@ -326,7 +328,7 @@ Repetition also never decides truth: with no source trust configured, a conflict
    - `hindsight_adaptive_memory_retrievability_bucket` and `hindsight_adaptive_memory_stability_days_bucket`: the distribution of what recall returns.
    - `hindsight_adaptive_memory_state_load_errors_total`: should stay at zero.
 4. Look at the shadow records. Observe mode does not change the consolidation prompt, so it labels nothing. When consolidation deletes an observation that it replaced, observe mode records, on each raw fact that would have inherited a retirement, what `lifecycle` mode would have done. `GET` on the fact shows it under `lifecycle.shadow` (`would_status`, the deciding observation, the evidence ids). Recall never reads these records.
-5. Move to `lifecycle` once you want superseded memories out of current recall. At the default alpha of `0`, `rank` changes no order, so `simulated_final_ids` matters only for a bank that raises `adaptive_memory_score_alpha`.
+5. Move to `lifecycle` once you want superseded memories out of current recall. At the default alpha of `0`, `rank` changes no order, so `simulated_final_ids` matters only for a bank that raises `adaptive_memory_score_alpha` on a server with the decay switch.
 
 Prefer not to downgrade a bank that holds claims. `rank`, `observe` and `off` keep the claim rows but stop applying them, so recall shows superseded and refuted memories again, unannotated. Consolidation in the lower mode can then rewrite a retired observation as if it were current.
 

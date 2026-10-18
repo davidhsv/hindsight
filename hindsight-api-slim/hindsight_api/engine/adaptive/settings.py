@@ -16,6 +16,7 @@ from ...config import (
     DEFAULT_ADAPTIVE_MEMORY_ARCHIVE_THRESHOLD,
     DEFAULT_ADAPTIVE_MEMORY_BASE_STABILITY_DAYS,
     DEFAULT_ADAPTIVE_MEMORY_CONFLICT_POLICY,
+    DEFAULT_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL,
     DEFAULT_ADAPTIVE_MEMORY_DEFAULT_VIEW,
     DEFAULT_ADAPTIVE_MEMORY_HISTORICAL_CUES,
     DEFAULT_ADAPTIVE_MEMORY_MAX_STABILITY_DAYS,
@@ -124,6 +125,8 @@ class AdaptiveSettings:
     The per-bank values are clamped defensively on read (alpha and floor to [0, 1], max
     stability to at least base): the config API validates writes, but tenant overrides and
     legacy rows are never validated and a bad one must not produce a factor outside its bound.
+    Without the server's ``adaptive_memory_decay_experimental`` the alpha is 0 whatever the bank
+    or tenant holds, so retention never moves a score.
     """
 
     mode: AdaptiveMode
@@ -170,6 +173,9 @@ class AdaptiveSettings:
         ``MemoriesExtension.supports_adaptive_state_for(bank_id)``.
         """
         mode = _mode(bank_config.get("adaptive_memory_mode"))
+        decay_allowed = _flag(
+            getattr(static, "adaptive_memory_decay_experimental", None), DEFAULT_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL
+        )
         base = _positive(
             bank_config.get("adaptive_memory_base_stability_days"), DEFAULT_ADAPTIVE_MEMORY_BASE_STABILITY_DAYS
         )
@@ -182,8 +188,10 @@ class AdaptiveSettings:
         return cls(
             mode=mode,
             effective_mode=mode if store_supports else AdaptiveMode.OFF,
-            score_alpha=_unit_interval(
-                bank_config.get("adaptive_memory_score_alpha"), DEFAULT_ADAPTIVE_MEMORY_SCORE_ALPHA
+            score_alpha=(
+                _unit_interval(bank_config.get("adaptive_memory_score_alpha"), DEFAULT_ADAPTIVE_MEMORY_SCORE_ALPHA)
+                if decay_allowed
+                else 0.0
             ),
             score_floor=_unit_interval(
                 bank_config.get("adaptive_memory_score_floor"), DEFAULT_ADAPTIVE_MEMORY_SCORE_FLOOR

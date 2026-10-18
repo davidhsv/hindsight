@@ -66,6 +66,7 @@ _STATIC = {
     "adaptive_memory_prune_after_days": 180.0,
     "adaptive_memory_maintenance_interval_seconds": 3600,
     "adaptive_memory_scope_keys": ["environment", "service", "module"],
+    "adaptive_memory_decay_experimental": False,
 }
 
 
@@ -167,6 +168,8 @@ def test_scalar_values_read_from_env(clean_env):
         "adaptive_memory_archive_protect_importance": ("1", 1.0),
         "adaptive_memory_prune_enabled": ("true", True),
         "adaptive_memory_prune_after_days": ("365", 365.0),
+        # A positive alpha needs the decay switch.
+        "adaptive_memory_decay_experimental": ("true", True),
     }
     for field_name, (raw, _expected) in values.items():
         clean_env.setenv(_env_name(field_name), raw)
@@ -236,6 +239,7 @@ def test_json_maps_merge_over_the_defaults(clean_env):
         ("adaptive_memory_prune_after_days", "-1"),
         ("adaptive_memory_reinforcement_enabled", "yes"),
         ("adaptive_memory_archive_enabled", "on"),
+        ("adaptive_memory_decay_experimental", "yes"),
         ("adaptive_memory_source_weights", "not json"),
         ("adaptive_memory_source_weights", "[1, 2]"),
         ("adaptive_memory_source_weights", '{"explicit_confirmation": "high"}'),
@@ -285,6 +289,7 @@ def test_the_personal_profile_starts_and_resolves_as_documented(clean_env):
         "HINDSIGHT_API_CONTEXT_ADMISSION_MODE": "observe",
         "HINDSIGHT_API_CONTEXT_ADMISSION_SCORER": "deterministic",
         "HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL": "false",
+        "HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL": "false",
     }
     for name, value in profile.items():
         clean_env.setenv(name, value)
@@ -295,15 +300,66 @@ def test_the_personal_profile_starts_and_resolves_as_documented(clean_env):
     assert config.enable_observations is True
     adaptive = AdaptiveSettings.resolve(resolved, config, store_supports=True)
     assert (adaptive.effective_mode, adaptive.score_alpha) == (AdaptiveMode.LIFECYCLE, 0.0)
+    # Neither a bank nor a tenant can put retention back into ranking under the profile.
+    raised = AdaptiveSettings.resolve({**resolved, "adaptive_memory_score_alpha": 0.5}, config, store_supports=True)
+    assert raised.score_alpha == 0.0
     admission = ContextAdmissionSettings.resolve(resolved, config)
     assert (admission.mode, admission.scorer) == (AdmissionMode.OBSERVE, ScorerKind.DETERMINISTIC)
+
+
+# --- The decay switch -----------------------------------------------------------------
+
+
+def test_without_the_decay_switch_a_positive_alpha_fails_startup(clean_env):
+    clean_env.setenv("HINDSIGHT_API_ADAPTIVE_MEMORY_SCORE_ALPHA", "0.1")
+    with pytest.raises(ValueError, match="is experimental") as error:
+        HindsightConfig.from_env()
+    assert "HINDSIGHT_API_ADAPTIVE_MEMORY_SCORE_ALPHA=0.1" in str(error.value)
+    assert "HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL=true" in str(error.value)
+
+
+def test_alpha_zero_needs_no_switch(clean_env):
+    clean_env.setenv("HINDSIGHT_API_ADAPTIVE_MEMORY_SCORE_ALPHA", "0")
+    config = HindsightConfig.from_env()
+    assert (config.adaptive_memory_score_alpha, config.adaptive_memory_decay_experimental) == (0.0, False)
+
+
+@pytest.mark.asyncio
+async def test_without_the_decay_switch_a_bank_cannot_raise_alpha(clean_env):
+    resolver = ConfigResolver(backend=FakeBankConfigBackend())
+    with pytest.raises(ValueError, match=r"adaptive_memory_score_alpha=0\.1 is experimental"):
+        await resolver.validate_bank_config_updates(_bank(), {"adaptive_memory_score_alpha": 0.1})
+    validated = await resolver.validate_bank_config_updates(_bank(), {"adaptive_memory_score_alpha": 0})
+    assert validated.updates == {"adaptive_memory_score_alpha": 0}
+
+
+@pytest.mark.parametrize(("stored", "expected"), [(0.2, 0.0), (1, 0.0), (0.0, 0.0)])
+def test_without_the_decay_switch_a_stored_alpha_reads_as_zero(clean_env, stored, expected):
+    assert _coerce_stored_bank_overrides("bank", {"adaptive_memory_score_alpha": stored}) == {
+        "adaptive_memory_score_alpha": expected
+    }
+
+
+def test_with_the_decay_switch_a_stored_alpha_is_kept(adaptive_memory_decay_experimental):
+    assert _coerce_stored_bank_overrides("bank", {"adaptive_memory_score_alpha": 0.2}) == {
+        "adaptive_memory_score_alpha": 0.2
+    }
+
+
+def test_settings_resolve_a_tenant_alpha_as_zero_unless_the_switch_is_on(clean_env):
+    """A tenant override is never validated; without the switch the engine still ranks at alpha 0."""
+    bank = {"adaptive_memory_mode": "rank", "adaptive_memory_score_alpha": 0.5}
+    assert AdaptiveSettings.resolve(bank, HindsightConfig.from_env(), store_supports=True).score_alpha == 0.0
+
+    clean_env.setenv("HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL", "true")
+    assert AdaptiveSettings.resolve(bank, HindsightConfig.from_env(), store_supports=True).score_alpha == 0.5
 
 
 # --- Bank config API: validation -----------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_bank_override_is_validated_and_normalized():
+async def test_bank_override_is_validated_and_normalized(adaptive_memory_decay_experimental):
     bank_id = _bank()
     resolver = ConfigResolver(backend=FakeBankConfigBackend())
 
@@ -388,7 +444,7 @@ async def test_stability_cap_is_checked_against_the_stored_base():
 
 
 @pytest.mark.asyncio
-async def test_bank_override_resolves_and_clears():
+async def test_bank_override_resolves_and_clears(adaptive_memory_decay_experimental):
     bank_id = _bank()
     resolver = ConfigResolver(backend=FakeBankConfigBackend())
 
@@ -425,7 +481,7 @@ def test_unknown_stored_choice_is_coerced_to_the_safe_value(stored, expected):
 
 
 @pytest.mark.asyncio
-async def test_unknown_stored_mode_resolves_to_off():
+async def test_unknown_stored_mode_resolves_to_off(adaptive_memory_decay_experimental):
     """A value written before validation existed (or by hand) must not wedge recall."""
     backend = FakeBankConfigBackend()
     backend.config = {"adaptive_memory_mode": "aggressive", "adaptive_memory_score_alpha": 0.2}
@@ -449,7 +505,9 @@ async def api_client(memory):
 
 
 @pytest.mark.asyncio
-async def test_per_bank_override_through_the_config_api(api_client, memory, request_context):
+async def test_per_bank_override_through_the_config_api(
+    api_client, memory, request_context, adaptive_memory_decay_experimental
+):
     """PATCH sets one bank's mode; a second bank keeps the server default."""
     bank_a, bank_b = _bank(), _bank()
     try:
@@ -499,3 +557,25 @@ async def test_per_bank_override_through_the_config_api(api_client, memory, requ
     finally:
         for bank_id in (bank_a, bank_b):
             await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_without_the_decay_switch_the_config_api_refuses_a_positive_alpha(api_client, memory, request_context):
+    bank_id = _bank()
+    try:
+        resp = await api_client.put(f"/v1/default/banks/{bank_id}", json={})
+        assert resp.status_code == 200, resp.text
+        config_url = f"/v1/default/banks/{bank_id}/config"
+
+        refused = await api_client.patch(config_url, json={"updates": {"adaptive_memory_score_alpha": 0.1}})
+        assert refused.status_code == 400, refused.text
+        assert "adaptive_memory_score_alpha=0.1 is experimental" in refused.text
+        assert "HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL=true" in refused.text
+
+        accepted = await api_client.patch(
+            config_url, json={"updates": {"adaptive_memory_mode": "lifecycle", "adaptive_memory_score_alpha": 0}}
+        )
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["config"]["adaptive_memory_score_alpha"] == 0
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)
