@@ -58,14 +58,17 @@ _PROCESSING_RULES = """## PROCESSING RULES
 
 11. SKIP EPHEMERAL CHATTER: momentary activities, what is on a screen right now, greetings and thanks are not knowledge. Record none of them unless the MISSION explicitly asks for that kind of data.
 
-12. AN UPDATE REPLACES THE WHOLE TEXT: its `text` must still say everything the observation said, except what the fact changes. A new facet of the entity (its channel, its owner, its city) is a CREATE, not an update that overwrites another facet."""
+12. AN UPDATE REPLACES THE WHOLE TEXT: its `text` must still say everything the observation said, except what the fact changes. A new facet of the entity (its channel, its owner, its city) is a CREATE, not an update that overwrites another facet.
+
+13. SCOPES STAY APART: a fact's `scope` (its environment, service or module) is part of its facet. When a new fact and an existing observation's source facts name different values for the same scope key — `environment=staging` and `environment=dev`, two services — both hold at once, so this is NOT a state change: never UPDATE or DELETE that observation with the fact. CREATE a separate observation and name its scope in plain words in the text ("On staging, invoice reminders are emailed at 06:00"). Facts without a scope match by entity/facet as usual."""
 
 # Field-by-field definitions of the input shape used by the cached system
 # prefix. The call site runs .format(), so these strings must contain no braces.
-_FACT_FIELDS = """One per line, formatted as `[uuid] fact text (temporal fields)`:
+_FACT_FIELDS = """One per line, formatted as `[uuid] fact text (temporal fields) [scope: key=value, ...]`:
 - `[uuid]`: the fact's identifier — copy it verbatim into `source_fact_ids`
 - `occurred_start` / `occurred_end`: when the described event happened. This can be long before the fact was stated — a fact recorded today may describe a 2019 event.
-- `mentioned_at`: when the source material that states this fact was written. This is the fact's recency: how up to date the statement is, NOT when it was added to memory. A fact taken from an old document keeps its old `mentioned_at` even if it was only just processed."""
+- `mentioned_at`: when the source material that states this fact was written. This is the fact's recency: how up to date the statement is, NOT when it was added to memory. A fact taken from an old document keeps its old `mentioned_at` even if it was only just processed.
+- `scope`: where the fact holds — the `environment`, `service` or `module` its source named, e.g. `[scope: environment=staging]`. Omitted when the source named none."""
 
 _OBSERVATION_FIELDS = """- `id`: unique identifier — copy this exactly when issuing an UPDATE or DELETE
 - `text`: the observation content
@@ -73,7 +76,8 @@ _OBSERVATION_FIELDS = """- `id`: unique identifier — copy this exactly when is
 - `occurred_start` / `occurred_end`: the span of the events behind the observation — earliest start and latest end across its source facts
 - `mentioned_at`: the latest of the `mentioned_at` values of its source facts — the most recent point at which this observation was stated
 - `source_memories`: the supporting facts behind this observation. May be partial or absent for large observations — the count above remains the true total. Each entry carries the same `text` and temporal fields as a new fact, plus:
-  - `context`: optional surrounding context for that fact"""
+  - `context`: optional surrounding context for that fact
+  - `scope`: optional — where that fact holds, in the same `key=value` form as a new fact's scope"""
 
 # Stable description of the input shape. For the cached split path this lives in
 # the system prefix (build_consolidation_system_prompt) so it is not re-sent on
