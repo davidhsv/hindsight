@@ -270,14 +270,15 @@ def test_memory_floor_rises_only_above_neutral_importance():
 
 
 def test_the_factor_is_penalty_only_and_bounded():
-    # Defaults: alpha 0.1, floor 0.3 -> worst case 0.93, best case 1.0.
+    # An opted-in alpha 0.1 with the default floor 0.3 -> worst case 0.93, best case 1.0.
     assert adaptive_factor(0.0, 0.1, 0.3) == pytest.approx(0.93)
     assert adaptive_factor(1.0, 0.1, 0.3) == pytest.approx(1.0)
     assert retention_factor(0.0, 0.3) == pytest.approx(0.3)
     for r in (0.0, 0.2, 0.5, 0.9, 1.0):
         assert 0.93 - 1e-12 <= adaptive_factor(r, 0.1, 0.3) <= 1.0
-    # alpha 0 switches decay off entirely.
-    assert adaptive_factor(0.0, 0.0, 0.3) == 1.0
+    # alpha 0 (the default) switches decay off entirely: exactly 1 for every retrievability.
+    for r in (0.0, 0.2, 0.5, 0.9, 1.0):
+        assert adaptive_factor(r, 0.0, 0.3) == 1.0
 
 
 def test_the_write_clock_is_tz_aware_utc():

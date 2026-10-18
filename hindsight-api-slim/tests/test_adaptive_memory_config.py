@@ -30,7 +30,7 @@ from .test_hierarchical_config import FakeBankConfigBackend
 
 _HIERARCHICAL = {
     "adaptive_memory_mode": "off",
-    "adaptive_memory_score_alpha": 0.1,
+    "adaptive_memory_score_alpha": 0.0,
     "adaptive_memory_score_floor": 0.3,
     "adaptive_memory_reinforcement_enabled": True,
     "adaptive_memory_base_stability_days": 30.0,
@@ -352,15 +352,17 @@ async def test_bank_override_resolves_and_clears():
     bank_id = _bank()
     resolver = ConfigResolver(backend=FakeBankConfigBackend())
 
-    await resolver.update_bank_config(bank_id, {"adaptive_memory_mode": "Lifecycle", "adaptive_memory_score_alpha": 0})
+    await resolver.update_bank_config(
+        bank_id, {"adaptive_memory_mode": "Lifecycle", "adaptive_memory_score_alpha": 0.25}
+    )
     config = await resolver.resolve_full_config(bank_id)
     assert config.adaptive_memory_mode == "lifecycle"
-    assert config.adaptive_memory_score_alpha == 0
+    assert config.adaptive_memory_score_alpha == 0.25
 
     await resolver.update_bank_config(bank_id, {"adaptive_memory_mode": None, "adaptive_memory_score_alpha": None})
     config = await resolver.resolve_full_config(bank_id)
     assert config.adaptive_memory_mode == "off"
-    assert config.adaptive_memory_score_alpha == 0.1
+    assert config.adaptive_memory_score_alpha == 0.0, "cleared, the bank is back on the server default"
 
 
 # --- Bank config API: stored values that are no longer valid -------------------------

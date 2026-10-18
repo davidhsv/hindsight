@@ -1471,9 +1471,11 @@ DEFAULT_RECENCY_DECAY_HALFLIFE_DAYS = 90.0
 ADAPTIVE_MEMORY_MODES = ("off", "observe", "rank", "lifecycle")
 DEFAULT_ADAPTIVE_MEMORY_MODE = "off"
 # Weight of the retention factor in the final score: adaptive_factor =
-# (1 - alpha) + alpha * retention_factor. 0 disables decay; penalty-only, so the
-# worst case at the defaults is 1 - alpha * (1 - floor) = 0.93.
-DEFAULT_ADAPTIVE_MEMORY_SCORE_ALPHA = 0.1
+# (1 - alpha) + alpha * retention_factor. At 0 the factor is exactly 1, so retention
+# never changes ranking and rank/lifecycle order live memories as off does. Decay showed
+# no measured ranking benefit, so a bank opts in with a positive alpha; it is penalty-only,
+# and the worst case is 1 - alpha * (1 - floor).
+DEFAULT_ADAPTIVE_MEMORY_SCORE_ALPHA = 0.0
 # Lowest retention_factor a fully-forgotten memory can reach (raised per memory by importance).
 DEFAULT_ADAPTIVE_MEMORY_SCORE_FLOOR = 0.3
 DEFAULT_ADAPTIVE_MEMORY_REINFORCEMENT_ENABLED = True

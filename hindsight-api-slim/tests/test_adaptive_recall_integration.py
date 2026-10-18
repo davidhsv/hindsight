@@ -183,6 +183,39 @@ async def test_off_and_observe_return_the_same_recall(memory, request_context):
         await memory.delete_bank(bank_id, request_context=request_context)
 
 
+@pytest.mark.parametrize("mode", ["rank", "lifecycle"])
+async def test_at_the_default_alpha_rank_and_lifecycle_rank_active_memories_as_off(memory, request_context, mode):
+    """Retention is loaded, scored and reported, and moves nothing: the faded off-mode winner keeps
+    its place and every score is the off score, bit for bit."""
+    bank_id = _bank()
+    try:
+        ids = await _seed_units(
+            memory,
+            request_context,
+            bank_id,
+            [(text, QDATE - timedelta(days=age)) for text, age in zip(DEPLOY_TEXTS, (900, 1, 60, 5, 400))],
+        )
+        off = await _recall(memory, request_context, bank_id, DEPLOY_QUERY)
+        assert set(_ids(off)) == set(ids)
+        top = _ids(off)[0]
+        await _seed_retention(memory, bank_id, top, last=QDATE - timedelta(days=3650), stability=1.0)
+        await _seed_claim(memory, bank_id, top, status="active")
+
+        await _configure(memory, bank_id, mode=mode)
+        adaptive = await _recall(memory, request_context, bank_id, DEPLOY_QUERY, enable_trace=True)
+
+        assert [(str(r.id), r.text, r.scores) for r in adaptive.results] == [
+            (str(r.id), r.text, r.scores) for r in off.results
+        ]
+        trace = adaptive.trace["adaptive"]
+        assert (trace["mode"], trace["alpha"], trace["scored"], trace["rerank_changed"]) == (mode, 0.0, True, False)
+        components = _components(adaptive)
+        assert components[top]["retrievability"] == pytest.approx(0.0, abs=1e-9)
+        assert {c["adaptive_factor"] for c in components.values()} == {1.0}
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
 async def test_rank_reorders_exactly_as_observe_predicted(memory, request_context):
     bank_id = _bank()
     try:
@@ -230,7 +263,7 @@ async def test_an_exact_cue_recovers_a_faded_memory_past_min_scores_and_the_toke
         assert _ids(off)[0] == vault
         off_weight = off.results[0].scores.final
 
-        await _configure(memory, bank_id, mode="rank")  # default alpha / floor
+        await _configure(memory, bank_id, mode="rank", score_alpha=0.1)  # an opted-in alpha, the default floor
         ranked = await _recall(memory, request_context, bank_id, VAULT_TEXT, enable_trace=True)
         assert _ids(ranked)[0] == vault
         assert _components(ranked)[vault]["adaptive_factor"] == pytest.approx(0.93)

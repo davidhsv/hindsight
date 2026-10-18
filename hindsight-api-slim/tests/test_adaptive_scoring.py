@@ -123,12 +123,38 @@ def _words(text: str) -> int:
 
 # --------------------------------------------------------------------------- ranking
 
+#: An alpha a bank opts into: the default (0) keeps retention out of ranking altogether.
+OPTED_IN_ALPHA = 0.1
+
+
+@pytest.mark.parametrize("mode", ["rank", "lifecycle"])
+def test_at_the_default_alpha_retention_never_moves_a_score(mode):
+    """Faded, fresh, reinforced and lazy memories all keep their weight bit for bit, so the
+    order is the factor-free one (what mode off returns)."""
+    settings = _settings(mode)
+    assert settings.score_alpha == 0.0
+    results = [
+        _result("faded", 0.50, age_days=3650),
+        _result("fresh", 0.49, age_days=0),
+        _result("reinforced", 0.30, age_days=200),
+        _result("undated", 0.30, age_days=None),
+    ]
+    weights = [sr.weight for sr in results]
+    attach_adaptive(
+        results, {"reinforced": _row("reinforced", last=NOW - timedelta(days=1), stability=400)}, settings, NOW
+    )
+    apply_adaptive_factor(results)
+    assert [sr.adaptive_factor for sr in results] == [1.0, 1.0, 1.0, 1.0]
+    assert [sr.weight for sr in results] == weights
+    assert results[0].retrievability == pytest.approx(0.0, abs=1e-12), "retention is still computed and reported"
+    assert _ranked(results) == ["faded", "fresh", "reinforced", "undated"]
+
 
 def test_an_old_relevant_memory_stays_recoverable():
     old_precise = _result("old", 0.9, age_days=3650)
     recent_vague = _result("recent", 0.6, age_days=0)
     results = [old_precise, recent_vague]
-    attach_adaptive(results, {}, _settings(), NOW)
+    attach_adaptive(results, {}, _settings(score_alpha=OPTED_IN_ALPHA), NOW)
     apply_adaptive_factor(results)
     assert _ranked(results) == ["old", "recent"]
     assert old_precise.retrievability == pytest.approx(0.0, abs=1e-12)
@@ -137,7 +163,7 @@ def test_an_old_relevant_memory_stays_recoverable():
 
 def test_an_irrelevant_recent_memory_does_not_beat_a_precise_old_one():
     results = [_result("old", 0.8, age_days=400), _result("irrelevant", 0.2, age_days=0)]
-    attach_adaptive(results, {}, _settings(), NOW)
+    attach_adaptive(results, {}, _settings(score_alpha=OPTED_IN_ALPHA), NOW)
     apply_adaptive_factor(results)
     assert _ranked(results) == ["old", "irrelevant"]
 
@@ -146,7 +172,7 @@ def test_a_weak_memory_is_downranked_on_a_weak_cue():
     # Near-tied relevance: the faded memory loses to the retrievable one.
     faded, fresh = _result("faded", 0.50, age_days=365), _result("fresh", 0.49, age_days=1)
     results = [faded, fresh]
-    attach_adaptive(results, {}, _settings(), NOW)
+    attach_adaptive(results, {}, _settings(score_alpha=OPTED_IN_ALPHA), NOW)
     apply_adaptive_factor(results)
     assert _ranked(results) == ["fresh", "faded"]
 
@@ -155,7 +181,10 @@ def test_a_reinforced_row_beats_the_lazy_age_default():
     # Same mention age, same relevance; the stored reinforcement decides.
     results = [_result("lazy", 0.5, age_days=200), _result("reinforced", 0.5, age_days=200)]
     attach_adaptive(
-        results, {"reinforced": _row("reinforced", last=NOW - timedelta(days=1), stability=400)}, _settings(), NOW
+        results,
+        {"reinforced": _row("reinforced", last=NOW - timedelta(days=1), stability=400)},
+        _settings(score_alpha=OPTED_IN_ALPHA),
+        NOW,
     )
     apply_adaptive_factor(results)
     assert _ranked(results) == ["reinforced", "lazy"]
@@ -179,7 +208,7 @@ def test_importance_lifts_the_floor():
         "plain": _row("plain", last=NOW - timedelta(days=3650), stability=1),
         "important": _row("important", last=NOW - timedelta(days=3650), stability=1, importance=1.0),
     }
-    attach_adaptive(results, states, _settings(), NOW)
+    attach_adaptive(results, states, _settings(score_alpha=OPTED_IN_ALPHA), NOW)
     assert results[1].retention_factor > results[0].retention_factor
 
 

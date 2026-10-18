@@ -17,7 +17,9 @@ and recall months later ranks by what was learned.
 
 R wins the proof count (ten sources against three), so the ranking at day 200 is not an artefact
 of evidence volume; S's later mentions also help it through the recency boost, which is why the
-story also asserts the retrievability the adaptive factor scored, read from the trace.
+story also asserts the retrievability the adaptive factor scored, read from the trace. Ranking by
+retention is opt-in (``adaptive_memory_score_alpha`` defaults to 0, which leaves every score as
+it is), so the bank sets an alpha.
 """
 
 from __future__ import annotations
@@ -68,7 +70,9 @@ def _consolidate(request) -> Consolidation:
 @pytest.fixture
 async def two_claims(client, llm, bank_id, settled) -> dict[str, str]:
     """The bank after both histories; maps each claim to its observation id."""
-    await client.banks.update_bank_config(bank_id, {"updates": {"adaptive_memory_mode": "rank"}})
+    await client.banks.update_bank_config(
+        bank_id, {"updates": {"adaptive_memory_mode": "rank", "adaptive_memory_score_alpha": 0.1}}
+    )
     llm.on_step("extract_facts", contains=SPACED).returns(extracted(fact(SPACED)))
     llm.on_step("extract_facts", contains=REPEATED).returns(extracted(fact(REPEATED)))
     llm.on_step("consolidate").answers_with(_consolidate)
