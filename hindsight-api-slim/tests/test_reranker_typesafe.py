@@ -6,6 +6,7 @@ is this provider's whole substance. The HTTP round trip is faked; what is assert
 the requests we build and the order and cut we derive from the answers.
 """
 
+import re
 from contextlib import asynccontextmanager
 from dataclasses import fields
 from unittest.mock import patch
@@ -148,7 +149,7 @@ class TestRanking:
         await encoder._predict([("who paid?", "Alice paid the bill")])
 
         body = session.rank_requests[0]
-        assert body["model"] == "jev-latest"
+        assert body["model"] == "jev-1.14.0"
         assert "who paid?" in body["state"]
         question = body["questions"]["rank"]
         assert question["type"] == "choice"
@@ -322,8 +323,16 @@ class TestFactory:
 
     def test_defaults_are_jev_and_no_pruning(self):
         config = HindsightConfig.from_env()
-        assert config.reranker_typesafe_model == "jev-latest"
+        assert config.reranker_typesafe_model == "jev-1.14.0"
         assert config.reranker_typesafe_prune_candidates is False
+
+    def test_the_default_model_is_an_explicit_release_and_the_env_overrides_it(self, monkeypatch):
+        """An alias such as jev-latest moves with TypeSafe's releases, and recall's ranking with it."""
+        monkeypatch.delenv("HINDSIGHT_API_RERANKER_TYPESAFE_MODEL", raising=False)
+        assert re.fullmatch(r"jev-\d+\.\d+\.\d+", HindsightConfig.from_env().reranker_typesafe_model)
+
+        monkeypatch.setenv("HINDSIGHT_API_RERANKER_TYPESAFE_MODEL", "jev-latest")
+        assert HindsightConfig.from_env().reranker_typesafe_model == "jev-latest"
 
     @pytest.mark.asyncio
     async def test_base_url_is_honoured(self):

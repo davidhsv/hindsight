@@ -329,7 +329,8 @@ def run_label() -> str:
     provider = os.getenv("HINDSIGHT_EVAL_SET_RERANKER_PROVIDER", "local")
     if provider != "typesafe":
         return f"{provider} reranker"
-    model = os.getenv("HINDSIGHT_EVAL_SET_RERANKER_TYPESAFE_MODEL", "jev-latest")
+    # The server's own default when the run does not set one (DEFAULT_RERANKER_TYPESAFE_MODEL).
+    model = os.getenv("HINDSIGHT_EVAL_SET_RERANKER_TYPESAFE_MODEL", "jev-1.14.0")
     prune = os.getenv("HINDSIGHT_EVAL_SET_RERANKER_TYPESAFE_PRUNE_CANDIDATES", "false").lower() == "true"
     return f"typesafe {model} ({'drop' if prune else 'keep'} irrelevant)"
 

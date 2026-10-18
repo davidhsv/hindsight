@@ -1506,7 +1506,11 @@ DEFAULT_EMBEDDINGS_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_EMBEDDINGS_NVIDIA_DIMENSIONS = 1024
 DEFAULT_EMBEDDINGS_NVIDIA_BATCH_SIZE = 100
 
-DEFAULT_RERANKER_TYPESAFE_MODEL = "jev-latest"
+# An explicit Jev release, not the "jev-latest" alias: the alias moves to each new release on
+# TypeSafe's schedule, and recall's ranking would change with it unannounced. jev-1.14.0 ranked
+# at least as well as jev-1.13.0 on every endpoint measured (LoCoMo gold@1 +1.1 points, exact
+# McNemar p = 0.016; LongMemEval tied). Override with HINDSIGHT_API_RERANKER_TYPESAFE_MODEL.
+DEFAULT_RERANKER_TYPESAFE_MODEL = "jev-1.14.0"
 DEFAULT_RERANKER_TYPESAFE_BASE_URL = "https://api.typesafe.ai"
 DEFAULT_RERANKER_TYPESAFE_MAX_CONCURRENT = 24
 # Off by default: dropping changes what recall returns, so it is opt-in.
@@ -1529,8 +1533,14 @@ class _DecisionProviderDefaults:
 
 # "none": no decision model; operations that could use one keep their LLM-only path.
 # typesafe and cloudflare speak the System One API; openai has its own Decisions API.
+#
+# typesafe is pinned to an explicit Jev release for the reason the reranker is (see
+# DEFAULT_RERANKER_TYPESAFE_MODEL), but to jev-1.13.0, not 1.14.0. 1.13.0 is what jev-latest
+# served when the pin was made, so triage and reflect keep the model they run on today, and
+# 1.14.0 has only been measured to tie it on per-memory relevance. Move it together with a
+# re-measurement of the questions asked of it.
 DECISION_MODEL_PROVIDER_DEFAULTS = {
-    "typesafe": _DecisionProviderDefaults(model="jev-latest", base_url="https://api.typesafe.ai"),
+    "typesafe": _DecisionProviderDefaults(model="jev-1.13.0", base_url="https://api.typesafe.ai"),
     "cloudflare": _DecisionProviderDefaults(model="clef", base_url=None),
     "openai": _DecisionProviderDefaults(model="gpt-6-luna", base_url="https://api.openai.com"),
 }
@@ -1539,7 +1549,7 @@ DEFAULT_DECISION_MODEL_PROVIDER = "none"
 DEFAULT_DECISION_MODEL_TIMEOUT = 60.0
 DEFAULT_DECISION_MODEL_MAX_CONCURRENT = 24
 # Most tokens one request may carry, counted on the whole JSON body. It follows the context
-# window of the model the endpoint serves (32k for jev-latest), less a margin: the endpoint
+# window of the model the endpoint serves (32k for jev-1.13.0), less a margin: the endpoint
 # counted 14% more than we do on the same body (42.3k vs 37.3k, 95.2k vs 83.5k), so 26k
 # here is about 29.6k there. A request has to hold the state and at least one question,
 # hence the floor.
