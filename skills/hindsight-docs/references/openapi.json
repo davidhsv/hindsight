@@ -711,7 +711,7 @@
           "Memory"
         ],
         "summary": "Get memory unit",
-        "description": "Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead.",
+        "description": "Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead. When the bank's adaptive memory mode is not 'off', or adaptive state is stored for the memory, the payload also carries 'lifecycle': its retention (stability, retrievability now, importance, exemption), claim, lifecycle relations and most recent reinforcement events.",
         "operationId": "get_memory",
         "parameters": [
           {
@@ -895,6 +895,169 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/default/banks/{bank_id}/memories/{memory_id}/confirm": {
+      "post": {
+        "tags": [
+          "Memory"
+        ],
+        "summary": "Confirm memory",
+        "description": "Record explicit evidence that a memory (a fact or an observation) still holds. The confirmation reinforces the memory, so it stays readily recallable for longer. A source_key confirms a memory at most once; re-sending it changes nothing. Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle' with reinforcement enabled (409 otherwise; observe mode never changes state). 404 when the memory is missing or invalidated.",
+        "operationId": "confirm_memory",
+        "parameters": [
+          {
+            "name": "bank_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bank Id"
+            }
+          },
+          {
+            "name": "memory_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Memory Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ConfirmMemoryRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfirmMemoryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle": {
+      "patch": {
+        "tags": [
+          "Memory"
+        ],
+        "summary": "Update memory lifecycle",
+        "description": "Change how a memory (a fact or an observation) is retained \u2014 its importance and its exemption from retention decay, in adaptive memory mode 'rank' or 'lifecycle' \u2014 and what should be believed about it: truth_status, superseded_by and reason, in mode 'lifecycle' only. Retiring a memory (superseded/refuted) takes it out of current recall and records an explicit lifecycle relation; 'active' restores it. Returns the memory's lifecycle view, the same one GET /memories/{memory_id} shows under 'lifecycle'. 409 when the bank's mode does not allow the change or the memory is already retired; 404 when the memory (or superseded_by) is missing or invalidated; 400 for a successor in another scope.",
+        "operationId": "update_memory_lifecycle",
+        "parameters": [
+          {
+            "name": "bank_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bank Id"
+            }
+          },
+          {
+            "name": "memory_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Memory Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemoryLifecycleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryLifecycle"
+                }
               }
             }
           },
@@ -9789,6 +9952,229 @@
             "title": "Recall Chunks Max Tokens",
             "description": "Max tokens of raw chunks returned by recall (when recall_include_chunks is set)"
           },
+          "adaptive_memory_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adaptive Memory Mode",
+            "description": "Adaptive memory mode: 'off' (default; recall is unchanged), 'observe' (compute retention and report it in traces and metrics only), 'rank' (retention and reinforcement state; rarely reinforced memories are down-weighted only when adaptive_memory_score_alpha is above 0, which the server must allow) or 'lifecycle' (rank plus claim lifecycle: superseded and refuted memories stop answering current recall, and history is available through recall's lifecycle_view and as_of)"
+          },
+          "adaptive_memory_score_alpha": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adaptive Memory Score Alpha",
+            "description": "Weight of the retention factor in the final recall score (0, the default, = no decay). A value above 0 is experimental: it is accepted only when the server sets HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL, and without it a stored value reads as 0"
+          },
+          "adaptive_memory_score_floor": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adaptive Memory Score Floor",
+            "description": "Lowest retention factor a fully-forgotten memory can reach"
+          },
+          "adaptive_memory_reinforcement_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adaptive Memory Reinforcement Enabled",
+            "description": "Let reinforcement events raise a memory's stability (rank and lifecycle modes only)"
+          },
+          "adaptive_memory_base_stability_days": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adaptive Memory Base Stability Days",
+            "description": "Days before an unreinforced world fact's retrievability falls to e^-1"
+          },
+          "adaptive_memory_max_stability_days": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adaptive Memory Max Stability Days",
+            "description": "Cap on a memory's stability in days (must be >= adaptive_memory_base_stability_days)"
+          },
+          "adaptive_memory_default_view": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adaptive Memory Default View",
+            "description": "Lifecycle recall view when the request names none: 'current' (default; superseded and refuted memories are left out) or 'historical' (superseded ones are returned too, annotated)"
+          },
+          "adaptive_memory_historical_cues": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adaptive Memory Historical Cues",
+            "description": "Detect historical phrasing ('used to', 'before the migration', 'before <date>', ...) in external recall queries that name no lifecycle_view, and answer them from the historical view (or as of the date). Lifecycle mode only"
+          },
+          "context_admission_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Mode",
+            "description": "Context admission mode for external recalls: 'off' (default; recall is unchanged) or 'observe' (decisions and the would-be admitted set go to traces and metrics only). The experimental 'filter' (rejected memories are dropped and recall may return none) and 'strict' (filter plus hard scope, near-duplicate suppression and the memory/token budget) are accepted only when the server sets HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL"
+          },
+          "context_admission_threshold_auto": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Threshold Auto",
+            "description": "Admission score a memory needs on a recall with purpose 'auto_context'"
+          },
+          "context_admission_threshold_explicit": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Threshold Explicit",
+            "description": "Admission score a memory needs on a recall with purpose 'explicit_search' or 'historical_search'"
+          },
+          "context_admission_reference_bonus": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Reference Bonus",
+            "description": "Subtracted from the auto_context threshold when the query refers to shared history ('last time', 'what did we decide')"
+          },
+          "context_admission_candidates": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Candidates",
+            "description": "Top-ranked recall results the admission gate judges; the rest are never admitted"
+          },
+          "context_admission_max_memories": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Max Memories",
+            "description": "Most memories admitted per recall (strict mode)"
+          },
+          "context_admission_max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Max Tokens",
+            "description": "Most memory tokens admitted per recall (strict mode)"
+          },
+          "context_admission_mmr_lambda": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Mmr Lambda",
+            "description": "MMR trade-off between a memory's score and its novelty against those already admitted (1 = score only; strict mode)"
+          },
+          "context_admission_dup_similarity": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Admission Dup Similarity",
+            "description": "Embedding cosine above which a memory counts as a near-duplicate of one already admitted (strict mode)"
+          },
           "memory_defense": {
             "anyOf": [
               {
@@ -10420,6 +10806,156 @@
           "document_id": "session_1"
         }
       },
+      "ClaimShadowView": {
+        "properties": {
+          "would_status": {
+            "type": "string",
+            "title": "Would Status"
+          },
+          "deciding_snapshot": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Deciding Snapshot"
+          },
+          "evidence_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Ids"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "would_status"
+        ],
+        "title": "ClaimShadowView",
+        "description": "What observe mode would have retired this memory as (diagnostic only)."
+      },
+      "ClaimView": {
+        "properties": {
+          "truth_status": {
+            "type": "string",
+            "title": "Truth Status"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid From"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid To"
+          },
+          "retired_via": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retired Via"
+          },
+          "superseded_by_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By Id"
+          },
+          "inherited_from_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inherited From Id"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "evidence_memory_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Memory Ids"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "truth_status"
+        ],
+        "title": "ClaimView",
+        "description": "The memory's claim row: what should be believed about it, and why."
+      },
       "ClearMemoryObservationsResponse": {
         "properties": {
           "deleted_count": {
@@ -10436,6 +10972,120 @@
         "example": {
           "deleted_count": 3
         }
+      },
+      "ConfirmMemoryRequest": {
+        "properties": {
+          "source_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Key",
+            "description": "Identifies this piece of evidence. A memory is confirmed at most once per key: re-sending the same key is reported as deduplicated and changes nothing, so a retry is safe. Omit it and every request counts as a separate confirmation."
+          },
+          "event_time": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Time",
+            "description": "When the confirmation happened (ISO 8601; a time without an offset is UTC). Defaults to now. It may be in the past, but not in the future."
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason",
+            "description": "Free-text note for the audit log, when audit logging is on. Not stored with the memory."
+          }
+        },
+        "type": "object",
+        "title": "ConfirmMemoryRequest",
+        "description": "Request model for explicitly confirming that a memory still holds.\n\nA confirmation is reinforcement evidence: it makes the memory more stable, so it stays\nreadily recallable for longer. Needs the bank's adaptive memory mode to be 'rank' or\n'lifecycle' with reinforcement enabled.",
+        "example": {
+          "event_time": "2026-10-17T09:00:00Z",
+          "reason": "verified against the deployment inventory",
+          "source_key": "review-2026-10-17"
+        }
+      },
+      "ConfirmMemoryResponse": {
+        "properties": {
+          "memory_id": {
+            "type": "string",
+            "title": "Memory Id"
+          },
+          "recorded": {
+            "type": "boolean",
+            "title": "Recorded",
+            "description": "True when the confirmation was recorded as evidence for the memory."
+          },
+          "deduplicated": {
+            "type": "boolean",
+            "title": "Deduplicated",
+            "description": "True when this source_key had already confirmed the memory; nothing changed."
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome",
+            "description": "'applied' (the memory was reinforced), 'cooldown' (recorded, but too soon after its last reinforcement to add stability) or 'deduplicated'."
+          },
+          "stability_days": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stability Days",
+            "description": "The memory's stability after the call: the days until, without reinforcement, its retrievability falls to about 37%."
+          },
+          "reinforcement_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reinforcement Count",
+            "description": "How many times the memory has been reinforced, after the call."
+          }
+        },
+        "type": "object",
+        "required": [
+          "memory_id",
+          "recorded",
+          "deduplicated"
+        ],
+        "title": "ConfirmMemoryResponse",
+        "description": "What an explicit confirmation did."
       },
       "ConsolidationRequest": {
         "properties": {
@@ -10660,6 +11310,33 @@
         ],
         "title": "Content",
         "description": "The raw content to retain or extract from. Either a plain string or an ordered list of content blocks."
+      },
+      "ContextAdmissionSummary": {
+        "properties": {
+          "abstained": {
+            "type": "boolean",
+            "title": "Abstained",
+            "description": "Candidates were judged and none was admitted: the empty results are the answer (nothing relevant), not an empty bank or a too-narrow filter"
+          },
+          "candidates": {
+            "type": "integer",
+            "title": "Candidates",
+            "description": "Candidates judged (0 when retrieval found nothing to judge)"
+          },
+          "admitted": {
+            "type": "integer",
+            "title": "Admitted",
+            "description": "Candidates admitted (the results can be fewer, after the token budget)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "abstained",
+          "candidates",
+          "admitted"
+        ],
+        "title": "ContextAdmissionSummary",
+        "description": "What context admission decided on a recall whose results it filters (filter or strict mode).\n\nPresent only then: with the mode off or observe the results are what retrieval returned, and\nthe payload carries nothing new. The reasons per candidate are in the trace only."
       },
       "CreateBankAliasRequest": {
         "properties": {
@@ -14662,6 +15339,32 @@
             ],
             "title": "Update Mode",
             "description": "How to handle an existing document with the same document_id. 'replace' (default) deletes old data and reprocesses from scratch. 'append' concatenates new content to the existing document text and reprocesses."
+          },
+          "importance": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Importance",
+            "description": "How much the memories extracted from this item matter, in [0, 1] (0.5 is neutral). Scales how long they stay readily recallable without being reinforced. Applied only when the bank's adaptive memory mode is 'rank' or 'lifecycle'; ignored in every other mode."
+          },
+          "forgetting_exempt": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Forgetting Exempt",
+            "description": "Exempt the memories extracted from this item from retention decay: they always rank as fully retrievable. Applied only when the bank's adaptive memory mode is 'rank' or 'lifecycle'; ignored in every other mode."
           }
         },
         "type": "object",
@@ -14693,6 +15396,75 @@
           ],
           "timestamp": "2024-01-15T10:30:00Z"
         }
+      },
+      "MemoryLifecycle": {
+        "properties": {
+          "memory_id": {
+            "type": "string",
+            "title": "Memory Id"
+          },
+          "archived": {
+            "type": "boolean",
+            "title": "Archived"
+          },
+          "stored": {
+            "type": "boolean",
+            "title": "Stored"
+          },
+          "retention": {
+            "$ref": "#/components/schemas/RetentionView"
+          },
+          "claim": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClaimView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "relations_out": {
+            "items": {
+              "$ref": "#/components/schemas/RelationView"
+            },
+            "type": "array",
+            "title": "Relations Out"
+          },
+          "relations_in": {
+            "items": {
+              "$ref": "#/components/schemas/RelationView"
+            },
+            "type": "array",
+            "title": "Relations In"
+          },
+          "recent_events": {
+            "items": {
+              "$ref": "#/components/schemas/ReinforcementEventView"
+            },
+            "type": "array",
+            "title": "Recent Events"
+          },
+          "shadow": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClaimShadowView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "memory_id",
+          "archived",
+          "stored",
+          "retention"
+        ],
+        "title": "MemoryLifecycle",
+        "description": "Everything the store holds about one memory's adaptive state.\n\n``archived`` memories (curation-invalidated) are read from the snapshot taken when they were\ninvalidated, which carries no shadow record. ``stored`` is False when nothing at all is stored\nfor the memory, so ``retention`` is all defaults and every list is empty: the GET view leaves\nthe key out for such a memory while the bank's mode is off."
       },
       "MemoryTimeseriesBucket": {
         "properties": {
@@ -15011,7 +15783,8 @@
                   "source_query_changed",
                   "structured_doc_unreadable",
                   "delta_ops_failed",
-                  "delta_ops_all_skipped"
+                  "delta_ops_all_skipped",
+                  "retired_grounding"
                 ]
               },
               {
@@ -15350,7 +16123,8 @@
                   "source_query_changed",
                   "structured_doc_unreadable",
                   "delta_ops_failed",
-                  "delta_ops_all_skipped"
+                  "delta_ops_all_skipped",
+                  "retired_grounding"
                 ]
               },
               {
@@ -15654,7 +16428,7 @@
             },
             "type": "array",
             "title": "Fact Ids",
-            "description": "Ids the document's based_on cites that no longer exist in the bank."
+            "description": "Ids the document's based_on cites that no longer exist in the bank, or (lifecycle mode) whose claim was superseded or refuted."
           },
           "fact_texts": {
             "items": {
@@ -15667,7 +16441,31 @@
           "applied": {
             "type": "boolean",
             "title": "Applied",
-            "description": "Whether the pass that removes them ran to completion (zero edits still counts)."
+            "description": "Whether the pass that removes them ran to completion (zero edits still counts). For retired claims that pass is the full regeneration: true when it produced the document."
+          },
+          "cause": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "superseded",
+                  "refuted"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cause",
+            "description": "Lifecycle mode: why cited memories stopped being current \u2014 'refuted' when any of them was refuted, else 'superseded'. Omitted when every retracted fact is simply gone."
+          },
+          "successor_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Successor Ids",
+            "description": "Lifecycle mode: the memories that replaced the retired citations. Omitted when none."
           },
           "deferred_reason": {
             "anyOf": [
@@ -15687,7 +16485,7 @@
           "applied"
         ],
         "title": "MentalModelRetraction",
-        "description": "Facts the document cited that no longer exist, and what was done about them.\n\nA retraction is the one refresh input that is *invisible* in every other\nreport: the fact is gone from the bank, so it appears in no recall, no tool\ncall, and no supporting-fact list. Without this, a refresh that quietly\ndeleted a paragraph \u2014 or quietly declined to \u2014 leaves no evidence of why."
+        "description": "Facts the document cited that no longer exist, and what was done about them.\n\nA retraction is the one refresh input that is *invisible* in every other\nreport: the fact is gone from the bank, so it appears in no recall, no tool\ncall, and no supporting-fact list. Without this, a refresh that quietly\ndeleted a paragraph \u2014 or quietly declined to \u2014 leaves no evidence of why.\n\nIn adaptive memory ``lifecycle`` mode a cited memory whose claim was superseded or\nrefuted counts too: it is still a row, but no longer a current answer. ``cause`` and\n``successor_ids`` say so; both are omitted when no such citation was found."
       },
       "MentalModelTraceToolCall": {
         "properties": {
@@ -17105,6 +17903,74 @@
         "title": "PromptPreviewResponse",
         "description": "The messages one call of the requested operation would send.\n\n`messages` is in send order, system first. Both are always present because a\nmission is not necessarily in the system prompt: retain and consolidation keep\ntheir system prompt bank-agnostic (so one provider-side cache serves every bank)\nand carry the mission in the user message instead.\n\nWhen `skipped_reason` is set the configuration means no prompt is sent at all \u2014\n`chunks` extraction mode stores each chunk verbatim and never calls an LLM \u2014 and\n`messages` is empty."
       },
+      "RecallLifecycle": {
+        "properties": {
+          "truth_status": {
+            "type": "string",
+            "enum": [
+              "uncertain",
+              "superseded",
+              "refuted"
+            ],
+            "title": "Truth Status",
+            "description": "'superseded' (a later memory replaced it), 'refuted' (it was wrong) or 'uncertain' (conflicting evidence, not resolved)"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence",
+            "description": "Confidence in the claim, when one was recorded"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid From",
+            "description": "ISO time the claim became true; null means since before anything recorded"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid To",
+            "description": "ISO time the claim stopped being true"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By",
+            "description": "Id of the memory that replaced this one"
+          }
+        },
+        "type": "object",
+        "required": [
+          "truth_status"
+        ],
+        "title": "RecallLifecycle",
+        "description": "What should be believed about a recalled memory, when that is not simply \"it holds\".\n\nPresent on a recall result only when the bank's adaptive memory mode is ``lifecycle`` and the\nmemory's claim is not plain ``active``: a superseded or refuted memory a historical or\n``as_of`` recall returned, or an ``uncertain`` one (contested by conflicting evidence)."
+      },
       "RecallRequest": {
         "properties": {
           "query": {
@@ -17246,6 +18112,63 @@
               }
             ],
             "description": "Window for the temporal retrieval arm, supplied instead of extracting dates from `query`. Set this when you already know the range you mean \u2014 a date picker, or an agent that resolved 'last quarter' itself \u2014 and recall will skip parsing the query text for dates. **This ranks, it does not filter**: the temporal arm surfaces memories whose own dates (`mentioned_at`, `occurred_start`, `occurred_end`) fall inside the window so they rank higher, while the semantic, keyword and graph arms are unaffected \u2014 so memories dated outside the window are still returned. Ignored when the bank has temporal retrieval disabled."
+          },
+          "lifecycle_view": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "current",
+                  "historical"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lifecycle View",
+            "description": "Which memories to show when the bank's adaptive memory mode is 'lifecycle' (ignored in every other mode). 'current' leaves out memories that were superseded or refuted; 'historical' also returns superseded ones, each annotated with `lifecycle` (its validity and successor), but never refuted ones. When omitted, the bank's `adaptive_memory_default_view` applies."
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of",
+            "description": "Show memories as they stood at this instant (ISO 8601; a time without an offset is UTC), when the bank's adaptive memory mode is 'lifecycle': a memory is returned only if its claim was valid then. Refuted memories never are. Takes precedence over `lifecycle_view`. It does not change ranking: `query_timestamp` stays the clock recency is scored against."
+          },
+          "purpose": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "auto_context",
+                  "explicit_search",
+                  "historical_search"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Purpose",
+            "description": "Why the caller recalls, which sets the trade-off context admission makes when the bank's `context_admission_mode` is not 'off'. 'auto_context': memories injected into an agent's context that nobody asked for, judged against the stricter `context_admission_threshold_auto`; 'explicit_search' (the default when omitted): someone asked, judged against `context_admission_threshold_explicit`; 'historical_search': the caller wants how things were, so superseded memories are admissible, and in lifecycle mode the claim view is 'historical' unless `lifecycle_view` or `as_of` is given (whatever the admission mode). In filter and strict modes the result may be empty when no memory is worth injecting."
+          },
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecallTaskContext"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the caller is working (repository, branch, module, ...), compared with memory metadata by context admission. Ignored when the bank's `context_admission_mode` is 'off'."
           }
         },
         "type": "object",
@@ -17368,6 +18291,17 @@
             ],
             "title": "Nothing Relevant",
             "description": "Set when the bank's recall relevance check is on (recall_relevance_check): true when a decision model judged that none of the top ten results helps answer the query, or none was returned. A warning, not a filter: the results are the same either way. None when the check is off or the decision model did not answer."
+          },
+          "context_admission": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContextAdmissionSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set only when context admission filtered this recall (bank context_admission_mode filter or strict). abstained=true means the empty results are the answer: candidates were judged and none was relevant to the task."
           }
         },
         "type": "object",
@@ -17571,6 +18505,17 @@
               }
             ]
           },
+          "lifecycle": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecallLifecycle"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Claim lifecycle state, when the bank's adaptive memory mode is 'lifecycle' and the memory is not plain active: a superseded or refuted memory a historical or as_of recall returned, or an uncertain one. Omitted otherwise."
+          },
           "attachments": {
             "anyOf": [
               {
@@ -17667,6 +18612,97 @@
         ],
         "title": "RecallScores",
         "description": "Per-result recall scores from different stages of the pipeline.\n\n``final`` is the value results are ranked by. The others are diagnostic and\ncan be filtered on via the recall ``min_scores`` request parameter. ``semantic``\nand ``keyword`` are the raw per-strategy retrieval scores (``None`` when that\nstrategy did not surface this result); ``reranker`` is the cross-encoder's\nnormalized relevance."
+      },
+      "RecallTaskContext": {
+        "properties": {
+          "repository": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repository",
+            "description": "Stable repository identity, e.g. the normalized git remote 'github.com/acme/payments'"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch",
+            "description": "Current branch"
+          },
+          "module": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Module",
+            "description": "Subsystem or top-level folder the task is in"
+          },
+          "environment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment",
+            "description": "Deployment environment, e.g. 'prod' or 'staging'"
+          },
+          "service": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service",
+            "description": "Service the task concerns"
+          },
+          "task_intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Intent",
+            "description": "Free-text kind of task, e.g. 'debug', 'implementation', 'code review'"
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace",
+            "description": "Workspace or session label"
+          }
+        },
+        "type": "object",
+        "title": "RecallTaskContext",
+        "description": "Where the caller is working, compared with memory metadata by context admission.\n\nEvery key is optional. With the bank's ``context_admission_mode`` at ``off`` the whole object is\nignored. Otherwise each key the server lists in ``HINDSIGHT_API_CONTEXT_ADMISSION_SCOPE_KEYS``\nis compared with the memory metadata key of the same name (match, mismatch or unknown), and a\nmismatch on a key in ``HINDSIGHT_API_CONTEXT_ADMISSION_HARD_SCOPE_KEYS`` rejects the memory in\nstrict mode. ``task_intent`` and ``workspace`` only reach the decision-model scorer."
       },
       "RecoverConsolidationResponse": {
         "properties": {
@@ -18468,6 +19504,155 @@
         "title": "RefreshMentalModelRequest",
         "description": "Optional body of POST /mental-models/{id}/refresh."
       },
+      "ReinforcementEventView": {
+        "properties": {
+          "source_type": {
+            "type": "string",
+            "title": "Source Type"
+          },
+          "source_key": {
+            "type": "string",
+            "title": "Source Key"
+          },
+          "event_time": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Event Time"
+          },
+          "weight": {
+            "type": "number",
+            "title": "Weight"
+          },
+          "independence_weight": {
+            "type": "number",
+            "title": "Independence Weight"
+          },
+          "applied_gain": {
+            "type": "number",
+            "title": "Applied Gain"
+          },
+          "outcome": {
+            "type": "string",
+            "title": "Outcome"
+          },
+          "processed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Processed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_type",
+          "source_key",
+          "event_time",
+          "weight",
+          "independence_weight",
+          "applied_gain",
+          "outcome"
+        ],
+        "title": "ReinforcementEventView",
+        "description": "One ledger row."
+      },
+      "RelationView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "relation_type": {
+            "type": "string",
+            "title": "Relation Type"
+          },
+          "source_memory_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Memory Id"
+          },
+          "target_memory_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Memory Id"
+          },
+          "source_snapshot": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Source Snapshot"
+          },
+          "target_snapshot": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Target Snapshot"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "relation_type",
+          "source_memory_id",
+          "target_memory_id",
+          "origin"
+        ],
+        "title": "RelationView",
+        "description": "One lifecycle relation. A NULL endpoint is a tombstone: that memory is gone (its snapshot stays)."
+      },
       "ReprocessDocumentResponse": {
         "properties": {
           "success": {
@@ -18636,6 +19821,128 @@
             "total_tokens": 600
           }
         }
+      },
+      "RetentionView": {
+        "properties": {
+          "materialized": {
+            "type": "boolean",
+            "title": "Materialized",
+            "description": "True when a retention row exists; False when every value is a default."
+          },
+          "retrievability": {
+            "type": "number",
+            "title": "Retrievability"
+          },
+          "stability_days": {
+            "type": "number",
+            "title": "Stability Days"
+          },
+          "importance": {
+            "type": "number",
+            "title": "Importance"
+          },
+          "last_reinforced_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Reinforced At"
+          },
+          "reinforcement_count": {
+            "type": "integer",
+            "title": "Reinforcement Count"
+          },
+          "access_count": {
+            "type": "integer",
+            "title": "Access Count"
+          },
+          "last_recalled_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Recalled At"
+          },
+          "forgetting_exempt": {
+            "type": "boolean",
+            "title": "Forgetting Exempt"
+          },
+          "exemption_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exemption Reason"
+          },
+          "retention_state": {
+            "type": "string",
+            "title": "Retention State",
+            "default": "active"
+          },
+          "below_threshold_since": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Below Threshold Since"
+          },
+          "archived_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "materialized",
+          "retrievability",
+          "stability_days",
+          "importance",
+          "last_reinforced_at",
+          "reinforcement_count",
+          "access_count",
+          "forgetting_exempt"
+        ],
+        "title": "RetentionView",
+        "description": "A memory's retention, and its retrievability at the view's ``now``."
       },
       "RetryOperationResponse": {
         "properties": {
@@ -19327,6 +20634,127 @@
         "type": "object",
         "title": "UpdateDocumentResponse",
         "description": "Response model for update document endpoint."
+      },
+      "UpdateMemoryLifecycleRequest": {
+        "properties": {
+          "importance": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Importance",
+            "description": "How much the memory matters, in [0, 1] (0.5 is neutral). Rescales the stability the memory has learned by the ratio of the old and new importance, so earlier reinforcement is kept."
+          },
+          "forgetting_exempt": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Forgetting Exempt",
+            "description": "Exempt the memory from retention decay: it always ranks as fully retrievable. False lifts the exemption and clears its reason."
+          },
+          "exemption_reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exemption Reason",
+            "description": "Why the memory is exempt. Cannot be set while turning forgetting_exempt off."
+          },
+          "truth_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "uncertain",
+                  "superseded",
+                  "refuted"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Truth Status",
+            "description": "What should be believed about the memory ('lifecycle' mode only). 'superseded' or 'refuted' retires it from current recall (it must be active or uncertain, 409 otherwise): on an observation its source facts inherit the status unless another observation still stands on them; on a fact, the observations built on it are rebuilt from their other sources. 'active' restores a retired memory; 'uncertain' marks it contested."
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By",
+            "description": "With truth_status 'superseded' or 'refuted': the memory that replaces this one. It must be a different live memory of the same bank with exactly the same tags."
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason",
+            "description": "Why the truth status changed; recorded on the claim and its lifecycle relation."
+          },
+          "hold": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hold",
+            "description": "Place the memory on hold ('rank' or 'lifecycle' mode): it is never archived or pruned and always ranks as fully retrievable. Stored as forgetting_exempt with exemption_reason 'hold'. False lifts the exemption. Cannot be combined with forgetting_exempt or exemption_reason."
+          },
+          "retention_state": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "active"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retention State",
+            "description": "'active' returns an archived memory to normal recall ('rank' or 'lifecycle' mode). A memory that is not archived is left as it is."
+          }
+        },
+        "type": "object",
+        "title": "UpdateMemoryLifecycleRequest",
+        "description": "Request model for changing how a memory is retained, and what should be believed about it.\n\nThe retention fields need the bank's adaptive memory mode to be 'rank' or 'lifecycle'; the truth\nfields need 'lifecycle'. Omitted fields stay as they are; at least one must be set.",
+        "example": {
+          "reason": "upgraded to Java 21",
+          "superseded_by": "123e4567-e89b-12d3-a456-426614174000",
+          "truth_status": "superseded"
+        }
       },
       "UpdateMemoryRequest": {
         "properties": {

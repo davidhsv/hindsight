@@ -256,6 +256,14 @@ Pass an explicit list of tag sets. Each inner list is one scope.
 
 **Use when** you know exactly which combinations are meaningful and want to avoid unnecessary passes.
 
+### importance and forgetting_exempt
+
+Only for banks whose [adaptive memory](../adaptive-memory.mdx) mode is `rank` or `lifecycle`; every other bank ignores both. `importance`, in `[0, 1]` (`0.5` is neutral), tells Hindsight how much the extracted memories matter: it scales their initial stability, raises how far a faded one can drop in ranking, and protects them from archiving at or above the archive protection threshold. `forgetting_exempt: true` exempts them from retention decay altogether. Neither changes what is extracted, and both can be changed later through the [lifecycle `PATCH`](./memories#change-retention-or-truth-status).
+
+```json
+{ "items": [{ "content": "Production database failover runbook: …", "importance": 0.9 }] }
+```
+
 ### Response
 
 The synchronous retain response includes:

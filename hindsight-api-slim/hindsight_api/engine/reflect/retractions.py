@@ -25,12 +25,24 @@ anything. So this asks one question ("is it live?") rather than trying to recove
 a cause it cannot see. The one case that genuinely differs is a re-ingest, where
 an equivalent fact returns under a fresh id; that is handled by *when* the caller
 acts (never while consolidation is pending) and by the prompt, not here.
+
+Lifecycle mode adds one cause that *is* visible: a cited memory that is still a row but whose
+claim was superseded or refuted (``Memories.grounding_status``). It is tracked apart from the
+absent ids (``RetractedGrounding.retired``), because it differs in the one way that matters here:
+the bank still knows what replaced it, so the refresh regenerates over current recall instead of
+unsaying, and a page whose whole grounding was retired is not a broken provenance link.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from ..adaptive.models import Grounding
+
+RetirementCause = Literal["superseded", "refuted"]
 
 # The ``based_on`` keys whose ids address rows in ``memory_units``.
 #
@@ -45,6 +57,16 @@ MEMORY_BACKED_FACT_TYPES = frozenset({"world", "experience", "observation"})
 
 
 @dataclass(frozen=True)
+class RetiredCitation:
+    """A cited fact that is still a live row but whose claim is no longer current (lifecycle mode)."""
+
+    fact: dict[str, Any]
+    """The stored ``based_on`` entry, verbatim."""
+    truth_status: RetirementCause
+    successor_id: str | None = None
+
+
+@dataclass(frozen=True)
 class RetractedGrounding:
     """The memory-backed facts a document cites that no longer exist.
 
@@ -56,12 +78,33 @@ class RetractedGrounding:
     """
 
     facts: list[dict[str, Any]] = field(default_factory=list)
+    """The cited facts that are ABSENT: no live row in the bank."""
     cited_count: int = 0
     """How many memory-backed facts the document cited in total, live ones included."""
+    retired: list[RetiredCitation] = field(default_factory=list)
+    """Lifecycle mode only: cited facts that are live rows whose claim was superseded or refuted."""
 
     @property
     def ids(self) -> set[str]:
+        """The absent ids."""
         return {str(fact.get("id")) for fact in self.facts if fact.get("id")}
+
+    @property
+    def retired_ids(self) -> set[str]:
+        return {str(c.fact.get("id")) for c in self.retired if c.fact.get("id")}
+
+    @property
+    def cause(self) -> RetirementCause | None:
+        """Why the retired citations stopped being current: ``refuted`` when any was refuted
+        (wrong is the stronger statement), else ``superseded``; None without retired citations."""
+        if not self.retired:
+            return None
+        return "refuted" if any(c.truth_status == "refuted" for c in self.retired) else "superseded"
+
+    @property
+    def successor_ids(self) -> list[str]:
+        """The memories that replaced the retired citations, sorted, without repeats."""
+        return sorted({c.successor_id for c in self.retired if c.successor_id})
 
     @property
     def unresolvable(self) -> bool:
@@ -80,11 +123,15 @@ class RetractedGrounding:
         retracted; it keeps a stale sentence until later refreshes re-ground it. That
         is the right way round: the failure mode here is unrecoverable and the other
         one is not.
+
+        Only ABSENT ids count. A retired citation resolves (the row is there, and so is what
+        replaced it), so a page grounded on nothing but superseded claims is a real retraction:
+        counting those would prune its citations and keep the stale prose forever.
         """
         return self.cited_count > 0 and len(self.facts) == self.cited_count
 
     def __bool__(self) -> bool:
-        return bool(self.facts)
+        return bool(self.facts or self.retired)
 
 
 def based_on_fact_ids(based_on: dict[str, Any] | None) -> list[str]:
@@ -109,15 +156,50 @@ def based_on_fact_ids(based_on: dict[str, Any] | None) -> list[str]:
     return ids
 
 
-def partition_retracted(based_on: dict[str, Any] | None, live_ids: set[str]) -> RetractedGrounding:
+#: The ``truth_status`` values under which a cited memory is history rather than a current answer.
+_RETIRED_TRUTH_STATUSES = frozenset({"superseded", "refuted"})
+
+
+def retired_since_cited(based_on: dict[str, Any] | None, grounding: Mapping[str, Grounding]) -> dict[str, Grounding]:
+    """The ``retired`` entries of ``grounding`` that ``based_on`` cited as current answers.
+
+    A refresh may cite a retired memory on purpose, as history it read through a historical
+    recall or ``expand``; the stored entry then records the claim's ``truth_status``. That citation
+    is what the page already says, so it is not retracted grounding. Counting it would keep the page
+    stale for good and escalate every later refresh to a full regeneration. Only a memory the page
+    cited while it was current (no retired status recorded) and that was retired since counts.
+    The record is what the page's own reflect read, so no clock is compared: a claim retired while
+    a refresh was running was read as current and is caught by the next check.
+    """
+    history = {
+        str(fact["id"])
+        for fact_type, facts in (based_on or {}).items()
+        if fact_type in MEMORY_BACKED_FACT_TYPES and isinstance(facts, list)
+        for fact in facts
+        if isinstance(fact, dict) and fact.get("id") and fact.get("truth_status") in _RETIRED_TRUTH_STATUSES
+    }
+    return {i: g for i, g in grounding.items() if g.state == "retired" and i not in history}
+
+
+def partition_retracted(
+    based_on: dict[str, Any] | None,
+    live_ids: set[str],
+    retired: Mapping[str, Grounding] | None = None,
+) -> RetractedGrounding:
     """Split a stored ``based_on`` into the facts still live and those retracted.
 
     ``live_ids`` is the answer from ``Memories.live_memory_ids`` for
     :func:`based_on_fact_ids`. Anything memory-backed and absent from it is
     retracted; everything else — live facts, mental models, directives — is not
     reported, because nothing about it has changed.
+
+    ``retired`` (lifecycle mode) maps the ids ``Memories.grounding_status`` reported as
+    ``retired`` to that answer. Those are reported under ``retired``, never as absent,
+    whether or not ``live_ids`` also names them.
     """
     retracted: list[dict[str, Any]] = []
+    retired_citations: list[RetiredCitation] = []
+    retired = retired or {}
     cited = 0
     for fact_type, facts in (based_on or {}).items():
         if fact_type not in MEMORY_BACKED_FACT_TYPES or not isinstance(facts, list):
@@ -129,9 +211,18 @@ def partition_retracted(based_on: dict[str, Any] | None, live_ids: set[str]) -> 
             if not fact_id:
                 continue
             cited += 1
-            if str(fact_id) not in live_ids:
+            grounding = retired.get(str(fact_id))
+            if grounding is not None and grounding.truth_status is not None:
+                retired_citations.append(
+                    RetiredCitation(
+                        fact=fact,
+                        truth_status="refuted" if grounding.truth_status.value == "refuted" else "superseded",
+                        successor_id=grounding.successor_id,
+                    )
+                )
+            elif str(fact_id) not in live_ids:
                 retracted.append(fact)
-    return RetractedGrounding(facts=retracted, cited_count=cited)
+    return RetractedGrounding(facts=retracted, cited_count=cited, retired=retired_citations)
 
 
 def prune_based_on(based_on: dict[str, Any] | None, drop_ids: set[str]) -> dict[str, list[Any]]:

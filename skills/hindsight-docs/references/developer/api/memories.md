@@ -13,6 +13,8 @@ A **memory unit** is the atomic fact Hindsight extracts and stores. This page co
 | `GET` | `/v1/default/banks/{bank}/memories/{id}` | Fetch a single memory unit |
 | `GET` | `/v1/default/banks/{bank}/memories/{id}/history` | Refresh history of a derived observation |
 | `PATCH` | `/v1/default/banks/{bank}/memories/{id}` | Curate: edit / invalidate / restore |
+| `POST` | `/v1/default/banks/{bank}/memories/{id}/confirm` | [Adaptive memory](../adaptive-memory.md): confirm that a memory still holds |
+| `PATCH` | `/v1/default/banks/{bank}/memories/{id}/lifecycle` | Adaptive memory: retention policy and truth status |
 | `DELETE` | `/v1/default/banks/{bank}/memories/{id}/observations` | Clear a memory's derived observations |
 
 ## List memory units
@@ -90,6 +92,8 @@ fmt.Printf("%d invalidated fact(s)\n", len(invalidated.GetItems()))
 ## Fetch a single memory unit
 
 Fetch a memory unit by ID, including its content, metadata, entities, timestamps, tags, and curation state.
+
+For a bank whose [adaptive memory](../adaptive-memory.md) mode is not `off`, or a memory that has adaptive state stored, the response also carries a [`lifecycle`](#the-lifecycle-block) block. An off-mode bank's memories with nothing stored keep exactly the payload they always had.
 
 ### Python
 
@@ -415,3 +419,160 @@ A memory is extracted from a document. Editing or invalidating a memory does **n
 ### A pruning workflow
 
 To clean up duplicates and reclaim noise: cluster duplicates from `memories/list`, then **invalidate** them — recall is clean immediately, and the audit trail is preserved.
+
+## Adaptive memory lifecycle
+
+These endpoints read and change a memory's [adaptive memory](../adaptive-memory.md) state: its **retention** (how readily it comes back) and, in `lifecycle` mode, its **claim** (whether it is still the current state). They work on facts and observations alike, unlike curation above, which only applies to raw facts. The Python and TypeScript clients wrap them; the CLI has no command for them yet, so its examples call the HTTP API.
+
+### The lifecycle block
+
+`GET /v1/default/banks/{bank}/memories/{id}` adds `lifecycle`:
+
+| Field | Contents |
+|---|---|
+| `retention` | `retrievability` (computed now), `stability_days`, `importance`, `last_reinforced_at`, `reinforcement_count`, `access_count`, `last_recalled_at`, `forgetting_exempt`, `exemption_reason`, `retention_state` (`active` or `archived`), `below_threshold_since`, `archived_at`. `materialized: false` means no row is stored yet and the values are the defaults the memory is ranked with. |
+| `claim` | `truth_status`, `confidence`, `valid_from`, `valid_to`, `retired_via` (`supersedes`, `refutes`, `merges`, `splits`, `explicit`, `inherited`), `superseded_by_id`, `inherited_from_id`, `reason`, `evidence_memory_ids`. `null` for a memory that never had a claim, which reads as active. |
+| `relations_out` / `relations_in` | Lifecycle relations from and to this memory (`supersedes`, `refutes`, `refines`, `splits`, `merges`, `conflicts`), each with its `origin` (`consolidation`, `explicit` or `inherited`), reason and snapshots of both ends. An end that was deleted is `null`; its snapshot remains. |
+| `recent_events` | The last 20 reinforcement events: `source_type`, `source_key`, `event_time`, `weight`, `independence_weight`, `applied_gain`, `outcome` (`applied`, `cooldown`, `initial`). |
+| `shadow` | Observe mode only: what `lifecycle` mode would have done to this fact (`would_status`, the deciding observation, evidence ids). Never used by recall. |
+| `archived`, `stored` | Whether the memory is archived, and whether any adaptive state is stored for it. |
+
+A bank switched back to `off` still shows what it stored, so the audit trail survives a downgrade.
+
+### Confirm a memory
+
+`POST /v1/default/banks/{bank}/memories/{id}/confirm` records explicit evidence that a memory still holds. It is the strongest reinforcement (weight `1.0`), so the memory stays readily recallable for longer. All fields are optional:
+
+| Field | Meaning |
+|---|---|
+| `source_key` | Identifies this piece of evidence. A memory is confirmed at most once per key, so a retry is reported as `deduplicated` and changes nothing. Omitted, every request counts as a separate confirmation. |
+| `event_time` | When the confirmation happened (ISO 8601, defaults to now). It may be in the past, not in the future. |
+| `reason` | A note for the audit log; not stored with the memory. |
+
+The response says what happened: `recorded`, `deduplicated`, `outcome` (`applied`, `cooldown` when it came too soon after the last reinforcement to add stability, or `deduplicated`), and the memory's `stability_days` and `reinforcement_count` after the call. Needs mode `rank` or `lifecycle` with reinforcement enabled (`409` otherwise; `observe` never changes state); `404` for a memory that is missing or invalidated.
+
+### Python
+
+```python
+# Record that a memory still holds; it stays readily recallable for longer.
+result = await client.aconfirm_memory(
+    BANK_ID,
+    other_id,
+    source_key="incident-2291",  # the same key again is a no-op
+)
+print(result.outcome, result.stability_days)
+```
+
+### Node.js
+
+```javascript
+// Record that a memory still holds; it stays readily recallable for longer.
+const result = await client.confirmMemory(BANK_ID, otherId, {
+    sourceKey: 'incident-2291', // the same key again is a no-op
+});
+console.log(result.outcome, result.stability_days);
+```
+
+### CLI
+
+```bash
+# Record that a memory still holds; the same source_key again is a no-op.
+curl -s -X POST "$HINDSIGHT_URL/v1/default/banks/$BANK_ID/memories/$OTHER_ID/confirm" \
+  -H "Content-Type: application/json" \
+  -d '{"source_key": "incident-2291"}'
+```
+
+### Go
+
+```go
+// Record that a memory still holds; the same source key again is a no-op.
+confirm := hindsight.NewConfirmMemoryRequest()
+confirm.SetSourceKey("incident-2291")
+result, _, _ := client.MemoryAPI.ConfirmMemory(ctx, memBankID, otherID).
+	ConfirmMemoryRequest(*confirm).Execute()
+if result != nil {
+	fmt.Println(result.GetOutcome(), result.GetStabilityDays())
+}
+```
+
+### Change retention or truth status
+
+`PATCH /v1/default/banks/{bank}/memories/{id}/lifecycle` takes any of these fields; omitted ones are left as they are, and at least one is required. It returns the memory's lifecycle block after the change.
+
+| Field | Mode | Effect |
+|---|---|---|
+| `importance` | `rank`, `lifecycle` | How much the memory matters, in `[0, 1]` (`0.5` is neutral). Rescales the stability it has learned by the ratio of the new and old importance, so earlier reinforcement is kept. At or above `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE` it is never archived. |
+| `forgetting_exempt`, `exemption_reason` | `rank`, `lifecycle` | `true` exempts the memory from retention decay (it always ranks as fully retrievable); `false` lifts the exemption and clears its reason. |
+| `hold` | `rank`, `lifecycle` | `true` places the memory on hold: never archived or pruned, always fully retrievable (stored as an exemption with reason `hold`). Not combined with `forgetting_exempt` or `exemption_reason`. |
+| `retention_state` | `rank`, `lifecycle` | `"active"` returns an archived memory to normal recall. |
+| `truth_status` | `lifecycle` | `superseded` or `refuted` retires the memory from current recall; `active` restores it; `uncertain` marks it contested. |
+| `superseded_by` | `lifecycle` | With `superseded` or `refuted`, the memory that replaces this one: a different live memory of the same bank with exactly the same tags. |
+| `reason` | `lifecycle` | Why the truth status changed; recorded on the claim and its relation. |
+
+Retiring an **observation** retires the raw facts that only it stood on (experience facts and dated events excepted). Retiring a **raw fact** rebuilds the observations built on it from their other sources. Restoring an observation restores the facts that inherited its status. The change is recorded as an `explicit` relation, and mental models that cited the memory are refreshed.
+
+Errors: `409` when the bank's mode does not allow the change or the memory is already retired (restore it first); `404` when the memory or `superseded_by` is missing or invalidated; `400` for a successor with different tags, a successor built on the memory itself, or a successor in another claim scope.
+
+### Python
+
+```python
+# A fact turned out to be wrong; point at the memory that corrects it.
+await client.aupdate_memory_lifecycle(
+    BANK_ID,
+    memory_id,
+    truth_status="refuted",
+    superseded_by=other_id,
+    reason="Recorded for the wrong subject",
+)
+
+# Keep an entry readily recallable however rarely it is used.
+await client.aupdate_memory_lifecycle(BANK_ID, other_id, hold=True)
+```
+
+### Node.js
+
+```javascript
+// A fact turned out to be wrong; point at the memory that corrects it.
+await client.updateMemoryLifecycle(BANK_ID, memoryId, {
+    truthStatus: 'refuted',
+    supersededBy: otherId,
+    reason: 'Recorded for the wrong subject',
+});
+
+// Keep an entry readily recallable however rarely it is used.
+await client.updateMemoryLifecycle(BANK_ID, otherId, { hold: true });
+```
+
+### CLI
+
+```bash
+# A fact turned out to be wrong; point at the memory that corrects it.
+curl -s -X PATCH "$HINDSIGHT_URL/v1/default/banks/$BANK_ID/memories/$MEMORY_ID/lifecycle" \
+  -H "Content-Type: application/json" \
+  -d '{"truth_status": "refuted", "superseded_by": "'"$OTHER_ID"'", "reason": "Recorded for the wrong subject"}'
+
+# Keep an entry readily recallable however rarely it is used.
+curl -s -X PATCH "$HINDSIGHT_URL/v1/default/banks/$BANK_ID/memories/$OTHER_ID/lifecycle" \
+  -H "Content-Type: application/json" \
+  -d '{"hold": true}'
+```
+
+### Go
+
+```go
+// A fact turned out to be wrong; point at the memory that corrects it.
+refute := hindsight.NewUpdateMemoryLifecycleRequest()
+refute.SetTruthStatus("refuted")
+refute.SetSupersededBy(otherID)
+refute.SetReason("Recorded for the wrong subject")
+client.MemoryAPI.UpdateMemoryLifecycle(ctx, memBankID, memoryID).
+	UpdateMemoryLifecycleRequest(*refute).Execute()
+
+// Keep an entry readily recallable however rarely it is used.
+hold := hindsight.NewUpdateMemoryLifecycleRequest()
+hold.SetHold(true)
+client.MemoryAPI.UpdateMemoryLifecycle(ctx, memBankID, otherID).
+	UpdateMemoryLifecycleRequest(*hold).Execute()
+```
+
+A retain item can set the same retention policy at write time with `importance` and `forgetting_exempt` (see [Retain](./retain.md#importance-and-forgetting_exempt)).

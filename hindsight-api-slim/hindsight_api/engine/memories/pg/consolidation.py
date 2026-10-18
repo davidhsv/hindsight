@@ -110,33 +110,26 @@ async def fold_sources_into_observation(
     """
     # Oracle-safe: _native_search_vector_update emits the to_tsvector clause only for a
     # native PG tsvector column, "" otherwise (see #3021 — the raw ::regconfig cast
-    # breaks Oracle). RETURNING-gate on the twin's probe-time text so a concurrent
-    # survivor rewrite during the connection-free LLM window can't be clobbered.
-    search_vector_clause = _native_search_vector_update(get_config(), "$1")
-    folded = await conn.fetchval(
-        f"""
-            UPDATE {fq_table("memory_units")}
-            SET text = $1,
-                source_memory_ids = (SELECT array_agg(DISTINCT e) FROM unnest(source_memory_ids || $2::uuid[]) e),
-                proof_count = (SELECT count(DISTINCT e) FROM unnest(source_memory_ids || $2::uuid[]) e),
-                event_date = LEAST(event_date, COALESCE($5, event_date)),
-                occurred_start = LEAST(occurred_start, COALESCE($6, occurred_start)),
-                occurred_end = GREATEST(occurred_end, COALESCE($7, occurred_end)),
-                mentioned_at = GREATEST(mentioned_at, COALESCE($8, mentioned_at)),
-                updated_at = now(){search_vector_clause}
-            WHERE id = $3::uuid AND text = $4
-            RETURNING id
-            """,
-        merged_text,
-        source_memory_ids,
-        uuid.UUID(observation_id),
-        expected_text,
-        bounds.event_date,
-        bounds.occurred_start,
-        bounds.occurred_end,
-        bounds.mentioned_at,
+    # breaks Oracle). The statement is per dialect (PG's uuid[] column vs Oracle's JSON
+    # list plus its observation_sources junction); both gate on the twin's probe-time
+    # text so a concurrent survivor rewrite during the connection-free LLM window can't
+    # be clobbered.
+    from .graph import _ops_for
+
+    return await _ops_for(conn).fold_sources_into_observation(
+        conn,
+        units_table=fq_table("memory_units"),
+        sources_table=fq_table("observation_sources"),
+        observation_id=uuid.UUID(observation_id),
+        expected_text=expected_text,
+        merged_text=merged_text,
+        source_memory_ids=source_memory_ids,
+        event_date=bounds.event_date,
+        occurred_start=bounds.occurred_start,
+        occurred_end=bounds.occurred_end,
+        mentioned_at=bounds.mentioned_at,
+        search_vector_clause=_native_search_vector_update(get_config(), "$1"),
     )
-    return folded is not None
 
 
 async def fold_observation_into_twin(
@@ -348,6 +341,55 @@ async def insert_observation(
             [(observation_id, sid) for sid in dict.fromkeys(source_memory_ids)],
         )
     return str(row["id"])
+
+
+async def attach_sources_to_observation(
+    *,
+    conn,
+    ops,
+    fq_table: Callable[[str], str],
+    bank_id: str,
+    observation_id: str,
+    source_memory_ids: list[uuid.UUID],
+) -> bool:
+    """Add ``source_memory_ids`` to an observation's sources; nothing else on the row moves.
+
+    The lifecycle ``historical`` attach: an old fact restating a retired observation joins its
+    evidence, while the text, embedding, dates and ``updated_at`` stay as they are (a retired
+    belief gaining history is not a change anyone downstream must react to). The caller holds the
+    observation row (``lock_observation_tags``) and the sources (``lock_live_memory_ids``). False
+    when the observation is gone. Dialect-neutral: the sources are read through the store's own
+    reader, which knows Oracle's junction table, and written like ``rewrite_observation`` does.
+    """
+    from .adaptive_claims import observation_sources
+
+    current = (
+        await observation_sources(conn, fq_table=fq_table, bank_id=bank_id, observation_ids=[observation_id])
+    ).get(str(uuid.UUID(str(observation_id))))
+    if current is None:
+        return False
+    merged = list(dict.fromkeys([uuid.UUID(s) for s in current] + list(source_memory_ids)))
+    added = merged[len(current) :]
+    if not added:
+        return True
+    await conn.execute(
+        f"UPDATE {fq_table('memory_units')} SET source_memory_ids = $1, proof_count = $2 "
+        f"WHERE id = $3 AND bank_id = $4 AND fact_type = 'observation'",
+        merged,
+        len(merged),
+        uuid.UUID(str(observation_id)),
+        bank_id,
+    )
+    if ops.uses_observation_sources_table:
+        await conn.executemany(
+            f"""
+                INSERT INTO {fq_table("observation_sources")} (observation_id, source_id)
+                VALUES ($1, $2)
+                ON CONFLICT (observation_id, source_id) DO NOTHING
+                """,
+            [(uuid.UUID(str(observation_id)), sid) for sid in added],
+        )
+    return True
 
 
 async def delete_observation(*, conn, fq_table: Callable[[str], str], bank_id: str, observation_id: str) -> None:

@@ -237,7 +237,9 @@ async def delete_document_for_replace(
     # catches units that have a non-NULL chunk_id FK. Units with chunk_id=NULL
     # (e.g. from partial writes or edge cases) would survive the cascade.
     # This explicit delete ensures complete cleanup.
-    await writes.delete_document(conn=conn, fq_table=fq_table, bank_id=bank_id, document_id=document_id)
+    await writes.delete_document(
+        conn=conn, fq_table=fq_table, bank_id=bank_id, document_id=document_id, unit_ids=outgoing_unit_ids
+    )
     # Capture created_at before deletion so re-ingestion preserves it.
     return await conn.fetchval(
         f"DELETE FROM {fq_table('documents')} WHERE id = $1 AND bank_id = $2 RETURNING created_at",
@@ -402,6 +404,19 @@ async def memory_ids_for_chunks(
 
 async def delete_chunks(*, conn, fq_table: Callable[[str], str], bank_id: str, chunk_ids: list[str]) -> None:
     """Delete the named chunks with their memories and links, taking row locks in a total order."""
+    from .adaptive_claims import relock_relations_before_delete, repair_lifecycle_for_deleted_facts
+
+    # The facts these chunks own, for the lifecycle side of their delete: relation
+    # rows locked in one order for the SET NULL cascade, and claims only these facts justified
+    # reverted, both before any row goes.
+    doomed = [
+        row["id"]
+        for row in await conn.fetch(
+            f"SELECT id FROM {fq_table('memory_units')} WHERE chunk_id = ANY($1::text[]) AND bank_id = $2",
+            chunk_ids,
+            bank_id,
+        )
+    ]
     if getattr(conn, "backend_type", None) == "oracle":
         # Oracle has no ctid, DELETE ... USING or FOR UPDATE inside a CTE, so the
         # ordered-lock form below cannot be ported as is: delete plainly, like
@@ -415,6 +430,8 @@ async def delete_chunks(*, conn, fq_table: Callable[[str], str], bank_id: str, c
             chunk_ids,
             bank_id,
         )
+        await relock_relations_before_delete(conn, fq_table=fq_table, bank_id=bank_id, unit_ids=doomed)
+        await repair_lifecycle_for_deleted_facts(conn, fq_table=fq_table, bank_id=bank_id, doomed_ids=doomed)
         # Oracle's memory_units.chunk_id FK is still ON DELETE SET NULL (PG moved it to
         # CASCADE in f6g7h8i9j0k1), so the facts would outlive their chunk as duplicates.
         await conn.execute(
@@ -482,6 +499,8 @@ async def delete_chunks(*, conn, fq_table: Callable[[str], str], bank_id: str, c
         chunk_ids,
         bank_id,
     )
+    await relock_relations_before_delete(conn, fq_table=fq_table, bank_id=bank_id, unit_ids=doomed)
+    await repair_lifecycle_for_deleted_facts(conn, fq_table=fq_table, bank_id=bank_id, doomed_ids=doomed)
     await conn.execute(
         f"""
         WITH ordered_chunks AS MATERIALIZED (

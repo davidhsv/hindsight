@@ -7,7 +7,10 @@ providing type safety and making data flow explicit.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..response_models import RecallLifecycle
 
 
 @dataclass
@@ -161,6 +164,9 @@ class MergedCandidate:
     rrf_rank: int = 0
     source_ranks: dict[str, int] = field(default_factory=dict)  # method_name -> rank
     arm_scores: "ArmScores" = field(default_factory=lambda: ArmScores())  # raw per-strategy scores
+    # Adaptive memory lifecycle mode: the claim annotation of a candidate whose claim is not plain
+    # active, set by the pre-trim claim filter (search/lifecycle_filter.py). None otherwise.
+    lifecycle: "RecallLifecycle | None" = None
 
     @property
     def id(self) -> str:
@@ -192,6 +198,17 @@ class ScoredResult:
     # Final combined score
     combined_score: float = 0.0
     weight: float = 0.0  # Final weight used for ranking
+
+    # Adaptive memory (engine/adaptive/scoring.py). None unless the bank's adaptive mode loaded
+    # state for this recall, and then only on the combined-scoring branch; to_dict() emits them
+    # only when set, so a mode-off recall serializes exactly as before.
+    adaptive_base_score: float | None = None  # weight before the adaptive factor
+    retrievability: float | None = None
+    stability_days: float | None = None
+    importance: float | None = None
+    reinforcement_count: int | None = None
+    retention_factor: float | None = None
+    adaptive_factor: float | None = None
 
     @property
     def id(self) -> str:
@@ -249,5 +266,24 @@ class ScoredResult:
         result["combined_score"] = self.combined_score
         result["weight"] = self.weight
         result["activation"] = self.weight  # Legacy field
+
+        if self.adaptive_factor is not None:
+            for key, value in (
+                ("adaptive_base_score", self.adaptive_base_score),
+                ("retrievability", self.retrievability),
+                ("stability_days", self.stability_days),
+                ("importance", self.importance),
+                ("reinforcement_count", self.reinforcement_count),
+                ("retention_factor", self.retention_factor),
+                ("adaptive_factor", self.adaptive_factor),
+                # The relevance the factor scales, next to it in the trace so a reader can tell a
+                # demoted-because-faded memory from a demoted-because-irrelevant one.
+                ("semantic_score", self.candidate.arm_scores.semantic),
+            ):
+                if value is not None:
+                    result[key] = value
+
+        if self.candidate.lifecycle is not None:
+            result["lifecycle"] = self.candidate.lifecycle.model_dump()
 
         return result

@@ -153,6 +153,43 @@ async def main():
     )
     # [/docs:restore-memory]
 
+    # The adaptive memory examples point one raw fact at another.
+    await wait_for_idle(client, BANK_ID)
+    other = next(
+        (u for u in memories.items if u.fact_type in ("world", "experience") and u.id != memory_id), None
+    )
+    if other is not None:
+        other_id = other.id
+
+        # [docs:adaptive-memory-mode]
+        # Turn adaptive memory on for one bank (it is off by default).
+        await client.aupdate_bank_config(BANK_ID, adaptive_memory_mode="lifecycle")
+        # [/docs:adaptive-memory-mode]
+
+        # [docs:confirm-memory]
+        # Record that a memory still holds; it stays readily recallable for longer.
+        result = await client.aconfirm_memory(
+            BANK_ID,
+            other_id,
+            source_key="incident-2291",  # the same key again is a no-op
+        )
+        print(result.outcome, result.stability_days)
+        # [/docs:confirm-memory]
+
+        # [docs:update-memory-lifecycle]
+        # A fact turned out to be wrong; point at the memory that corrects it.
+        await client.aupdate_memory_lifecycle(
+            BANK_ID,
+            memory_id,
+            truth_status="refuted",
+            superseded_by=other_id,
+            reason="Recorded for the wrong subject",
+        )
+
+        # Keep an entry readily recallable however rarely it is used.
+        await client.aupdate_memory_lifecycle(BANK_ID, other_id, hold=True)
+        # [/docs:update-memory-lifecycle]
+
     # =========================================================================
     # Cleanup (not shown in docs)
     # =========================================================================

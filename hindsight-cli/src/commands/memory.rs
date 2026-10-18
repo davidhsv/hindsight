@@ -364,6 +364,10 @@ pub fn recall(
         tag_groups: None,
         min_scores: None,
         temporal_window,
+        lifecycle_view: None,
+        as_of: None,
+        purpose: None,
+        context: None,
     };
 
     let response = client.recall(agent_id, &request, verbose);
@@ -521,6 +525,8 @@ pub fn retain(
         observation_scopes: None,
         strategy: None,
         update_mode: None,
+        importance: None,
+        forgetting_exempt: None,
     };
 
     let request = RetainRequest {

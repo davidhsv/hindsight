@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useTranslations } from "next-intl";
-import { client } from "@/lib/api";
+import { client, type MemoryLifecycle } from "@/lib/api";
 import { useBank } from "@/lib/bank-context";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -30,6 +30,7 @@ import { InvalidateMemoryDialog } from "@/components/invalidate-memory-dialog";
 import { EditMemoryForm, type EditMemoryFields } from "@/components/edit-memory-form";
 import { EntityChip, MetadataChip } from "@/components/ui/facet-chip";
 import { HarnessLogo } from "@/components/ui/harness-logo";
+import { MemoryLifecycleSection } from "@/components/memory-lifecycle";
 import { documentHarness, resolveHarnessLogo } from "@/lib/harness-logo";
 
 interface SourceMemory {
@@ -65,6 +66,8 @@ interface MemoryDetail {
   invalidated_at?: string | null;
   edited_at?: string | null;
   source_memories?: SourceMemory[];
+  /** Adaptive memory state; absent for a bank in mode off with nothing stored. */
+  lifecycle?: MemoryLifecycle;
 }
 
 interface MemoryDetailModalProps {
@@ -456,6 +459,8 @@ export function MemoryDetailModal({
                       </div>
                     )}
 
+                    {memory.lifecycle && <MemoryLifecycleSection lifecycle={memory.lifecycle} />}
+
                     {/* ID */}
                     <div>
                       <div className="text-xs font-bold text-muted-foreground uppercase mb-1">
@@ -700,6 +705,10 @@ export function MemoryDetailModal({
                               </div>
                             )}
                           </div>
+                        )}
+
+                        {memory.lifecycle && (
+                          <MemoryLifecycleSection lifecycle={memory.lifecycle} />
                         )}
 
                         {/* ID */}

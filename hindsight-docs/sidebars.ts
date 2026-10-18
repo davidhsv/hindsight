@@ -27,6 +27,12 @@ const sidebars: SidebarsConfig = {
         },
         {
           type: 'doc',
+          id: 'developer/adaptive-memory',
+          label: 'Adaptive Memory',
+          customProps: { icon: 'lu-refresh' },
+        },
+        {
+          type: 'doc',
           id: 'developer/reflect',
           label: 'Reflect',
           customProps: { icon: 'lu-message' },

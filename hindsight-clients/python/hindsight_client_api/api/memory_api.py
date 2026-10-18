@@ -20,6 +20,8 @@ from pydantic import Field, StrictBytes, StrictStr, field_validator
 from typing import Any, List, Optional, Tuple, Union
 from typing_extensions import Annotated
 from hindsight_client_api.models.clear_memory_observations_response import ClearMemoryObservationsResponse
+from hindsight_client_api.models.confirm_memory_request import ConfirmMemoryRequest
+from hindsight_client_api.models.confirm_memory_response import ConfirmMemoryResponse
 from hindsight_client_api.models.consolidation_strategies_preview import ConsolidationStrategiesPreview
 from hindsight_client_api.models.consolidation_strategies_preview_request import ConsolidationStrategiesPreviewRequest
 from hindsight_client_api.models.delete_response import DeleteResponse
@@ -28,6 +30,7 @@ from hindsight_client_api.models.dry_run_extraction_result import DryRunExtracti
 from hindsight_client_api.models.graph_data_response import GraphDataResponse
 from hindsight_client_api.models.list_memory_units_response import ListMemoryUnitsResponse
 from hindsight_client_api.models.list_tags_response import ListTagsResponse
+from hindsight_client_api.models.memory_lifecycle import MemoryLifecycle
 from hindsight_client_api.models.observation_scopes_response import ObservationScopesResponse
 from hindsight_client_api.models.recall_request import RecallRequest
 from hindsight_client_api.models.recall_response import RecallResponse
@@ -35,6 +38,7 @@ from hindsight_client_api.models.reflect_request import ReflectRequest
 from hindsight_client_api.models.reflect_response import ReflectResponse
 from hindsight_client_api.models.retain_request import RetainRequest
 from hindsight_client_api.models.retain_response import RetainResponse
+from hindsight_client_api.models.update_memory_lifecycle_request import UpdateMemoryLifecycleRequest
 from hindsight_client_api.models.update_memory_request import UpdateMemoryRequest
 
 from hindsight_client_api.api_client import ApiClient, RequestSerialized
@@ -628,6 +632,327 @@ class MemoryApi:
         return self.api_client.param_serialize(
             method='DELETE',
             resource_path='/v1/default/banks/{bank_id}/memories/{memory_id}/observations',
+            path_params=_path_params,
+            query_params=_query_params,
+            header_params=_header_params,
+            body=_body_params,
+            post_params=_form_params,
+            files=_files,
+            auth_settings=_auth_settings,
+            collection_formats=_collection_formats,
+            _host=_host,
+            _request_auth=_request_auth
+        )
+
+
+
+
+    @validate_call
+    async def confirm_memory(
+        self,
+        bank_id: StrictStr,
+        memory_id: StrictStr,
+        authorization: Optional[StrictStr] = None,
+        confirm_memory_request: Optional[ConfirmMemoryRequest] = None,
+        _request_timeout: Union[
+            None,
+            Annotated[StrictFloat, Field(gt=0)],
+            Tuple[
+                Annotated[StrictFloat, Field(gt=0)],
+                Annotated[StrictFloat, Field(gt=0)]
+            ]
+        ] = None,
+        _request_auth: Optional[Dict[StrictStr, Any]] = None,
+        _content_type: Optional[StrictStr] = None,
+        _headers: Optional[Dict[StrictStr, Any]] = None,
+        _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
+    ) -> ConfirmMemoryResponse:
+        """Confirm memory
+
+        Record explicit evidence that a memory (a fact or an observation) still holds. The confirmation reinforces the memory, so it stays readily recallable for longer. A source_key confirms a memory at most once; re-sending it changes nothing. Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle' with reinforcement enabled (409 otherwise; observe mode never changes state). 404 when the memory is missing or invalidated.
+
+        :param bank_id: (required)
+        :type bank_id: str
+        :param memory_id: (required)
+        :type memory_id: str
+        :param authorization:
+        :type authorization: str
+        :param confirm_memory_request:
+        :type confirm_memory_request: ConfirmMemoryRequest
+        :param _request_timeout: timeout setting for this request. If one
+                                 number provided, it will be total request
+                                 timeout. It can also be a pair (tuple) of
+                                 (connection, read) timeouts.
+        :type _request_timeout: int, tuple(int, int), optional
+        :param _request_auth: set to override the auth_settings for an a single
+                              request; this effectively ignores the
+                              authentication in the spec for a single request.
+        :type _request_auth: dict, optional
+        :param _content_type: force content-type for the request.
+        :type _content_type: str, Optional
+        :param _headers: set to override the headers for a single
+                         request; this effectively ignores the headers
+                         in the spec for a single request.
+        :type _headers: dict, optional
+        :param _host_index: set to override the host_index for a single
+                            request; this effectively ignores the host_index
+                            in the spec for a single request.
+        :type _host_index: int, optional
+        :return: Returns the result object.
+        """ # noqa: E501
+
+        _param = self._confirm_memory_serialize(
+            bank_id=bank_id,
+            memory_id=memory_id,
+            authorization=authorization,
+            confirm_memory_request=confirm_memory_request,
+            _request_auth=_request_auth,
+            _content_type=_content_type,
+            _headers=_headers,
+            _host_index=_host_index
+        )
+
+        _response_types_map: Dict[str, Optional[str]] = {
+            '200': "ConfirmMemoryResponse",
+            '422': "HTTPValidationError",
+        }
+        response_data = await self.api_client.call_api(
+            *_param,
+            _request_timeout=_request_timeout
+        )
+        await response_data.read()
+        return self.api_client.response_deserialize(
+            response_data=response_data,
+            response_types_map=_response_types_map,
+        ).data
+
+
+    @validate_call
+    async def confirm_memory_with_http_info(
+        self,
+        bank_id: StrictStr,
+        memory_id: StrictStr,
+        authorization: Optional[StrictStr] = None,
+        confirm_memory_request: Optional[ConfirmMemoryRequest] = None,
+        _request_timeout: Union[
+            None,
+            Annotated[StrictFloat, Field(gt=0)],
+            Tuple[
+                Annotated[StrictFloat, Field(gt=0)],
+                Annotated[StrictFloat, Field(gt=0)]
+            ]
+        ] = None,
+        _request_auth: Optional[Dict[StrictStr, Any]] = None,
+        _content_type: Optional[StrictStr] = None,
+        _headers: Optional[Dict[StrictStr, Any]] = None,
+        _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
+    ) -> ApiResponse[ConfirmMemoryResponse]:
+        """Confirm memory
+
+        Record explicit evidence that a memory (a fact or an observation) still holds. The confirmation reinforces the memory, so it stays readily recallable for longer. A source_key confirms a memory at most once; re-sending it changes nothing. Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle' with reinforcement enabled (409 otherwise; observe mode never changes state). 404 when the memory is missing or invalidated.
+
+        :param bank_id: (required)
+        :type bank_id: str
+        :param memory_id: (required)
+        :type memory_id: str
+        :param authorization:
+        :type authorization: str
+        :param confirm_memory_request:
+        :type confirm_memory_request: ConfirmMemoryRequest
+        :param _request_timeout: timeout setting for this request. If one
+                                 number provided, it will be total request
+                                 timeout. It can also be a pair (tuple) of
+                                 (connection, read) timeouts.
+        :type _request_timeout: int, tuple(int, int), optional
+        :param _request_auth: set to override the auth_settings for an a single
+                              request; this effectively ignores the
+                              authentication in the spec for a single request.
+        :type _request_auth: dict, optional
+        :param _content_type: force content-type for the request.
+        :type _content_type: str, Optional
+        :param _headers: set to override the headers for a single
+                         request; this effectively ignores the headers
+                         in the spec for a single request.
+        :type _headers: dict, optional
+        :param _host_index: set to override the host_index for a single
+                            request; this effectively ignores the host_index
+                            in the spec for a single request.
+        :type _host_index: int, optional
+        :return: Returns the result object.
+        """ # noqa: E501
+
+        _param = self._confirm_memory_serialize(
+            bank_id=bank_id,
+            memory_id=memory_id,
+            authorization=authorization,
+            confirm_memory_request=confirm_memory_request,
+            _request_auth=_request_auth,
+            _content_type=_content_type,
+            _headers=_headers,
+            _host_index=_host_index
+        )
+
+        _response_types_map: Dict[str, Optional[str]] = {
+            '200': "ConfirmMemoryResponse",
+            '422': "HTTPValidationError",
+        }
+        response_data = await self.api_client.call_api(
+            *_param,
+            _request_timeout=_request_timeout
+        )
+        await response_data.read()
+        return self.api_client.response_deserialize(
+            response_data=response_data,
+            response_types_map=_response_types_map,
+        )
+
+
+    @validate_call
+    async def confirm_memory_without_preload_content(
+        self,
+        bank_id: StrictStr,
+        memory_id: StrictStr,
+        authorization: Optional[StrictStr] = None,
+        confirm_memory_request: Optional[ConfirmMemoryRequest] = None,
+        _request_timeout: Union[
+            None,
+            Annotated[StrictFloat, Field(gt=0)],
+            Tuple[
+                Annotated[StrictFloat, Field(gt=0)],
+                Annotated[StrictFloat, Field(gt=0)]
+            ]
+        ] = None,
+        _request_auth: Optional[Dict[StrictStr, Any]] = None,
+        _content_type: Optional[StrictStr] = None,
+        _headers: Optional[Dict[StrictStr, Any]] = None,
+        _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
+    ) -> RESTResponseType:
+        """Confirm memory
+
+        Record explicit evidence that a memory (a fact or an observation) still holds. The confirmation reinforces the memory, so it stays readily recallable for longer. A source_key confirms a memory at most once; re-sending it changes nothing. Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle' with reinforcement enabled (409 otherwise; observe mode never changes state). 404 when the memory is missing or invalidated.
+
+        :param bank_id: (required)
+        :type bank_id: str
+        :param memory_id: (required)
+        :type memory_id: str
+        :param authorization:
+        :type authorization: str
+        :param confirm_memory_request:
+        :type confirm_memory_request: ConfirmMemoryRequest
+        :param _request_timeout: timeout setting for this request. If one
+                                 number provided, it will be total request
+                                 timeout. It can also be a pair (tuple) of
+                                 (connection, read) timeouts.
+        :type _request_timeout: int, tuple(int, int), optional
+        :param _request_auth: set to override the auth_settings for an a single
+                              request; this effectively ignores the
+                              authentication in the spec for a single request.
+        :type _request_auth: dict, optional
+        :param _content_type: force content-type for the request.
+        :type _content_type: str, Optional
+        :param _headers: set to override the headers for a single
+                         request; this effectively ignores the headers
+                         in the spec for a single request.
+        :type _headers: dict, optional
+        :param _host_index: set to override the host_index for a single
+                            request; this effectively ignores the host_index
+                            in the spec for a single request.
+        :type _host_index: int, optional
+        :return: Returns the result object.
+        """ # noqa: E501
+
+        _param = self._confirm_memory_serialize(
+            bank_id=bank_id,
+            memory_id=memory_id,
+            authorization=authorization,
+            confirm_memory_request=confirm_memory_request,
+            _request_auth=_request_auth,
+            _content_type=_content_type,
+            _headers=_headers,
+            _host_index=_host_index
+        )
+
+        _response_types_map: Dict[str, Optional[str]] = {
+            '200': "ConfirmMemoryResponse",
+            '422': "HTTPValidationError",
+        }
+        response_data = await self.api_client.call_api(
+            *_param,
+            _request_timeout=_request_timeout
+        )
+        return response_data.response
+
+
+    def _confirm_memory_serialize(
+        self,
+        bank_id,
+        memory_id,
+        authorization,
+        confirm_memory_request,
+        _request_auth,
+        _content_type,
+        _headers,
+        _host_index,
+    ) -> RequestSerialized:
+
+        _host = None
+
+        _collection_formats: Dict[str, str] = {
+        }
+
+        _path_params: Dict[str, str] = {}
+        _query_params: List[Tuple[str, str]] = []
+        _header_params: Dict[str, Optional[str]] = _headers or {}
+        _form_params: List[Tuple[str, str]] = []
+        _files: Dict[
+            str, Union[str, bytes, List[str], List[bytes], List[Tuple[str, bytes]]]
+        ] = {}
+        _body_params: Optional[bytes] = None
+
+        # process the path parameters
+        if bank_id is not None:
+            _path_params['bank_id'] = bank_id
+        if memory_id is not None:
+            _path_params['memory_id'] = memory_id
+        # process the query parameters
+        # process the header parameters
+        if authorization is not None:
+            _header_params['authorization'] = authorization
+        # process the form parameters
+        # process the body parameter
+        if confirm_memory_request is not None:
+            _body_params = confirm_memory_request
+
+
+        # set the HTTP header `Accept`
+        if 'Accept' not in _header_params:
+            _header_params['Accept'] = self.api_client.select_header_accept(
+                [
+                    'application/json'
+                ]
+            )
+
+        # set the HTTP header `Content-Type`
+        if _content_type:
+            _header_params['Content-Type'] = _content_type
+        else:
+            _default_content_type = (
+                self.api_client.select_header_content_type(
+                    [
+                        'application/json'
+                    ]
+                )
+            )
+            if _default_content_type is not None:
+                _header_params['Content-Type'] = _default_content_type
+
+        # authentication setting
+        _auth_settings: List[str] = [
+        ]
+
+        return self.api_client.param_serialize(
+            method='POST',
+            resource_path='/v1/default/banks/{bank_id}/memories/{memory_id}/confirm',
             path_params=_path_params,
             query_params=_query_params,
             header_params=_header_params,
@@ -1665,7 +1990,7 @@ class MemoryApi:
     ) -> object:
         """Get memory unit
 
-        Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead.
+        Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead. When the bank's adaptive memory mode is not 'off', or adaptive state is stored for the memory, the payload also carries 'lifecycle': its retention (stability, retrievability now, importance, exemption), claim, lifecycle relations and most recent reinforcement events.
 
         :param bank_id: (required)
         :type bank_id: str
@@ -1741,7 +2066,7 @@ class MemoryApi:
     ) -> ApiResponse[object]:
         """Get memory unit
 
-        Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead.
+        Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead. When the bank's adaptive memory mode is not 'off', or adaptive state is stored for the memory, the payload also carries 'lifecycle': its retention (stability, retrievability now, importance, exemption), claim, lifecycle relations and most recent reinforcement events.
 
         :param bank_id: (required)
         :type bank_id: str
@@ -1817,7 +2142,7 @@ class MemoryApi:
     ) -> RESTResponseType:
         """Get memory unit
 
-        Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead.
+        Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead. When the bank's adaptive memory mode is not 'off', or adaptive state is stored for the memory, the payload also carries 'lifecycle': its retention (stability, retrievability now, importance, exemption), claim, lifecycle relations and most recent reinforcement events.
 
         :param bank_id: (required)
         :type bank_id: str
@@ -4930,6 +5255,327 @@ class MemoryApi:
         return self.api_client.param_serialize(
             method='PATCH',
             resource_path='/v1/default/banks/{bank_id}/memories/{memory_id}',
+            path_params=_path_params,
+            query_params=_query_params,
+            header_params=_header_params,
+            body=_body_params,
+            post_params=_form_params,
+            files=_files,
+            auth_settings=_auth_settings,
+            collection_formats=_collection_formats,
+            _host=_host,
+            _request_auth=_request_auth
+        )
+
+
+
+
+    @validate_call
+    async def update_memory_lifecycle(
+        self,
+        bank_id: StrictStr,
+        memory_id: StrictStr,
+        update_memory_lifecycle_request: UpdateMemoryLifecycleRequest,
+        authorization: Optional[StrictStr] = None,
+        _request_timeout: Union[
+            None,
+            Annotated[StrictFloat, Field(gt=0)],
+            Tuple[
+                Annotated[StrictFloat, Field(gt=0)],
+                Annotated[StrictFloat, Field(gt=0)]
+            ]
+        ] = None,
+        _request_auth: Optional[Dict[StrictStr, Any]] = None,
+        _content_type: Optional[StrictStr] = None,
+        _headers: Optional[Dict[StrictStr, Any]] = None,
+        _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
+    ) -> MemoryLifecycle:
+        """Update memory lifecycle
+
+        Change how a memory (a fact or an observation) is retained — its importance and its exemption from retention decay, in adaptive memory mode 'rank' or 'lifecycle' — and what should be believed about it: truth_status, superseded_by and reason, in mode 'lifecycle' only. Retiring a memory (superseded/refuted) takes it out of current recall and records an explicit lifecycle relation; 'active' restores it. Returns the memory's lifecycle view, the same one GET /memories/{memory_id} shows under 'lifecycle'. 409 when the bank's mode does not allow the change or the memory is already retired; 404 when the memory (or superseded_by) is missing or invalidated; 400 for a successor in another scope.
+
+        :param bank_id: (required)
+        :type bank_id: str
+        :param memory_id: (required)
+        :type memory_id: str
+        :param update_memory_lifecycle_request: (required)
+        :type update_memory_lifecycle_request: UpdateMemoryLifecycleRequest
+        :param authorization:
+        :type authorization: str
+        :param _request_timeout: timeout setting for this request. If one
+                                 number provided, it will be total request
+                                 timeout. It can also be a pair (tuple) of
+                                 (connection, read) timeouts.
+        :type _request_timeout: int, tuple(int, int), optional
+        :param _request_auth: set to override the auth_settings for an a single
+                              request; this effectively ignores the
+                              authentication in the spec for a single request.
+        :type _request_auth: dict, optional
+        :param _content_type: force content-type for the request.
+        :type _content_type: str, Optional
+        :param _headers: set to override the headers for a single
+                         request; this effectively ignores the headers
+                         in the spec for a single request.
+        :type _headers: dict, optional
+        :param _host_index: set to override the host_index for a single
+                            request; this effectively ignores the host_index
+                            in the spec for a single request.
+        :type _host_index: int, optional
+        :return: Returns the result object.
+        """ # noqa: E501
+
+        _param = self._update_memory_lifecycle_serialize(
+            bank_id=bank_id,
+            memory_id=memory_id,
+            update_memory_lifecycle_request=update_memory_lifecycle_request,
+            authorization=authorization,
+            _request_auth=_request_auth,
+            _content_type=_content_type,
+            _headers=_headers,
+            _host_index=_host_index
+        )
+
+        _response_types_map: Dict[str, Optional[str]] = {
+            '200': "MemoryLifecycle",
+            '422': "HTTPValidationError",
+        }
+        response_data = await self.api_client.call_api(
+            *_param,
+            _request_timeout=_request_timeout
+        )
+        await response_data.read()
+        return self.api_client.response_deserialize(
+            response_data=response_data,
+            response_types_map=_response_types_map,
+        ).data
+
+
+    @validate_call
+    async def update_memory_lifecycle_with_http_info(
+        self,
+        bank_id: StrictStr,
+        memory_id: StrictStr,
+        update_memory_lifecycle_request: UpdateMemoryLifecycleRequest,
+        authorization: Optional[StrictStr] = None,
+        _request_timeout: Union[
+            None,
+            Annotated[StrictFloat, Field(gt=0)],
+            Tuple[
+                Annotated[StrictFloat, Field(gt=0)],
+                Annotated[StrictFloat, Field(gt=0)]
+            ]
+        ] = None,
+        _request_auth: Optional[Dict[StrictStr, Any]] = None,
+        _content_type: Optional[StrictStr] = None,
+        _headers: Optional[Dict[StrictStr, Any]] = None,
+        _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
+    ) -> ApiResponse[MemoryLifecycle]:
+        """Update memory lifecycle
+
+        Change how a memory (a fact or an observation) is retained — its importance and its exemption from retention decay, in adaptive memory mode 'rank' or 'lifecycle' — and what should be believed about it: truth_status, superseded_by and reason, in mode 'lifecycle' only. Retiring a memory (superseded/refuted) takes it out of current recall and records an explicit lifecycle relation; 'active' restores it. Returns the memory's lifecycle view, the same one GET /memories/{memory_id} shows under 'lifecycle'. 409 when the bank's mode does not allow the change or the memory is already retired; 404 when the memory (or superseded_by) is missing or invalidated; 400 for a successor in another scope.
+
+        :param bank_id: (required)
+        :type bank_id: str
+        :param memory_id: (required)
+        :type memory_id: str
+        :param update_memory_lifecycle_request: (required)
+        :type update_memory_lifecycle_request: UpdateMemoryLifecycleRequest
+        :param authorization:
+        :type authorization: str
+        :param _request_timeout: timeout setting for this request. If one
+                                 number provided, it will be total request
+                                 timeout. It can also be a pair (tuple) of
+                                 (connection, read) timeouts.
+        :type _request_timeout: int, tuple(int, int), optional
+        :param _request_auth: set to override the auth_settings for an a single
+                              request; this effectively ignores the
+                              authentication in the spec for a single request.
+        :type _request_auth: dict, optional
+        :param _content_type: force content-type for the request.
+        :type _content_type: str, Optional
+        :param _headers: set to override the headers for a single
+                         request; this effectively ignores the headers
+                         in the spec for a single request.
+        :type _headers: dict, optional
+        :param _host_index: set to override the host_index for a single
+                            request; this effectively ignores the host_index
+                            in the spec for a single request.
+        :type _host_index: int, optional
+        :return: Returns the result object.
+        """ # noqa: E501
+
+        _param = self._update_memory_lifecycle_serialize(
+            bank_id=bank_id,
+            memory_id=memory_id,
+            update_memory_lifecycle_request=update_memory_lifecycle_request,
+            authorization=authorization,
+            _request_auth=_request_auth,
+            _content_type=_content_type,
+            _headers=_headers,
+            _host_index=_host_index
+        )
+
+        _response_types_map: Dict[str, Optional[str]] = {
+            '200': "MemoryLifecycle",
+            '422': "HTTPValidationError",
+        }
+        response_data = await self.api_client.call_api(
+            *_param,
+            _request_timeout=_request_timeout
+        )
+        await response_data.read()
+        return self.api_client.response_deserialize(
+            response_data=response_data,
+            response_types_map=_response_types_map,
+        )
+
+
+    @validate_call
+    async def update_memory_lifecycle_without_preload_content(
+        self,
+        bank_id: StrictStr,
+        memory_id: StrictStr,
+        update_memory_lifecycle_request: UpdateMemoryLifecycleRequest,
+        authorization: Optional[StrictStr] = None,
+        _request_timeout: Union[
+            None,
+            Annotated[StrictFloat, Field(gt=0)],
+            Tuple[
+                Annotated[StrictFloat, Field(gt=0)],
+                Annotated[StrictFloat, Field(gt=0)]
+            ]
+        ] = None,
+        _request_auth: Optional[Dict[StrictStr, Any]] = None,
+        _content_type: Optional[StrictStr] = None,
+        _headers: Optional[Dict[StrictStr, Any]] = None,
+        _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
+    ) -> RESTResponseType:
+        """Update memory lifecycle
+
+        Change how a memory (a fact or an observation) is retained — its importance and its exemption from retention decay, in adaptive memory mode 'rank' or 'lifecycle' — and what should be believed about it: truth_status, superseded_by and reason, in mode 'lifecycle' only. Retiring a memory (superseded/refuted) takes it out of current recall and records an explicit lifecycle relation; 'active' restores it. Returns the memory's lifecycle view, the same one GET /memories/{memory_id} shows under 'lifecycle'. 409 when the bank's mode does not allow the change or the memory is already retired; 404 when the memory (or superseded_by) is missing or invalidated; 400 for a successor in another scope.
+
+        :param bank_id: (required)
+        :type bank_id: str
+        :param memory_id: (required)
+        :type memory_id: str
+        :param update_memory_lifecycle_request: (required)
+        :type update_memory_lifecycle_request: UpdateMemoryLifecycleRequest
+        :param authorization:
+        :type authorization: str
+        :param _request_timeout: timeout setting for this request. If one
+                                 number provided, it will be total request
+                                 timeout. It can also be a pair (tuple) of
+                                 (connection, read) timeouts.
+        :type _request_timeout: int, tuple(int, int), optional
+        :param _request_auth: set to override the auth_settings for an a single
+                              request; this effectively ignores the
+                              authentication in the spec for a single request.
+        :type _request_auth: dict, optional
+        :param _content_type: force content-type for the request.
+        :type _content_type: str, Optional
+        :param _headers: set to override the headers for a single
+                         request; this effectively ignores the headers
+                         in the spec for a single request.
+        :type _headers: dict, optional
+        :param _host_index: set to override the host_index for a single
+                            request; this effectively ignores the host_index
+                            in the spec for a single request.
+        :type _host_index: int, optional
+        :return: Returns the result object.
+        """ # noqa: E501
+
+        _param = self._update_memory_lifecycle_serialize(
+            bank_id=bank_id,
+            memory_id=memory_id,
+            update_memory_lifecycle_request=update_memory_lifecycle_request,
+            authorization=authorization,
+            _request_auth=_request_auth,
+            _content_type=_content_type,
+            _headers=_headers,
+            _host_index=_host_index
+        )
+
+        _response_types_map: Dict[str, Optional[str]] = {
+            '200': "MemoryLifecycle",
+            '422': "HTTPValidationError",
+        }
+        response_data = await self.api_client.call_api(
+            *_param,
+            _request_timeout=_request_timeout
+        )
+        return response_data.response
+
+
+    def _update_memory_lifecycle_serialize(
+        self,
+        bank_id,
+        memory_id,
+        update_memory_lifecycle_request,
+        authorization,
+        _request_auth,
+        _content_type,
+        _headers,
+        _host_index,
+    ) -> RequestSerialized:
+
+        _host = None
+
+        _collection_formats: Dict[str, str] = {
+        }
+
+        _path_params: Dict[str, str] = {}
+        _query_params: List[Tuple[str, str]] = []
+        _header_params: Dict[str, Optional[str]] = _headers or {}
+        _form_params: List[Tuple[str, str]] = []
+        _files: Dict[
+            str, Union[str, bytes, List[str], List[bytes], List[Tuple[str, bytes]]]
+        ] = {}
+        _body_params: Optional[bytes] = None
+
+        # process the path parameters
+        if bank_id is not None:
+            _path_params['bank_id'] = bank_id
+        if memory_id is not None:
+            _path_params['memory_id'] = memory_id
+        # process the query parameters
+        # process the header parameters
+        if authorization is not None:
+            _header_params['authorization'] = authorization
+        # process the form parameters
+        # process the body parameter
+        if update_memory_lifecycle_request is not None:
+            _body_params = update_memory_lifecycle_request
+
+
+        # set the HTTP header `Accept`
+        if 'Accept' not in _header_params:
+            _header_params['Accept'] = self.api_client.select_header_accept(
+                [
+                    'application/json'
+                ]
+            )
+
+        # set the HTTP header `Content-Type`
+        if _content_type:
+            _header_params['Content-Type'] = _content_type
+        else:
+            _default_content_type = (
+                self.api_client.select_header_content_type(
+                    [
+                        'application/json'
+                    ]
+                )
+            )
+            if _default_content_type is not None:
+                _header_params['Content-Type'] = _default_content_type
+
+        # authentication setting
+        _auth_settings: List[str] = [
+        ]
+
+        return self.api_client.param_serialize(
+            method='PATCH',
+            resource_path='/v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle',
             path_params=_path_params,
             query_params=_query_params,
             header_params=_header_params,

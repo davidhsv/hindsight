@@ -61,6 +61,11 @@ preview_prompt = "Preview/diagnostics endpoint (control-plane dialog); not expos
 # and the control plane, not the end-user CLI. update_memory covers all three.
 update_memory = "Curation endpoint; exposed via the API, SDKs, and control plane, not the CLI"
 
+# Adaptive-memory lifecycle writes (explicit confirmation, importance and forgetting
+# exemption). They only act on banks in adaptive mode rank/lifecycle.
+confirm_memory = "Adaptive-memory endpoint; not yet exposed in the CLI, use the HTTP API or SDK"
+update_memory_lifecycle = "Adaptive-memory endpoint; not yet exposed in the CLI, use the HTTP API or SDK"
+
 # UI-only endpoints powering the control-plane LLM Requests (per-bank tracing) tab.
 # The trace waterfall, token charts, and metadata viewers don't map to a useful
 # CLI command.
@@ -166,6 +171,10 @@ include = "Flattened into --include-chunks / --chunk-max-tokens (facts are alway
 tag_groups = "Complex nested tag filter not yet exposed in the CLI; use --tags / --tags-match for simple cases."
 min_scores = "Complex nested per-stage score floors (semantic/keyword/reranker/final) not yet exposed in the CLI."
 temporal_window = "Flattened into --window-start / --window-end on `memory recall`."
+lifecycle_view = "Adaptive memory lifecycle view (current/historical); not exposed in the CLI yet, use the API or the SDKs."
+as_of = "Adaptive memory lifecycle instant; not exposed in the CLI yet, use the API or the SDKs."
+purpose = "Context admission purpose (auto_context/explicit_search/historical_search); not exposed in the CLI yet, use the API or the SDKs."
+context = "Context admission task context (repository, branch, module, ...); not exposed in the CLI yet, use the API or the SDKs."
 
 [fields.reflect]
 include = "Flattened into --include-facts and related flags."

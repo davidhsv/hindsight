@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -39,6 +39,7 @@ from ...transfer.importer import (
 )
 from ...transfer.schema import (
     BankRowsJSONEncoding,
+    ImportedMemoryState,
     TransferCausalRelation,
     TransferChunk,
     TransferDocument,
@@ -46,6 +47,7 @@ from ...transfer.schema import (
     TransferObservation,
     TransferObservationSource,
 )
+from .adaptive_transfer import attach_adaptive_state, remap_archived_state, restore_memory_state, strip_archived_events
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +194,9 @@ async def load_observations(
         )
     if skipped:
         logger.info("[transfer] Skipped %d observation(s) with sources outside the exported documents", skipped)
+    await attach_adaptive_state(
+        conn, fq_table=fq_table, bank_id=bank_id, items={o.source_id: o for o in observations if o.source_id}
+    )
     return observations
 
 
@@ -272,6 +277,16 @@ async def _load_facts(
         )
         bucket.append(fact)
         loaded.unit_index[row["id"]] = _UnitLocation(document_id=doc_id, ordinal=ordinal)
+    # Retention and claim ride on the fact (absent, and so not in the archive, when it has none).
+    await attach_adaptive_state(
+        conn,
+        fq_table=fq_table,
+        bank_id=bank_id,
+        items={
+            str(unit_id): loaded.facts_by_doc[loc.document_id][loc.ordinal]
+            for unit_id, loc in loaded.unit_index.items()
+        },
+    )
     return loaded
 
 
@@ -383,6 +398,15 @@ async def dump_archived_memories(*, conn: Any, fq_table: Callable[[str], str], b
     dumped: list[dict] = []
     for row in rows:
         record = {k: v for k, v in dict(row).items() if k not in _DERIVED_COLUMNS and k not in ("id", "entity_ids")}
+        # Present only when the memory carried adaptive state when it was archived,
+        # so a bank that never used adaptive memory exports exactly what it did before.
+        # Such a row also carries its source id: its snapshot names other memories (and other
+        # archived ones name it) by source id, which the import re-keys. The ledger stays here.
+        if record.get("adaptive_state") is None:
+            record.pop("adaptive_state", None)
+        else:
+            record["adaptive_state"] = strip_archived_events(conn, record["adaptive_state"])
+            record["source_id"] = str(row["id"])
         # parse_chunk_id, not a naive rsplit: ids written since #4244 escape the
         # separator inside the bank and document components, so splitting on the
         # last underscore recovers the wrong ordinal for an escaped id.
@@ -469,6 +493,7 @@ async def restore_archived_memories(
     unit_id_map: dict[str, str],
     document_id_map: dict[str, str],
     bank_rows_json_encoding: BankRowsJSONEncoding,
+    relation_id_map: Mapping[str, str] | None = None,
 ) -> int:
     """Restore the curation archive so invalidated facts stay revertable.
 
@@ -476,11 +501,17 @@ async def restore_archived_memories(
     ids, the chunk ordinal back into a chunk id (chunk ids embed the bank id), and
     the causal-link snapshot onto the replayed units — edges whose other endpoint
     did not come back are dropped, which is what revert already tolerates. The
-    unit id itself is minted fresh: nothing outside this row references it, and
-    keeping the source's would collide with the source bank on a clone.
+    unit id itself is minted fresh, since keeping the source's would collide with the
+    source bank on a clone. An adaptive-state snapshot is re-keyed onto the target
+    (``remap_archived_state``): the memory onto its new id, its peers through
+    ``unit_id_map`` and the other archived rows' new ids, its relation descriptors through
+    ``relation_id_map``; references that resolve to nothing are dropped and counted.
     """
     if not rows:
         return 0
+    archived_ids = {str(row["source_id"]): str(uuid.uuid4()) for row in rows if row.get("source_id")}
+    peer_map = {**unit_id_map, **archived_ids}
+    dropped_refs = 0
     names = {name for row in rows for name in (row.get("entity_names") or [])}
     entity_ids = await resolve_entity_ids_by_name(conn=conn, fq_table=fq_table, bank_id=bank_id, names=names)
 
@@ -499,8 +530,28 @@ async def restore_archived_memories(
         )
         record["entity_ids"] = [entity_ids[n] for n in (record.pop("entity_names", None) or []) if n in entity_ids]
         record["causal_links"] = _remap_causal_link_snapshot(record.get("causal_links"), unit_id_map)
-        record["id"] = str(uuid.uuid4())
+        source_id = record.pop("source_id", None)
+        new_id = archived_ids.get(str(source_id)) if source_id else None
+        record["id"] = new_id = new_id or str(uuid.uuid4())
+        if record.get("adaptive_state") is not None:
+            state = (
+                conn.parse_json(record["adaptive_state"])
+                if isinstance(record["adaptive_state"], str)
+                else record["adaptive_state"]
+            )
+            if isinstance(state, dict):
+                remapped = remap_archived_state(
+                    state, new_id=new_id, id_map=peer_map, relation_id_map=relation_id_map or {}
+                )
+                record["adaptive_state"] = remapped.state
+                dropped_refs += remapped.dropped
         prepared.append(record)
+    if dropped_refs:
+        logger.info(
+            "[transfer] %d adaptive-state reference(s) of archived memories in bank %s did not resolve (dropped)",
+            dropped_refs,
+            bank_id,
+        )
     return await _restore_rows(
         conn,
         "invalidated_memory_units",
@@ -609,6 +660,23 @@ async def import_observations(
                     bank_id,
                     list(all_source_ids),
                 )
+            # The observations' claims commit with them, so a superseded or refuted observation is
+            # never visible as a current one in between; the importer re-keys the pointers later.
+            states = [
+                ImportedMemoryState(
+                    unit_id=obs_unit_id,
+                    claim=(
+                        obs.claim.model_copy(update={"superseded_by_id": None, "inherited_from_id": None})
+                        if obs.claim is not None
+                        else None
+                    ),
+                    retention=obs.retention,
+                )
+                for (obs, _sources), obs_unit_id in zip(resolved, obs_unit_ids)
+                if obs.claim is not None or obs.retention is not None
+            ]
+            if states:
+                await restore_memory_state(conn, fq_table=fq_table, bank_id=bank_id, rows=states)
 
     outcome.imported += len(resolved)
     return outcome

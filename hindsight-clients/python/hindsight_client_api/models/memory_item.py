@@ -18,7 +18,8 @@ import re  # noqa: F401
 import json
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing_extensions import Annotated
 from hindsight_client_api.models.content import Content
 from hindsight_client_api.models.entity_input import EntityInput
 from hindsight_client_api.models.observation_scopes import ObservationScopes
@@ -41,7 +42,9 @@ class MemoryItem(BaseModel):
     observation_scopes: Optional[ObservationScopes] = None
     strategy: Optional[StrictStr] = None
     update_mode: Optional[StrictStr] = None
-    __properties: ClassVar[List[str]] = ["content", "timestamp", "context", "metadata", "document_id", "entities", "resolve_entities", "tags", "observation_scopes", "strategy", "update_mode"]
+    importance: Optional[Union[Annotated[float, Field(le=1.0, strict=True, ge=0.0)], Annotated[int, Field(le=1, strict=True, ge=0)]]] = None
+    forgetting_exempt: Optional[StrictBool] = None
+    __properties: ClassVar[List[str]] = ["content", "timestamp", "context", "metadata", "document_id", "entities", "resolve_entities", "tags", "observation_scopes", "strategy", "update_mode", "importance", "forgetting_exempt"]
 
     @field_validator('update_mode')
     def update_mode_validate_enum(cls, value):
@@ -153,6 +156,16 @@ class MemoryItem(BaseModel):
         if self.update_mode is None and "update_mode" in self.model_fields_set:
             _dict['update_mode'] = None
 
+        # set to None if importance (nullable) is None
+        # and model_fields_set contains the field
+        if self.importance is None and "importance" in self.model_fields_set:
+            _dict['importance'] = None
+
+        # set to None if forgetting_exempt (nullable) is None
+        # and model_fields_set contains the field
+        if self.forgetting_exempt is None and "forgetting_exempt" in self.model_fields_set:
+            _dict['forgetting_exempt'] = None
+
         return _dict
 
     @classmethod
@@ -175,7 +188,9 @@ class MemoryItem(BaseModel):
             "tags": obj.get("tags"),
             "observation_scopes": ObservationScopes.from_dict(obj["observation_scopes"]) if obj.get("observation_scopes") is not None else None,
             "strategy": obj.get("strategy"),
-            "update_mode": obj.get("update_mode")
+            "update_mode": obj.get("update_mode"),
+            "importance": obj.get("importance"),
+            "forgetting_exempt": obj.get("forgetting_exempt")
         })
         return _obj
 

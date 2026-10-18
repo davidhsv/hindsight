@@ -7,7 +7,6 @@ the retraction prompt is not tested here: the pass is driven through a stub that
 returns a fixed operation list, so these cover the pipeline, not the model.
 """
 
-from hindsight_api.engine.response_models import LLMCallResult, TokenUsage
 import json
 import os
 import uuid
@@ -19,15 +18,18 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from hindsight_api import RequestContext
+from hindsight_api.engine.adaptive.models import Grounding, TruthStatus
 from hindsight_api.engine.memories import get_memories
 from hindsight_api.engine.memory_engine import MemoryEngine
-from hindsight_api.engine.schema import fq_store_table
 from hindsight_api.engine.reflect.retractions import (
     MEMORY_BACKED_FACT_TYPES,
     based_on_fact_ids,
     partition_retracted,
     prune_based_on,
+    retired_since_cited,
 )
+from hindsight_api.engine.response_models import LLMCallResult, TokenUsage
+from hindsight_api.engine.schema import fq_store_table
 
 # ---------------------------------------------------------------------------
 # Pure helpers — no DB, no LLM
@@ -989,3 +991,412 @@ async def test_real_model_removes_only_the_retracted_claim(retraction_llm):
             "other two statements were not retracted and must survive untouched."
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle mode: a cited memory whose claim was retired (superseded / refuted)
+# ---------------------------------------------------------------------------
+
+
+def _retired(status: str, successor: str | None = None) -> Grounding:
+    return Grounding(state="retired", truth_status=TruthStatus(status), successor_id=successor)
+
+
+def test_partition_reports_retired_citations_apart_from_absent_ones():
+    gone, old, live, successor = (str(uuid.uuid4()) for _ in range(4))
+    based_on = {"observation": [_fact(gone, "gone"), _fact(old, "runs Java 21"), _fact(live, "uses Gradle")]}
+
+    retracted = partition_retracted(based_on, {live}, retired={old: _retired("superseded", successor)})
+
+    assert retracted.ids == {gone}
+    assert retracted.retired_ids == {old}
+    assert retracted.cause == "superseded"
+    assert retracted.successor_ids == [successor]
+    assert [c.fact["text"] for c in retracted.retired] == ["runs Java 21"]
+    assert retracted.cited_count == 3
+
+
+def test_a_page_grounded_only_on_retired_claims_is_a_retraction_not_a_broken_link():
+    """Only absent ids count toward unresolvable: otherwise the citation is pruned and the stale
+    prose kept forever."""
+    old = str(uuid.uuid4())
+    retracted = partition_retracted(
+        {"observation": [_fact(old, "runs Java 21")]}, {old}, retired={old: _retired("superseded")}
+    )
+    assert retracted
+    assert not retracted.unresolvable
+    assert retracted.ids == set()
+    assert retracted.successor_ids == []
+
+
+def test_cause_is_refuted_when_any_retired_citation_was_refuted():
+    a, b = str(uuid.uuid4()), str(uuid.uuid4())
+    retracted = partition_retracted(
+        {"world": [_fact(a, "a", "world"), _fact(b, "b", "world")]},
+        set(),
+        retired={a: _retired("superseded"), b: _retired("refuted")},
+    )
+    assert retracted.cause == "refuted"
+    assert partition_retracted({"world": [_fact(a, "a", "world")]}, {a}).cause is None
+
+
+async def _retire(conn, bank_id: str, memory_id: uuid.UUID, *, status: str, successor: uuid.UUID | None = None):
+    """Retire one claim the way the lifecycle writers do: one lock pass, then the CAS."""
+    store = get_memories()
+    async with conn.transaction():
+        ids = [str(memory_id)] + ([str(successor)] if successor else [])
+        await store.lock_claims(conn, bank_id=bank_id, memory_ids=ids, skip_locked=False)
+        won = await store.cas_retire(
+            conn,
+            bank_id=bank_id,
+            memory_id=str(memory_id),
+            to_status=TruthStatus(status),
+            retired_via="explicit",
+            superseded_by_id=str(successor) if successor else None,
+            valid_to=datetime.now(timezone.utc),
+            reason=None,
+            confidence=None,
+        )
+    assert won
+
+
+async def _set_lifecycle_page_trigger(conn, bank_id: str, mm_id: str, *, mode: str) -> None:
+    await conn.execute(
+        f"UPDATE {fq_store_table('mental_models')} SET trigger = $3::jsonb WHERE bank_id = $1 AND id = $2",
+        bank_id,
+        mm_id,
+        json.dumps({"mode": mode, "refresh_after_consolidation": True, "keep_trace": True}),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.memory_backend_incompatible
+async def test_grounding_status_reports_absent_live_and_retired(memory: MemoryEngine, request_context: RequestContext):
+    bank_id = f"test-grounding-{uuid.uuid4().hex[:8]}"
+    other_bank = f"test-grounding-other-{uuid.uuid4().hex[:8]}"
+    await _ensure_bank(memory, bank_id, request_context)
+    await _ensure_bank(memory, other_bank, request_context)
+    store = get_memories()
+    pool = await memory._get_pool()
+    async with pool.acquire() as conn:
+        old = await _insert_memory(memory, conn, bank_id, "The billing service runs Java 21.")
+        new = await _insert_memory(memory, conn, bank_id, "The billing service runs Java 25.")
+        wrong = await _insert_memory(memory, conn, bank_id, "The billing service runs on Go.")
+        contested = await _insert_memory(memory, conn, bank_id, "The billing service deploys on Fridays.")
+        foreign = await _insert_memory(memory, conn, other_bank, "Another bank's fact.")
+        await _retire(conn, bank_id, old, status="superseded", successor=new)
+        await _retire(conn, bank_id, wrong, status="refuted")
+        async with conn.transaction():
+            await store.lock_claims(conn, bank_id=bank_id, memory_ids=[str(contested)], skip_locked=False)
+            await store.set_claim(conn, bank_id=bank_id, memory_id=str(contested), truth_status=TruthStatus.UNCERTAIN)
+        gone = str(uuid.uuid4())
+
+        status = await store.grounding_status(
+            conn,
+            bank_id=bank_id,
+            ids=[str(old), str(new), str(wrong), str(contested), str(foreign), gone, "not-a-uuid"],
+        )
+
+    assert status[str(old)] == Grounding(state="retired", truth_status=TruthStatus.SUPERSEDED, successor_id=str(new))
+    assert status[str(wrong)] == Grounding(state="retired", truth_status=TruthStatus.REFUTED, successor_id=None)
+    assert status[str(new)].state == "live"
+    assert status[str(contested)].state == "live", "an uncertain claim is still a current one"
+    assert status[str(foreign)].state == "absent", "another bank's memory never grounds this bank's page"
+    assert status[gone].state == "absent"
+    assert status["not-a-uuid"].state == "absent"
+    await memory.delete_bank(bank_id, request_context=request_context)
+    await memory.delete_bank(other_bank, request_context=request_context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.memory_backend_incompatible
+async def test_retired_grounding_makes_a_page_stale_only_in_lifecycle_mode(
+    memory: MemoryEngine, request_context: RequestContext
+):
+    bank_id = f"test-retired-stale-{uuid.uuid4().hex[:8]}"
+    await _ensure_bank(memory, bank_id, request_context)
+    pool = await memory._get_pool()
+    async with pool.acquire() as conn:
+        old = await _insert_memory(memory, conn, bank_id, "The billing service runs Java 21.")
+        new = await _insert_memory(memory, conn, bank_id, "The billing service runs Java 25.")
+        mm_id = await _create_page(
+            memory, conn, bank_id, request_context, based_on={"world": [_fact(str(old), "Java 21", "world")]}
+        )
+        await _retire(conn, bank_id, old, status="superseded", successor=new)
+        # The watermark is past every write, so only the grounding check can answer stale.
+        await conn.execute(
+            f"UPDATE {fq_store_table('mental_models')} SET last_memory_seen_at = now() + interval '1 day' "
+            f"WHERE bank_id = $1 AND id = $2",
+            bank_id,
+            mm_id,
+        )
+        row = await _staleness_row(conn, bank_id, mm_id)
+
+        await memory._config_resolver.update_bank_config(bank_id, {"adaptive_memory_mode": "rank"})
+        assert not await memory.compute_mental_model_is_stale(conn, bank_id, row)
+
+        await memory._config_resolver.update_bank_config(bank_id, {"adaptive_memory_mode": "lifecycle"})
+        assert await memory.compute_mental_model_is_stale(conn, bank_id, row)
+
+    submit = AsyncMock(return_value={"operation_id": "op-1"})
+    with patch.object(memory, "submit_async_refresh_mental_model", new=submit):
+        assert await memory._submit_refreshes_for_retracted_grounding(bank_id, request_context=request_context) == 1
+    assert submit.await_args.kwargs["mental_model_id"] == mm_id
+    await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.memory_backend_incompatible
+async def test_retired_grounding_escalates_a_delta_refresh_to_full(
+    memory: MemoryEngine, request_context: RequestContext, monkeypatch, patch_reflect
+):
+    """No delta edit around a superseded claim: the run regenerates over current recall, records the
+    cause and the successor, and the new grounding no longer cites the retired memory."""
+    bank_id = f"test-retired-escalate-{uuid.uuid4().hex[:8]}"
+    await _ensure_bank(memory, bank_id, request_context)
+    await memory._config_resolver.update_bank_config(bank_id, {"adaptive_memory_mode": "lifecycle"})
+    pool = await memory._get_pool()
+    async with pool.acquire() as conn:
+        old = await _insert_memory(memory, conn, bank_id, "The billing service runs Java 21.")
+        new = await _insert_memory(memory, conn, bank_id, "The billing service runs Java 25.")
+        mm_id = await _create_page(
+            memory,
+            conn,
+            bank_id,
+            request_context,
+            based_on={"world": [_fact(str(old), "The billing service runs Java 21.", "world")]},
+            content="## Runtime\n\nThe billing service runs Java 21.\n",
+        )
+        await _set_lifecycle_page_trigger(conn, bank_id, mm_id, mode="delta")
+        await _retire(conn, bank_id, old, status="superseded", successor=new)
+
+    reflect_kwargs: list[dict[str, Any]] = []
+    patch_reflect(
+        memory, text="## Runtime\n\nThe billing service runs Java 25.\n", facts=[_fact(str(new), "Java 25", "world")]
+    )
+    fake = memory.reflect_async
+
+    async def recording_reflect(**kwargs):
+        reflect_kwargs.append(kwargs)
+        return await fake(**kwargs)
+
+    monkeypatch.setattr(memory, "reflect_async", recording_reflect)
+    calls = _patch_op_calls(monkeypatch, memory, retraction_ops=[], delta_ops=[])
+
+    refreshed = await memory.refresh_mental_model(
+        bank_id=bank_id, mental_model_id=mm_id, request_context=request_context
+    )
+
+    assert refreshed is not None
+    assert calls == [], "an escalated run makes no delta or unsay call"
+    assert "created_after" not in reflect_kwargs[0], "a full run reads current recall, not a delta window"
+    assert "Java 25" in refreshed["content"] and "Java 21" not in refreshed["content"]
+    stored = await memory.get_mental_model(bank_id, mm_id, detail="full", request_context=request_context)
+    assert based_on_fact_ids(stored["reflect_response"]["based_on"]) == [str(new)]
+    trace = stored["reflect_response"]["trace"]
+    assert (trace["effective_mode"], trace["mode_fallback_reason"]) == ("full", "retired_grounding")
+    assert trace["retraction"] == {
+        "fact_ids": [str(old)],
+        "fact_texts": ["The billing service runs Java 21."],
+        "applied": True,
+        "deferred_reason": None,
+        "cause": "superseded",
+        "successor_ids": [str(new)],
+    }
+    await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.memory_backend_incompatible
+async def test_a_full_mode_page_records_a_refuted_citation(
+    memory: MemoryEngine, request_context: RequestContext, monkeypatch, patch_reflect
+):
+    bank_id = f"test-retired-full-{uuid.uuid4().hex[:8]}"
+    await _ensure_bank(memory, bank_id, request_context)
+    await memory._config_resolver.update_bank_config(bank_id, {"adaptive_memory_mode": "lifecycle"})
+    pool = await memory._get_pool()
+    async with pool.acquire() as conn:
+        wrong = await _insert_memory(memory, conn, bank_id, "The billing service runs on Go.")
+        mm_id = await _create_page(
+            memory, conn, bank_id, request_context, based_on={"world": [_fact(str(wrong), "runs on Go", "world")]}
+        )
+        await _set_lifecycle_page_trigger(conn, bank_id, mm_id, mode="full")
+        await _retire(conn, bank_id, wrong, status="refuted")
+
+    patch_reflect(memory, text="## Runtime\n\nNothing is on record about the runtime.\n")
+    _patch_op_calls(monkeypatch, memory, retraction_ops=[], delta_ops=[])
+    await memory.refresh_mental_model(bank_id=bank_id, mental_model_id=mm_id, request_context=request_context)
+
+    stored = await memory.get_mental_model(bank_id, mm_id, detail="full", request_context=request_context)
+    trace = stored["reflect_response"]["trace"]
+    assert (trace["effective_mode"], trace["mode_fallback_reason"]) == ("full", None)
+    assert trace["retraction"]["cause"] == "refuted"
+    assert "successor_ids" not in trace["retraction"], "omitted when nothing replaced the claim"
+    await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.memory_backend_incompatible
+async def test_outside_lifecycle_mode_a_retired_claim_is_still_live_grounding(
+    memory: MemoryEngine, request_context: RequestContext, monkeypatch, patch_reflect
+):
+    """Rank mode does not filter retired claims from recall, so regenerating would change nothing:
+    the page keeps its delta refresh and its trace reports no retraction."""
+    bank_id = f"test-retired-rank-{uuid.uuid4().hex[:8]}"
+    await _ensure_bank(memory, bank_id, request_context)
+    await memory._config_resolver.update_bank_config(bank_id, {"adaptive_memory_mode": "rank"})
+    pool = await memory._get_pool()
+    async with pool.acquire() as conn:
+        old = await _insert_memory(memory, conn, bank_id, "The billing service runs Java 21.")
+        new = await _insert_memory(memory, conn, bank_id, "The billing service runs Java 25.")
+        mm_id = await _create_page(
+            memory, conn, bank_id, request_context, based_on={"world": [_fact(str(old), "Java 21", "world")]}
+        )
+        await _set_lifecycle_page_trigger(conn, bank_id, mm_id, mode="delta")
+        await _retire(conn, bank_id, old, status="superseded", successor=new)
+
+    patch_reflect(memory, text="")
+    _patch_op_calls(monkeypatch, memory, retraction_ops=[], delta_ops=[])
+    await memory.refresh_mental_model(bank_id=bank_id, mental_model_id=mm_id, request_context=request_context)
+
+    stored = await memory.get_mental_model(bank_id, mm_id, detail="full", request_context=request_context)
+    trace = stored["reflect_response"]["trace"]
+    assert trace["effective_mode"] == "delta"
+    assert trace.get("retraction") is None
+    await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.memory_backend_incompatible
+async def test_a_bulk_delete_in_lifecycle_mode_nudges_grounded_pages(
+    memory: MemoryEngine, request_context: RequestContext
+):
+    bank_id = f"test-retired-bulk-{uuid.uuid4().hex[:8]}"
+    await _ensure_bank(memory, bank_id, request_context)
+    pool = await memory._get_pool()
+    async with pool.acquire() as conn:
+        cited = await _insert_memory(memory, conn, bank_id, "The billing service runs Java 21.")
+        await _create_page(
+            memory, conn, bank_id, request_context, based_on={"world": [_fact(str(cited), "Java 21", "world")]}
+        )
+
+    nudge = AsyncMock(return_value=1)
+    with patch.object(memory, "_submit_refreshes_for_retracted_grounding", new=nudge):
+        await memory._config_resolver.update_bank_config(bank_id, {"adaptive_memory_mode": "rank"})
+        await memory.delete_memory_units([str(cited)], bank_id=bank_id, request_context=request_context)
+        assert nudge.await_count == 0, "the bulk path outside lifecycle mode is unchanged"
+
+        async with pool.acquire() as conn:
+            other = await _insert_memory(memory, conn, bank_id, "Another fact.")
+        await memory._config_resolver.update_bank_config(bank_id, {"adaptive_memory_mode": "lifecycle"})
+        await memory.delete_memory_units([str(other)], bank_id=bank_id, request_context=request_context)
+        assert nudge.await_count == 1
+    await memory.delete_bank(bank_id, request_context=request_context)
+
+
+def test_a_memory_cited_as_history_is_not_retired_since_it_was_cited():
+    """A refresh that read a retired memory as history records its status; only a citation made
+    while the claim was current counts as retracted once the claim is retired."""
+    history, current = str(uuid.uuid4()), str(uuid.uuid4())
+    based_on = {
+        "world": [
+            {**_fact(history, "runs Java 21", "world"), "truth_status": "superseded"},
+            _fact(current, "runs Java 17", "world"),
+        ],
+        # A recorded status on a non-memory entry is never read.
+        "mental-models": [{"id": "mm", "truth_status": "superseded"}],
+    }
+    grounding = {history: _retired("superseded"), current: _retired("refuted")}
+
+    assert set(retired_since_cited(based_on, grounding)) == {current}
+    # ``uncertain`` is a current answer, so a page that cited it uncertain still cited it as current.
+    uncertain = {"world": [{**_fact(history, "runs Java 21", "world"), "truth_status": "uncertain"}]}
+    assert set(retired_since_cited(uncertain, {history: _retired("superseded")})) == {history}
+    assert retired_since_cited(None, grounding) == grounding
+
+
+def test_recall_and_expand_citations_keep_their_lifecycle_annotation():
+    from hindsight_api.engine.reflect.tools import returned_memories
+
+    annotation = {"truth_status": "superseded", "superseded_by": "b"}
+    recalled = returned_memories("recall", {"memories": [{"id": "a", "text": "Java 21", "lifecycle": annotation}]})
+    expanded = returned_memories(
+        "expand", {"results": [{"memory": {"id": "a", "text": "Java 21", "type": "world", "lifecycle": annotation}}]}
+    )
+    plain = returned_memories("recall", {"memories": [{"id": "c", "text": "Java 25"}]})
+
+    assert [m.lifecycle.truth_status for m in recalled + expanded] == ["superseded", "superseded"]
+    assert plain[0].lifecycle is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.memory_backend_incompatible
+async def test_a_page_that_cites_a_retired_memory_as_history_is_not_refreshed_again(
+    memory: MemoryEngine, request_context: RequestContext, monkeypatch, patch_reflect
+):
+    """The escalated refresh may cite the superseded memory again, as history. It records that, so
+    the page is not stale on the same retirement forever and the next refresh is a delta again."""
+    bank_id = f"test-retired-history-{uuid.uuid4().hex[:8]}"
+    await _ensure_bank(memory, bank_id, request_context)
+    await memory._config_resolver.update_bank_config(bank_id, {"adaptive_memory_mode": "lifecycle"})
+    pool = await memory._get_pool()
+    async with pool.acquire() as conn:
+        old = await _insert_memory(memory, conn, bank_id, "The billing service runs Java 21.")
+        new = await _insert_memory(memory, conn, bank_id, "The billing service runs Java 25.")
+        mm_id = await _create_page(
+            memory, conn, bank_id, request_context, based_on={"world": [_fact(str(old), "Java 21", "world")]}
+        )
+        await _set_lifecycle_page_trigger(conn, bank_id, mm_id, mode="delta")
+        await _retire(conn, bank_id, old, status="superseded", successor=new)
+
+    from hindsight_api.engine.response_models import MemoryFact, ReflectResult
+
+    async def reflect_citing_history(**kwargs):
+        # Reflect hands the refresh MemoryFact objects, the historical one with its annotation.
+        return ReflectResult(
+            text="## Runtime\n\nThe billing service moved from Java 21 to Java 25.\n",
+            based_on={
+                "observation": [
+                    MemoryFact(id=str(new), text="Java 25", fact_type="observation"),
+                    MemoryFact.model_validate(
+                        {
+                            "id": str(old),
+                            "text": "Java 21",
+                            "fact_type": "observation",
+                            "lifecycle": {"truth_status": "superseded", "superseded_by": str(new)},
+                        }
+                    ),
+                ]
+            },
+        )
+
+    monkeypatch.setattr(memory, "reflect_async", reflect_citing_history)
+    _patch_op_calls(monkeypatch, memory, retraction_ops=[], delta_ops=[])
+    await memory.refresh_mental_model(bank_id=bank_id, mental_model_id=mm_id, request_context=request_context)
+
+    stored = await memory.get_mental_model(bank_id, mm_id, detail="full", request_context=request_context)
+    assert stored["reflect_response"]["trace"]["mode_fallback_reason"] == "retired_grounding"
+    entries = {f["id"]: f for f in stored["reflect_response"]["based_on"]["observation"]}
+    assert entries[str(old)]["truth_status"] == "superseded"
+    assert "truth_status" not in entries[str(new)], "a plain active citation records no status"
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE {fq_store_table('mental_models')} SET last_memory_seen_at = now() + interval '1 day' "
+            f"WHERE bank_id = $1 AND id = $2",
+            bank_id,
+            mm_id,
+        )
+        assert not await memory.compute_mental_model_is_stale(conn, bank_id, await _staleness_row(conn, bank_id, mm_id))
+    submit = AsyncMock(return_value={"operation_id": "op-1"})
+    with patch.object(memory, "submit_async_refresh_mental_model", new=submit):
+        assert await memory._submit_refreshes_for_retracted_grounding(bank_id, request_context=request_context) == 0
+
+    patch_reflect(memory, text="")
+    await memory.refresh_mental_model(bank_id=bank_id, mental_model_id=mm_id, request_context=request_context)
+    stored = await memory.get_mental_model(bank_id, mm_id, detail="full", request_context=request_context)
+    trace = stored["reflect_response"]["trace"]
+    assert (trace["effective_mode"], trace["mode_fallback_reason"]) == ("delta", None)
+    assert trace.get("retraction") is None, "the history citation is neither retired nor absent grounding"
+    assert str(old) in based_on_fact_ids(stored["reflect_response"]["based_on"])
+    await memory.delete_bank(bank_id, request_context=request_context)

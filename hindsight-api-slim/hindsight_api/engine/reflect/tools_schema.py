@@ -9,6 +9,7 @@ The reflect agent uses a hierarchical retrieval strategy:
 """
 
 import copy
+from typing import Any
 
 # Tool definitions in OpenAI format
 
@@ -109,6 +110,25 @@ TOOL_RECALL = {
         },
     },
 }
+
+#: The ``recall`` property a lifecycle-mode bank adds (adaptive memory). Appended to a
+#: copy of :data:`TOOL_RECALL`, so every other bank's tool bytes stay exactly as they were.
+_RECALL_INCLUDE_HISTORY = {
+    "type": "boolean",
+    "description": (
+        "Also return memories that have since been superseded (each annotated with `lifecycle`: when it "
+        "stopped holding and what replaced it). Set it only when the question is about how things were "
+        "before, or how they changed; leave it unset for the current state."
+    ),
+}
+
+
+def _recall_tool_with_history() -> dict:
+    """:data:`TOOL_RECALL` with the ``include_history`` flag, built fresh (the constant is shared)."""
+    tool: dict[str, Any] = copy.deepcopy(TOOL_RECALL)
+    tool["function"]["parameters"]["properties"]["include_history"] = _RECALL_INCLUDE_HISTORY
+    return tool
+
 
 TOOL_READ_MENTAL_MODELS = {
     "type": "function",
@@ -409,6 +429,7 @@ def get_reflect_tools(
     include_expand: bool = True,
     answer_as_document: bool = False,
     llm_output_language: str | None = None,
+    lifecycle: bool = False,
 ) -> list[dict]:
     """
     Get the list of tools for the reflect agent.
@@ -433,6 +454,8 @@ def get_reflect_tools(
             markdown that gets persisted.
         llm_output_language: Configured output language. Swaps ``done``'s default
             answer-in-the-question's-language rule for a directive to write in it.
+        lifecycle: The bank's adaptive memory mode is ``lifecycle``: ``recall`` gains the
+            ``include_history`` flag (current claims only, unless the agent asks for history).
 
     Returns:
         List of tool definitions in OpenAI format
@@ -446,7 +469,7 @@ def get_reflect_tools(
     if include_observations:
         tools.append(TOOL_SEARCH_OBSERVATIONS)
     if include_recall:
-        tools.append(TOOL_RECALL)
+        tools.append(_recall_tool_with_history() if lifecycle else TOOL_RECALL)
 
     if include_expand:
         tools.append(TOOL_EXPAND)

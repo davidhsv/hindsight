@@ -12,6 +12,7 @@ package hindsight
 
 import (
 	"encoding/json"
+	"time"
 	"bytes"
 	"fmt"
 )
@@ -36,6 +37,10 @@ type RecallRequest struct {
 	TagGroups []MentalModelTriggerInputTagGroupsInner `json:"tag_groups,omitempty"`
 	MinScores NullableMinScores `json:"min_scores,omitempty"`
 	TemporalWindow NullableTemporalWindow `json:"temporal_window,omitempty"`
+	LifecycleView NullableString `json:"lifecycle_view,omitempty"`
+	AsOf NullableTime `json:"as_of,omitempty"`
+	Purpose NullableString `json:"purpose,omitempty"`
+	Context NullableRecallTaskContext `json:"context,omitempty"`
 }
 
 type _RecallRequest RecallRequest
@@ -521,6 +526,174 @@ func (o *RecallRequest) UnsetTemporalWindow() {
 	o.TemporalWindow.Unset()
 }
 
+// GetLifecycleView returns the LifecycleView field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *RecallRequest) GetLifecycleView() string {
+	if o == nil || IsNil(o.LifecycleView.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.LifecycleView.Get()
+}
+
+// GetLifecycleViewOk returns a tuple with the LifecycleView field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *RecallRequest) GetLifecycleViewOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.LifecycleView.Get(), o.LifecycleView.IsSet()
+}
+
+// HasLifecycleView returns a boolean if a field has been set.
+func (o *RecallRequest) HasLifecycleView() bool {
+	if o != nil && o.LifecycleView.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetLifecycleView gets a reference to the given NullableString and assigns it to the LifecycleView field.
+func (o *RecallRequest) SetLifecycleView(v string) {
+	o.LifecycleView.Set(&v)
+}
+// SetLifecycleViewNil sets the value for LifecycleView to be an explicit nil
+func (o *RecallRequest) SetLifecycleViewNil() {
+	o.LifecycleView.Set(nil)
+}
+
+// UnsetLifecycleView ensures that no value is present for LifecycleView, not even an explicit nil
+func (o *RecallRequest) UnsetLifecycleView() {
+	o.LifecycleView.Unset()
+}
+
+// GetAsOf returns the AsOf field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *RecallRequest) GetAsOf() time.Time {
+	if o == nil || IsNil(o.AsOf.Get()) {
+		var ret time.Time
+		return ret
+	}
+	return *o.AsOf.Get()
+}
+
+// GetAsOfOk returns a tuple with the AsOf field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *RecallRequest) GetAsOfOk() (*time.Time, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.AsOf.Get(), o.AsOf.IsSet()
+}
+
+// HasAsOf returns a boolean if a field has been set.
+func (o *RecallRequest) HasAsOf() bool {
+	if o != nil && o.AsOf.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetAsOf gets a reference to the given NullableTime and assigns it to the AsOf field.
+func (o *RecallRequest) SetAsOf(v time.Time) {
+	o.AsOf.Set(&v)
+}
+// SetAsOfNil sets the value for AsOf to be an explicit nil
+func (o *RecallRequest) SetAsOfNil() {
+	o.AsOf.Set(nil)
+}
+
+// UnsetAsOf ensures that no value is present for AsOf, not even an explicit nil
+func (o *RecallRequest) UnsetAsOf() {
+	o.AsOf.Unset()
+}
+
+// GetPurpose returns the Purpose field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *RecallRequest) GetPurpose() string {
+	if o == nil || IsNil(o.Purpose.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.Purpose.Get()
+}
+
+// GetPurposeOk returns a tuple with the Purpose field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *RecallRequest) GetPurposeOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Purpose.Get(), o.Purpose.IsSet()
+}
+
+// HasPurpose returns a boolean if a field has been set.
+func (o *RecallRequest) HasPurpose() bool {
+	if o != nil && o.Purpose.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetPurpose gets a reference to the given NullableString and assigns it to the Purpose field.
+func (o *RecallRequest) SetPurpose(v string) {
+	o.Purpose.Set(&v)
+}
+// SetPurposeNil sets the value for Purpose to be an explicit nil
+func (o *RecallRequest) SetPurposeNil() {
+	o.Purpose.Set(nil)
+}
+
+// UnsetPurpose ensures that no value is present for Purpose, not even an explicit nil
+func (o *RecallRequest) UnsetPurpose() {
+	o.Purpose.Unset()
+}
+
+// GetContext returns the Context field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *RecallRequest) GetContext() RecallTaskContext {
+	if o == nil || IsNil(o.Context.Get()) {
+		var ret RecallTaskContext
+		return ret
+	}
+	return *o.Context.Get()
+}
+
+// GetContextOk returns a tuple with the Context field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *RecallRequest) GetContextOk() (*RecallTaskContext, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Context.Get(), o.Context.IsSet()
+}
+
+// HasContext returns a boolean if a field has been set.
+func (o *RecallRequest) HasContext() bool {
+	if o != nil && o.Context.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetContext gets a reference to the given NullableRecallTaskContext and assigns it to the Context field.
+func (o *RecallRequest) SetContext(v RecallTaskContext) {
+	o.Context.Set(&v)
+}
+// SetContextNil sets the value for Context to be an explicit nil
+func (o *RecallRequest) SetContextNil() {
+	o.Context.Set(nil)
+}
+
+// UnsetContext ensures that no value is present for Context, not even an explicit nil
+func (o *RecallRequest) UnsetContext() {
+	o.Context.Unset()
+}
+
 func (o RecallRequest) MarshalJSON() ([]byte, error) {
 	toSerialize,err := o.ToMap()
 	if err != nil {
@@ -567,6 +740,18 @@ func (o RecallRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.TemporalWindow.IsSet() {
 		toSerialize["temporal_window"] = o.TemporalWindow.Get()
+	}
+	if o.LifecycleView.IsSet() {
+		toSerialize["lifecycle_view"] = o.LifecycleView.Get()
+	}
+	if o.AsOf.IsSet() {
+		toSerialize["as_of"] = o.AsOf.Get()
+	}
+	if o.Purpose.IsSet() {
+		toSerialize["purpose"] = o.Purpose.Get()
+	}
+	if o.Context.IsSet() {
+		toSerialize["context"] = o.Context.Get()
 	}
 	return toSerialize, nil
 }

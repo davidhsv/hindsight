@@ -35,6 +35,7 @@ type RecallResult struct {
 	Tags []string `json:"tags,omitempty"`
 	SourceFactIds []string `json:"source_fact_ids,omitempty"`
 	Scores NullableRecallScores `json:"scores,omitempty"`
+	Lifecycle NullableRecallLifecycle `json:"lifecycle,omitempty"`
 	Attachments []ChunkAttachment `json:"attachments,omitempty"`
 }
 
@@ -575,6 +576,48 @@ func (o *RecallResult) UnsetScores() {
 	o.Scores.Unset()
 }
 
+// GetLifecycle returns the Lifecycle field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *RecallResult) GetLifecycle() RecallLifecycle {
+	if o == nil || IsNil(o.Lifecycle.Get()) {
+		var ret RecallLifecycle
+		return ret
+	}
+	return *o.Lifecycle.Get()
+}
+
+// GetLifecycleOk returns a tuple with the Lifecycle field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *RecallResult) GetLifecycleOk() (*RecallLifecycle, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Lifecycle.Get(), o.Lifecycle.IsSet()
+}
+
+// HasLifecycle returns a boolean if a field has been set.
+func (o *RecallResult) HasLifecycle() bool {
+	if o != nil && o.Lifecycle.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetLifecycle gets a reference to the given NullableRecallLifecycle and assigns it to the Lifecycle field.
+func (o *RecallResult) SetLifecycle(v RecallLifecycle) {
+	o.Lifecycle.Set(&v)
+}
+// SetLifecycleNil sets the value for Lifecycle to be an explicit nil
+func (o *RecallResult) SetLifecycleNil() {
+	o.Lifecycle.Set(nil)
+}
+
+// UnsetLifecycle ensures that no value is present for Lifecycle, not even an explicit nil
+func (o *RecallResult) UnsetLifecycle() {
+	o.Lifecycle.Unset()
+}
+
 // GetAttachments returns the Attachments field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *RecallResult) GetAttachments() []ChunkAttachment {
 	if o == nil {
@@ -655,6 +698,9 @@ func (o RecallResult) ToMap() (map[string]interface{}, error) {
 	}
 	if o.Scores.IsSet() {
 		toSerialize["scores"] = o.Scores.Get()
+	}
+	if o.Lifecycle.IsSet() {
+		toSerialize["lifecycle"] = o.Lifecycle.Get()
 	}
 	if o.Attachments != nil {
 		toSerialize["attachments"] = o.Attachments

@@ -142,7 +142,14 @@ async def insert_facts(
     )
 
 
-async def delete_document(*, conn, fq_table: Callable[[str], str], bank_id: str, document_id: str) -> None:
+async def delete_document(
+    *,
+    conn,
+    fq_table: Callable[[str], str],
+    bank_id: str,
+    document_id: str,
+    unit_ids: Sequence[str | uuid.UUID] | None = None,
+) -> None:
     """Delete every memory unit belonging to ``document_id``.
 
     Explicitly delete memory_units by document_id BEFORE deleting the
@@ -155,7 +162,23 @@ async def delete_document(*, conn, fq_table: Callable[[str], str], bank_id: str,
     must remove only what was written *before* this call, never the facts
     arriving moments later — which the ``document_id``/``bank_id`` predicate
     gives for free inside the caller's transaction.
+
+    ``unit_ids`` names the units the caller already read (the replace path's outgoing facts); the
+    lifecycle repair needs them before the DELETE, so they are read here when not given.
     """
+    from .adaptive_claims import relock_relations_before_delete, repair_lifecycle_for_deleted_facts
+
+    if unit_ids is None:
+        unit_ids = [
+            row["id"]
+            for row in await conn.fetch(
+                f"SELECT id FROM {fq_table('memory_units')} WHERE document_id = $1 AND bank_id = $2",
+                document_id,
+                bank_id,
+            )
+        ]
+    await relock_relations_before_delete(conn, fq_table=fq_table, bank_id=bank_id, unit_ids=unit_ids)
+    await repair_lifecycle_for_deleted_facts(conn, fq_table=fq_table, bank_id=bank_id, doomed_ids=unit_ids)
     await conn.execute(
         f"DELETE FROM {fq_table('memory_units')} WHERE document_id = $1 AND bank_id = $2",
         document_id,
@@ -259,8 +282,14 @@ async def delete_stale_observations(
     For each observation referencing any of ``fact_ids``:
     1. Delete the observation row (its text is stale once even one source
        memory disappears).
-    2. Reset ``consolidated_at = NULL`` on the surviving source memories so
-       they get re-consolidated under fresh observations on the next run.
+    2. Requeue the surviving source memories (``requeue_units``) so they get
+       re-consolidated under fresh observations on the next run.
+
+    A superseded or refuted observation (adaptive memory's claim lifecycle) is left in place: it is
+    history, not a summary of its sources, so an edit, a truth change, a re-scope or an invalidation
+    of one of them does not make its text stale, and rebuilding it would lose the record of what was
+    believed. The physical-delete primitives drop deleted facts from its sources
+    (``repair_lifecycle_for_deleted_facts``) and a re-ingest re-points it (``carry_forward_reingest``).
 
     Must be called within an active transaction, before the source memories
     are deleted.
@@ -278,11 +307,17 @@ async def delete_stale_observations(
     if not affected_obs:
         return 0
 
+    from .adaptive_claims import requeue_units, retired_claim_ids
+
+    retired = await retired_claim_ids(
+        conn, fq_table=fq_table, bank_id=bank_id, memory_ids=[obs.unit_id for obs in affected_obs]
+    )
+    swept_obs = [obs for obs in affected_obs if obs.unit_id not in retired]
     deleted_set = {str(uid) for uid in fact_uuids}
-    obs_ids = [uuid.UUID(obs.unit_id) for obs in affected_obs]
+    obs_ids = [uuid.UUID(obs.unit_id) for obs in swept_obs]
     seen_remaining: set[str] = set()
     remaining_source_ids: list[uuid.UUID] = []
-    for obs in affected_obs:
+    for obs in swept_obs:
         for src_str in obs.source_memory_ids:
             if src_str not in deleted_set and src_str not in seen_remaining:
                 remaining_source_ids.append(uuid.UUID(src_str))
@@ -293,7 +328,8 @@ async def delete_stale_observations(
     # any of them. Two sweeps over a shared observation otherwise each hold rows the other
     # writes next and deadlock (#4251). The engine's delete, edit and invalidate paths, which
     # write their facts first, therefore also sweep before that write, so their locks are
-    # taken in this order too.
+    # taken in this order too. The retired observations kept are locked with them: a physical
+    # delete or a re-ingest rewrites their sources next.
     # The facts only need a writer lock here: their keys are unchanged until the
     # caller's later delete. FOR UPDATE also blocks the relinker's FOR KEY SHARE
     # parent locks while it holds graph_maintenance_queue rows that our caller
@@ -304,8 +340,10 @@ async def delete_stale_observations(
         f"SELECT id FROM {fq_table('memory_units')} WHERE bank_id = $1 AND id = ANY($2::uuid[]) "
         "ORDER BY id FOR NO KEY UPDATE",
         bank_id,
-        sorted({*fact_uuids, *obs_ids, *remaining_source_ids}),
+        sorted({*fact_uuids, *(uuid.UUID(obs.unit_id) for obs in affected_obs), *remaining_source_ids}),
     )
+    if not obs_ids:
+        return 0
 
     await conn.execute(
         f"DELETE FROM {fq_table('memory_units')} WHERE id = ANY($1::uuid[])",
@@ -324,14 +362,9 @@ async def delete_stale_observations(
     if remaining_source_ids:
         # Requeue: consolidation bookkeeping, so `updated_at` is deliberately not
         # stamped (see META_UPDATED_AT in ..base) — nothing about these facts changed.
-        await conn.execute(
-            f"""
-            UPDATE {fq_table("memory_units")}
-            SET consolidated_at = NULL
-            WHERE id = ANY($1::uuid[])
-              AND fact_type IN ('experience', 'world')
-            """,
-            remaining_source_ids,
+        # A superseded or refuted co-source stays consolidated (requeue_units).
+        await requeue_units(
+            conn, fq_table=fq_table, bank_id=bank_id, unit_ids=remaining_source_ids, reason="stale_observation_sweep"
         )
 
     logger.info(
@@ -361,20 +394,18 @@ async def _memory_unit_columns(conn, fq_table: Callable[[str], str]) -> str:
 
     Read from the catalog rather than hardcoded so a schema migration cannot make
     the archive round-trip drift from the live table (the archive is created via
-    ``LIKE memory_units``, so the lists line up).
+    ``LIKE memory_units``, so the lists line up). The catalog is per dialect
+    (``DataAccessOps.table_columns``); Oracle's names come back quoted upper case.
     """
-    rows = await conn.fetch(
-        f"SELECT a.attname FROM pg_attribute a "
-        f"WHERE a.attrelid = '{fq_table('memory_units')}'::regclass "
-        f"AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum"
-    )
-    return ", ".join(f'"{r["attname"]}"' for r in rows)
+    from .graph import _ops_for
+
+    return ", ".join(await _ops_for(conn).table_columns(conn, fq_table("memory_units")))
 
 
 async def _archive_columns(conn, fq_table: Callable[[str], str]) -> str:
     """`_memory_unit_columns` minus the two the archive does not carry."""
     collist = await _memory_unit_columns(conn, fq_table)
-    return ", ".join(c for c in (s.strip() for s in collist.split(",")) if c not in _ARCHIVE_OMITTED)
+    return ", ".join(c for c in (s.strip() for s in collist.split(",")) if c.lower() not in _ARCHIVE_OMITTED)
 
 
 _ARCHIVE_SELECT = (
@@ -382,6 +413,14 @@ _ARCHIVE_SELECT = (
     "document_id, chunk_id, tags, metadata, proof_count, event_date, created_at, "
     "consolidated_at, entity_ids"
 )
+
+
+def _archived_entity_ids(row: Any) -> list[str]:
+    """The archive row's entity-id snapshot: a ``uuid[]`` on PG, JSON text in a CLOB on Oracle."""
+    value = row["entity_ids"]
+    if isinstance(value, str):
+        value = json.loads(value)
+    return [str(e) for e in (value or [])]
 
 
 def _archived_stored(row: Any) -> StoredMemory:
@@ -402,7 +441,7 @@ def _archived_stored(row: Any) -> StoredMemory:
         mentioned_at=row["mentioned_at"],
         created_at=row["created_at"],
         consolidated_at=row["consolidated_at"],
-        entity_ids=[str(e) for e in (row["entity_ids"] or [])],
+        entity_ids=_archived_entity_ids(row),
     )
 
 
@@ -432,22 +471,28 @@ async def invalidate_memory(*, conn, fq_table, bank_id: str, unit_id: str, reaso
     from .links import snapshot_causal_links
 
     causal_links = await snapshot_causal_links(conn, bank_id, str(unit_id))
-    inserted = await conn.fetchval(
+    # The status line's row count, not RETURNING: Oracle has no RETURNING for INSERT ... SELECT.
+    status = await conn.execute(
         f"INSERT INTO {arch} ({arch_cols}, invalidation_reason, invalidated_at, entity_ids, causal_links) "
-        f"SELECT {arch_cols}, $2, now(), $3::uuid[], $5::jsonb FROM {mu} WHERE id = $1 AND bank_id = $4 "
-        f"RETURNING id",
+        f"SELECT {arch_cols}, $2, now(), $3::uuid[], $5::jsonb FROM {mu} WHERE id = $1 AND bank_id = $4",
         str(unit_id),
         reason,
         entity_ids,
         bank_id,
         json.dumps([descriptor.as_json_dict() for descriptor in causal_links]),
     )
-    if inserted is None:
+    if str(status).split()[-1] == "0":
         return False
     # Links in lock order (see delete_unit_links) — after the causal snapshot above reads them.
     from .graph import _ops_for
 
     await _ops_for(conn).delete_unit_links(conn, fq_table("memory_links"), bank_id, [str(unit_id)])
+    # Adaptive-memory state goes with the row too (FK cascade), so park it on the archive row first:
+    # this takes the row's FOR UPDATE lock here, where the DELETE below would take it anyway, and
+    # snapshots under it (see park_adaptive_state). A memory with no adaptive state writes nothing.
+    from .adaptive_archive import park_adaptive_state
+
+    await park_adaptive_state(conn, fq_table=fq_table, bank_id=bank_id, unit_id=str(unit_id))
     # The cascade prunes `unit_entities` with the row.
     await conn.execute(f"DELETE FROM {mu} WHERE id = $1 AND bank_id = $2", str(unit_id), bank_id)
     return True
@@ -485,36 +530,39 @@ async def restore_memory(*, conn, fq_table, bank_id: str, unit_id: str) -> Store
     )
     # Rebuild search_vector with the *current* backend, so a backend change while
     # the fact sat archived cannot leave a stale/wrong-type vector (#2503). None
-    # means the backend indexes base columns directly and leaves it empty.
-    from ...db.ops_postgresql import pg_search_vector_expr
+    # means the backend indexes base columns directly and leaves it empty (every
+    # PG extension but native/vchord, and Oracle, whose text index syncs on commit).
+    from .graph import _ops_for
 
-    sv_expr = pg_search_vector_expr(get_config())
+    sv_expr = _ops_for(conn).search_vector_expr(get_config())
     if sv_expr is not None:
         await conn.execute(
             f"UPDATE {mu} SET search_vector = {sv_expr} WHERE id = $1 AND bank_id = $2", str(unit_id), bank_id
         )
-    # Re-consolidate from scratch; links are rebuilt by graph maintenance.
-    await conn.execute(
-        f"UPDATE {mu} SET consolidated_at = NULL, consolidation_failed_at = NULL, updated_at = now() "
-        f"WHERE id = $1 AND bank_id = $2",
-        str(unit_id),
-        bank_id,
-    )
-    from .graph import _ops_for
+    # Re-consolidate from scratch; links are rebuilt by graph maintenance. The restored row is a
+    # write (updated_at moves); the requeue itself goes through the one helper that clears the
+    # marker. The claim is not back yet, so this requeues even a retired fact, and unpark below
+    # re-stamps it.
+    await conn.execute(f"UPDATE {mu} SET updated_at = now() WHERE id = $1 AND bank_id = $2", str(unit_id), bank_id)
+    from .adaptive_claims import requeue_units
 
+    await requeue_units(
+        conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[unit_id], reason="restore", clear_failed=True
+    )
     # Restore the entity postings for entities that still exist — some may have
     # been swept as orphans while the memory was archived — and give each one
     # back the mention invalidation took from it (#4291). One call: the credit
     # has to follow the postings actually written, so the two cannot be decided
     # separately.
-    if arch_row["entity_ids"]:
+    archived_entity_ids = _archived_entity_ids(arch_row)
+    if archived_entity_ids:
         await _ops_for(conn).restore_entity_postings(
             conn,
             ue,
             ent,
             bank_id,
             str(unit_id),
-            arch_row["entity_ids"],
+            [uuid.UUID(e) for e in archived_entity_ids],
         )
     # Rematerialize the causal edges parked at invalidation (#2864). Edges whose peer is still
     # archived or permanently deleted are skipped — the peer keeps its own copy and recreates the
@@ -531,6 +579,12 @@ async def restore_memory(*, conn, fq_table, bank_id: str, unit_id: str) -> Store
     await _ops_for(conn).enqueue_graph_maintenance(
         conn, fq_table("graph_maintenance_queue"), bank_id, [uuid.UUID(str(unit_id))]
     )
+    # Put back the adaptive state parked at invalidation (retention, ledger keys, claim, evidence,
+    # relation endpoints), before the archive row that holds it goes. A retired claim also re-stamps
+    # consolidated_at, which the reset above cleared.
+    from .adaptive_archive import unpark_adaptive_state
+
+    await unpark_adaptive_state(conn, ops=_ops_for(conn), fq_table=fq_table, bank_id=bank_id, unit_id=str(unit_id))
     await conn.execute(f"DELETE FROM {arch} WHERE id = $1 AND bank_id = $2", str(unit_id), bank_id)
     return _archived_stored(arch_row)
 
@@ -570,7 +624,7 @@ async def apply_edit(
     # mention time. Both are on the signature for a store that carries entities on
     # the memory and rebuilds it wholesale.
     from ...causal_links import CAUSAL_LINK_TYPES
-    from ...db.ops_postgresql import pg_search_vector_expr
+    from .graph import _ops_for
 
     mu = fq_table("memory_units")
     ml = fq_table("memory_links")
@@ -581,7 +635,7 @@ async def apply_edit(
     # Reference the bind parameters, not the columns: PostgreSQL evaluates the
     # UPDATE's RHS before the sibling SET assignments land, so a column reference
     # would see the pre-edit values.
-    sv_expr = pg_search_vector_expr(get_config(), text_col="$3", context_col="$4")
+    sv_expr = _ops_for(conn).search_vector_expr(get_config(), text_col="$3", context_col="$4")
     sv_clause = f", search_vector = {sv_expr}" if sv_expr else ""
     # The re-embedded vector rides the edit's own UPDATE. It describes the text being written by
     # this statement, so writing it here is what keeps the two from ever disagreeing — and it
@@ -595,17 +649,19 @@ async def apply_edit(
         f"""
         UPDATE {mu}
         SET text = $3, context = $4, fact_type = $5, occurred_start = $6, occurred_end = $7,
-            event_date = $8, consolidated_at = NULL, consolidation_failed_at = NULL,
-            edited_at = now(), updated_at = now(){sv_clause}{embedding_clause}
+            event_date = $8, edited_at = now(), updated_at = now(){sv_clause}{embedding_clause}
         WHERE id = $1 AND bank_id = $2
         """,
         *params,
     )
+    # The edited fact re-consolidates, unless it is a superseded or refuted claim: editing a retired
+    # fact keeps it retired (requeue_units), so the edit cannot bring the old belief back.
+    from .adaptive_claims import requeue_units
+
+    await requeue_units(conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[unit_id], reason="edit", clear_failed=True)
     # Drop only the DERIVED links — graph maintenance recomputes temporal/semantic. Causal edges
     # are retain-time extraction output that nothing recreates, so an edit preserves them (#2864).
     # In lock order, like every other link delete (see delete_unit_links).
-    from .graph import _ops_for
-
     await _ops_for(conn).delete_unit_links(conn, ml, bank_id, [str(unit_id)], keep_link_types=list(CAUSAL_LINK_TYPES))
 
 

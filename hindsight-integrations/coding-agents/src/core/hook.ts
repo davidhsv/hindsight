@@ -28,6 +28,7 @@ import { applyBankConfig, loadConfig } from "./config";
 import { diag, diagFilePath, readHookEvent } from "./diag";
 import { describeError, log, setLogLevel } from "./log";
 import { startBackgroundSeed } from "./seed";
+import { repoContextOf } from "./repo-context";
 import type { ClientOpts } from "./hindsight";
 import { HindsightClient, ReflectError } from "./hindsight";
 import { brandWord } from "./brand";
@@ -483,6 +484,7 @@ export async function runHook(
     observationScopes: cfg.observationScopes,
     pageSearchLimit: cfg.pageSearchLimit,
     recallOptions: cfg.recallOptions,
+    recallContext: repoContextOf(cwd),
   });
   const cacheFile = sessionCacheFile(spec.harness, sessionId || "no-session");
 

@@ -695,6 +695,7 @@
       "webhookDelivery": "Webhook 配信",
       "graphMaintenance": "グラフメンテナンス",
       "vectorIndexMaintenance": "ベクトルインデックスのメンテナンス",
+      "adaptiveMemoryMaintenance": "適応メモリのメンテナンス",
       "exportDocuments": "ドキュメントのエクスポート",
       "importDocuments": "ドキュメントのインポート",
       "exportBank": "バンクのエクスポート",
@@ -2021,7 +2022,9 @@
         "retain": "バッチRetainに失敗しました",
         "retainAsync": "非同期バッチRetainに失敗しました",
         "history": "観察履歴の取得に失敗しました",
-        "update": "メモリの更新に失敗しました"
+        "update": "メモリの更新に失敗しました",
+        "confirm": "メモリの確認に失敗しました",
+        "lifecycle": "メモリのライフサイクルの更新に失敗しました"
       },
       "documents": {
         "fetchList": "ドキュメントの取得に失敗しました",
@@ -2259,5 +2262,32 @@
     "pausedTitle": "前回の更新が失敗したため、このモデルは自動更新されません。更新すると再開します",
     "retrying": "再試行中",
     "retryingTitle": "前回の試行は失敗し、次の試行が待機中です。これも失敗した場合にのみ自動更新が停止します"
+  },
+  "memoryLifecycle": {
+    "sectionTitle": "適応メモリ",
+    "truthStatus": "真偽ステータス",
+    "status": {
+      "active": "有効",
+      "uncertain": "不確か",
+      "superseded": "置き換え済み",
+      "refuted": "反証済み"
+    },
+    "until": "{date} まで",
+    "supersededByTitle": "{id} に置き換え",
+    "validity": "有効期間",
+    "unknownStart": "記録以前",
+    "openEnd": "現在",
+    "supersededBy": "置き換え先",
+    "retiredVia": "廃止の経緯",
+    "reason": "理由",
+    "retrievability": "想起しやすさ",
+    "stability": "安定度",
+    "stabilityValue": "{days} 日",
+    "reinforcements": "強化回数",
+    "importance": "重要度",
+    "exempt": "忘却の対象外",
+    "yes": "はい",
+    "archived": "アーカイブ済み",
+    "observeShadow": "観察モードでの判定"
   }
 }

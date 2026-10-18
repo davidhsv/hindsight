@@ -76,6 +76,26 @@ claim latency — story 33 failed that way about one run in fifty. A hold change
 *when* the answer is sent, never what it is: the rule still has to be declared,
 and an unscripted call still fails the test.
 
+## Another server, another database
+
+Two variables point the fixtures elsewhere, with the defaults unchanged:
+
+- `HINDSIGHT_SYSTEST_API_DIR` runs the server from another `hindsight-api-slim` checkout, such as a worktree at a base commit. That checkout needs its own environment: `uv sync` inside it.
+- `HINDSIGHT_SYSTEST_DATABASE_URL` replaces the suite's pg0 instance.
+
+## Golden transcripts
+
+`hindsight_system_tests.golden` replays one fixed scenario (retains with consolidation, recalls with and without a trace, memory reads, MCP `tools/list`, both export archives) and writes everything the server said, with wall-clock values, durations, host names and UUIDs canonicalized. It exists to hold a switched-off feature to the behaviour of the commit before it:
+
+```bash
+uv run python -m hindsight_system_tests.golden capture --out /tmp/golden-base \
+    --api-dir ../<base-worktree>/hindsight-api-slim
+HINDSIGHT_SYSTEST_GOLDEN_DIR=/tmp/golden-base uv run pytest tests/test_99_golden_off_mode.py
+uv run python -m hindsight_system_tests.golden compare <dir-a> <dir-b>
+```
+
+Every capture runs on a fresh schema (the CLI also on a pg0 instance of its own), and refuses to write a transcript in which any retrieval arm scored two candidates equally: the database breaks such ties by row order, so they cannot be reproduced. The module docstring lists each nondeterminism and how it is handled.
+
 ## Conventions
 
 - One story per file, named `test_NN_<story>.py`. The number is **reading order for

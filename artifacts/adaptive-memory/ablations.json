@@ -1,0 +1,1732 @@
+{
+ "arm": "ablations",
+ "description": "one arm per optional piece where one ran; 'not run' where none did",
+ "generated_at": "2026-10-18T08:42:29-03:00",
+ "base_sha": "5331da2f4db369528bb122075341a7de9c3df6df",
+ "feature_head_sha": "554284233f4fdb38d1e065c0d90b94ed9deb38a4",
+ "phase_commits": {
+  "P1": "dafd09a64",
+  "P2": "3816d0e4b",
+  "P3": "b491b2bb9",
+  "P4": "d65f17b05",
+  "P5": "728b265c9",
+  "T2": "504ca72e9",
+  "T2_harm_bench": "2f4c7daae"
+ },
+ "models": {
+  "server_extraction_consolidation": "claude-haiku-5-5",
+  "amb_answer": "claude-haiku-5-5",
+  "judge": "claude-sonnet-5-5",
+  "decision_model": "TypeSafe jev-latest"
+ },
+ "embedder": "local bge-small-en-v1.5 (CPU)",
+ "reranker": "local ms-marco-MiniLM-L-6-v2 cross-encoder (CPU)",
+ "frozen_parameters": {
+  "adaptive_memory_score_alpha": 0.1,
+  "score_floor": 0.3,
+  "base_stability_days": 30,
+  "max_stability_days": 3650,
+  "type_multipliers": {
+   "experience": 0.5,
+   "world": 1.0,
+   "observation": 2.0
+  },
+  "cooldown_hours": 6,
+  "gain": 1.0,
+  "recall_reinforcement": false,
+  "conflict_policy": "evidence",
+  "historical_cues": false,
+  "source": "tasks/adaptive-memory/eval/PREREGISTRATION.md"
+ },
+ "retention_decay_alpha": {
+  "rule_status": "decay (alpha) is a frozen parameter, not one of the pre-registered optional pieces; applying the optional-piece keep rule to it is the author's extension. Pre-registered decay ablations: memory_lifecycle E alpha=0 and AMB E-obs-nodecay. LoCoMo E-nodecay is exploratory (added after the LoCoMo regression was seen, STATE.md 2026-10-17 23:10)",
+  "memory_lifecycle_lifecycle_vs_nodecay": {
+   "lifecycle": {
+    "all": {
+     "current_precision@1": {
+      "mean": 0.9483,
+      "n": 58
+     },
+     "current_precision@5": {
+      "mean": 0.6759,
+      "n": 58
+     },
+     "current_recall@1": {
+      "mean": 0.8161,
+      "n": 58
+     },
+     "current_recall@5": {
+      "mean": 0.9511,
+      "n": 58
+     },
+     "stale_contamination@1": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination@5": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0333,
+      "n": 18
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0222,
+      "n": 18
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.375,
+      "n": 16
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 16
+     },
+     "scope_accuracy@1": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "scope_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.8333,
+      "n": 18
+     },
+     "uncertainty_accuracy@1": {
+      "mean": 0.0,
+      "n": 6
+     },
+     "uncertainty_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": 0.3333,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": 0.3333,
+      "n": 6
+     }
+    },
+    "holdout": {
+     "current_precision@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_precision@5": {
+      "mean": 0.5278,
+      "n": 18
+     },
+     "current_recall@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_recall@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "stale_contamination@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.4,
+      "n": 10
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 10
+     },
+     "scope_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "scope_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "supersession_accuracy@1": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "supersession_accuracy@5": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "uncertainty_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "uncertainty_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": null,
+      "n": 0
+     }
+    }
+   },
+   "lifecycle alpha=0": {
+    "all": {
+     "current_precision@1": {
+      "mean": 0.931,
+      "n": 58
+     },
+     "current_precision@5": {
+      "mean": 0.6759,
+      "n": 58
+     },
+     "current_recall@1": {
+      "mean": 0.7989,
+      "n": 58
+     },
+     "current_recall@5": {
+      "mean": 0.9511,
+      "n": 58
+     },
+     "stale_contamination@1": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination@5": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0333,
+      "n": 18
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0222,
+      "n": 18
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.375,
+      "n": 16
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 16
+     },
+     "scope_accuracy@1": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "scope_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.8889,
+      "n": 18
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.8333,
+      "n": 18
+     },
+     "uncertainty_accuracy@1": {
+      "mean": 0.0,
+      "n": 6
+     },
+     "uncertainty_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": 0.3333,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": 0.3333,
+      "n": 6
+     }
+    },
+    "holdout": {
+     "current_precision@1": {
+      "mean": 0.8889,
+      "n": 18
+     },
+     "current_precision@5": {
+      "mean": 0.5278,
+      "n": 18
+     },
+     "current_recall@1": {
+      "mean": 0.8889,
+      "n": 18
+     },
+     "current_recall@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "stale_contamination@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.4,
+      "n": 10
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 10
+     },
+     "scope_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "scope_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.8571,
+      "n": 7
+     },
+     "supersession_accuracy@5": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "uncertainty_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "uncertainty_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": null,
+      "n": 0
+     }
+    }
+   },
+   "note": "identical at k=5 on every metric; at k=1 decay gives supers@1 0.944 vs 0.889 and prec@1 0.948 vs 0.931 (one query each)"
+  },
+  "amb_noobs_rank_vs_off": "D vs B (no observations: the retention factor is the only active component): see rank.json; latest_first 0.819 -> 0.861 (0/3, p=0.25)",
+  "amb_obs_E_vs_E_nodecay": {
+   "reference_arm": "E-obs",
+   "E-obs-nodecay": {
+    "knowledge-update:earlier@10": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "E-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+    },
+    "knowledge-update:earlier@20": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "E-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+    },
+    "knowledge-update:earlier@5": {
+     "value": 0.925,
+     "x": 37,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.7961,
+      0.9843
+     ],
+     "reference_arm": "E-obs",
+     "reference_value": 0.875,
+     "ref_only": 0,
+     "arm_only": 2,
+     "p_exact_mcnemar": 0.5,
+     "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+    },
+    "knowledge-update:latest@10": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "E-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+    },
+    "knowledge-update:latest@20": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "E-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+    },
+    "knowledge-update:latest@5": {
+     "value": 0.975,
+     "x": 39,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.8684,
+      0.9994
+     ],
+     "reference_arm": "E-obs",
+     "reference_value": 1.0,
+     "ref_only": 1,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+    },
+    "knowledge-update:latest_first": {
+     "value": 0.825,
+     "x": 33,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.6722,
+      0.9266
+     ],
+     "reference_arm": "E-obs",
+     "reference_value": 0.825,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+    }
+   },
+   "derived_by": "python3 -I tasks/adaptive-memory/eval/arms/score_endpoints.py --runs obs-cons-base obs-cons-life --reference E-obs (rows unchanged; the B-obs-reference rerun reproduces eval/arms/score-obs/endpoints.json exactly)"
+  },
+  "amb_obs_vs_B_obs": {
+   "reference_arm": "B-obs",
+   "E-obs-nodecay": {
+    "knowledge-update:earlier@10": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:earlier@20": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:earlier@5": {
+     "value": 0.925,
+     "x": 37,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.7961,
+      0.9843
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 3,
+     "arm_only": 0,
+     "p_exact_mcnemar": 0.25,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:latest@10": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:latest@20": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:latest@5": {
+     "value": 0.975,
+     "x": 39,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.8684,
+      0.9994
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 1,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:latest_first": {
+     "value": 0.825,
+     "x": 33,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.6722,
+      0.9266
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 0.225,
+     "ref_only": 0,
+     "arm_only": 24,
+     "p_exact_mcnemar": 1.1920928955078125e-07,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    }
+   }
+  },
+  "locomo": {
+   "status": "exploratory: arm decided after the LoCoMo D/E regression was seen",
+   "E-nodecay vs B": {
+    "run": "locomo-E-nodecay",
+    "gold@5": {
+     "value": 0.9019,
+     "x": 1389,
+     "n": 1540,
+     "ci95_clopper_pearson": [
+      0.886,
+      0.9163
+     ],
+     "reference_arm": "B",
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0
+    },
+    "gold@10": {
+     "value": 0.9468,
+     "x": 1458,
+     "n": 1540,
+     "ci95_clopper_pearson": [
+      0.9343,
+      0.9574
+     ],
+     "reference_arm": "B",
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0
+    },
+    "gold@20": {
+     "value": 0.9753,
+     "x": 1502,
+     "n": 1540,
+     "ci95_clopper_pearson": [
+      0.9663,
+      0.9825
+     ],
+     "reference_arm": "B",
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0
+    },
+    "any_gold": {
+     "value": 0.9942,
+     "x": 1531,
+     "n": 1540,
+     "ci95_clopper_pearson": [
+      0.9889,
+      0.9973
+     ]
+    }
+   },
+   "E vs B": {
+    "run": "locomo-E",
+    "gold@5": {
+     "value": 0.8864,
+     "x": 1365,
+     "n": 1540,
+     "ci95_clopper_pearson": [
+      0.8694,
+      0.9018
+     ],
+     "reference_arm": "B",
+     "ref_only": 32,
+     "arm_only": 8,
+     "p_exact_mcnemar": 0.000182
+    },
+    "gold@10": {
+     "value": 0.939,
+     "x": 1446,
+     "n": 1540,
+     "ci95_clopper_pearson": [
+      0.9258,
+      0.9504
+     ],
+     "reference_arm": "B",
+     "ref_only": 15,
+     "arm_only": 3,
+     "p_exact_mcnemar": 0.00754
+    },
+    "gold@20": {
+     "value": 0.9753,
+     "x": 1502,
+     "n": 1540,
+     "ci95_clopper_pearson": [
+      0.9663,
+      0.9825
+     ],
+     "reference_arm": "B",
+     "ref_only": 4,
+     "arm_only": 4,
+     "p_exact_mcnemar": 1.0
+    },
+    "any_gold": {
+     "value": 0.9942,
+     "x": 1531,
+     "n": 1540,
+     "ci95_clopper_pearson": [
+      0.9889,
+      0.9973
+     ]
+    }
+   },
+   "source_scored": "tasks/adaptive-memory/eval/judged/locomo-endpoints.md"
+  }
+ },
+ "lifecycle_consolidation_vs_recall_filter": {
+  "status": "exploratory: E-obs-off is not in PREREGISTRATION.md (defined in eval/arms/arms-cons-life.json at 14:16 BRT, before any obs-on data)",
+  "reference_arm": "B-obs",
+  "E-obs-off (lifecycle-consolidated banks read in mode off)": {
+   "knowledge-update:earlier@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:earlier@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:earlier@5": {
+    "value": 0.975,
+    "x": 39,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.8684,
+     0.9994
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 1,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@5": {
+    "value": 0.975,
+    "x": 39,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.8684,
+     0.9994
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 1,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest_first": {
+    "value": 0.8,
+    "x": 32,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.6435,
+     0.9095
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 0.225,
+    "ref_only": 1,
+    "arm_only": 24,
+    "p_exact_mcnemar": 1.5497207641601562e-06,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   }
+  },
+  "vs_E_obs": {
+   "knowledge-update:earlier@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "E-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+   },
+   "knowledge-update:earlier@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "E-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+   },
+   "knowledge-update:earlier@5": {
+    "value": 0.975,
+    "x": 39,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.8684,
+     0.9994
+    ],
+    "reference_arm": "E-obs",
+    "reference_value": 0.875,
+    "ref_only": 1,
+    "arm_only": 5,
+    "p_exact_mcnemar": 0.21875,
+    "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+   },
+   "knowledge-update:latest@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "E-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+   },
+   "knowledge-update:latest@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "E-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+   },
+   "knowledge-update:latest@5": {
+    "value": 0.975,
+    "x": 39,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.8684,
+     0.9994
+    ],
+    "reference_arm": "E-obs",
+    "reference_value": 1.0,
+    "ref_only": 1,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+   },
+   "knowledge-update:latest_first": {
+    "value": 0.8,
+    "x": 32,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.6435,
+     0.9095
+    ],
+    "reference_arm": "E-obs",
+    "reference_value": 0.825,
+    "ref_only": 1,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "artifacts/adaptive-memory/derived/score-obs-ref-Eobs/endpoints.json"
+   }
+  }
+ },
+ "historical_view_default": {
+  "memory_lifecycle": {
+   "label": "p3-lifecycle-histview-base-delete",
+   "arm": "lifecycle-histview",
+   "encoding": "base-delete",
+   "api_sha": "b491b2bb9cba775fdb082a75288c0c2192f36726",
+   "api_dirty": false,
+   "embedder": "local (bge-small-en-v1.5 + ms-marco-MiniLM-L-6-v2, CPU)",
+   "payload_source": "authored",
+   "server_env_adaptive": {
+    "HINDSIGHT_API_ADAPTIVE_MEMORY_MODE": "lifecycle",
+    "HINDSIGHT_API_ADAPTIVE_MEMORY_DEFAULT_VIEW": "historical"
+   },
+   "bank_config": {},
+   "recall_types": null,
+   "started_at_utc": "2026-10-17T17:39:25.842571+00:00",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/p3/p3-lifecycle-histview-base-delete.json",
+   "metrics": {
+    "all": {
+     "current_precision@1": {
+      "mean": 0.931,
+      "n": 58
+     },
+     "current_precision@5": {
+      "mean": 0.6207,
+      "n": 58
+     },
+     "current_recall@1": {
+      "mean": 0.7989,
+      "n": 58
+     },
+     "current_recall@5": {
+      "mean": 0.9828,
+      "n": 58
+     },
+     "stale_contamination@1": {
+      "mean": 0.1667,
+      "n": 18
+     },
+     "stale_contamination@5": {
+      "mean": 0.4111,
+      "n": 18
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.1889,
+      "n": 18
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.1667,
+      "n": 18
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.2222,
+      "n": 18
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.375,
+      "n": 16
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 16
+     },
+     "scope_accuracy@1": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "scope_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.8333,
+      "n": 18
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "uncertainty_accuracy@1": {
+      "mean": 0.0,
+      "n": 6
+     },
+     "uncertainty_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": 0.3333,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": 0.3333,
+      "n": 6
+     }
+    },
+    "holdout": {
+     "current_precision@1": {
+      "mean": 0.8889,
+      "n": 18
+     },
+     "current_precision@5": {
+      "mean": 0.4556,
+      "n": 18
+     },
+     "current_recall@1": {
+      "mean": 0.8889,
+      "n": 18
+     },
+     "current_recall@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "stale_contamination@1": {
+      "mean": 0.1429,
+      "n": 7
+     },
+     "stale_contamination@5": {
+      "mean": 0.4,
+      "n": 7
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.2,
+      "n": 7
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.1429,
+      "n": 7
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.2,
+      "n": 7
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.4,
+      "n": 10
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 10
+     },
+     "scope_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "scope_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.8571,
+      "n": 7
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "uncertainty_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "uncertainty_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": null,
+      "n": 0
+     }
+    }
+   },
+   "note": "each value is the mean over the split's applicable queries of a per-query score (n = queries); no CI computed",
+   "state_conformance": {
+    "all:conformance": {
+     "mean": 0.9216,
+     "n": 17
+    },
+    "all:retirement_recall": {
+     "mean": 0.9,
+     "n": 10
+    },
+    "all:false_retirement": {
+     "mean": 0.0,
+     "n": 15
+    },
+    "dev:conformance": {
+     "mean": 0.8788,
+     "n": 11
+    },
+    "dev:retirement_recall": {
+     "mean": 0.8,
+     "n": 5
+    },
+    "dev:false_retirement": {
+     "mean": 0.0,
+     "n": 9
+    },
+    "holdout:conformance": {
+     "mean": 1.0,
+     "n": 6
+    },
+    "holdout:retirement_recall": {
+     "mean": 1.0,
+     "n": 5
+    },
+    "holdout:false_retirement": {
+     "mean": 0.0,
+     "n": 6
+    }
+   }
+  },
+  "note": "default view historical: stale@5 0.411 all / 0.400 holdout, refuted@5 0, hist@5 1.000; the stale rise is by design (history is shown)"
+ },
+ "historical_cues": {
+  "memory_lifecycle": {
+   "label": "p3-lifecycle-cues-base-delete",
+   "arm": "lifecycle-cues",
+   "encoding": "base-delete",
+   "api_sha": "b491b2bb9cba775fdb082a75288c0c2192f36726",
+   "api_dirty": false,
+   "embedder": "local (bge-small-en-v1.5 + ms-marco-MiniLM-L-6-v2, CPU)",
+   "payload_source": "authored",
+   "server_env_adaptive": {
+    "HINDSIGHT_API_ADAPTIVE_MEMORY_MODE": "lifecycle",
+    "HINDSIGHT_API_ADAPTIVE_MEMORY_HISTORICAL_CUES": "true"
+   },
+   "bank_config": {},
+   "recall_types": null,
+   "started_at_utc": "2026-10-17T17:35:55.142380+00:00",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/p3/p3-lifecycle-cues-base-delete.json",
+   "metrics": {
+    "all": {
+     "current_precision@1": {
+      "mean": 0.9483,
+      "n": 58
+     },
+     "current_precision@5": {
+      "mean": 0.6759,
+      "n": 58
+     },
+     "current_recall@1": {
+      "mean": 0.8161,
+      "n": 58
+     },
+     "current_recall@5": {
+      "mean": 0.9511,
+      "n": 58
+     },
+     "stale_contamination@1": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination@5": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0333,
+      "n": 18
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0222,
+      "n": 18
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.375,
+      "n": 16
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 16
+     },
+     "scope_accuracy@1": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "scope_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.8333,
+      "n": 18
+     },
+     "uncertainty_accuracy@1": {
+      "mean": 0.0,
+      "n": 6
+     },
+     "uncertainty_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": 0.3333,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": 0.3333,
+      "n": 6
+     }
+    },
+    "holdout": {
+     "current_precision@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_precision@5": {
+      "mean": 0.5278,
+      "n": 18
+     },
+     "current_recall@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_recall@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "stale_contamination@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.4,
+      "n": 10
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 10
+     },
+     "scope_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "scope_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "supersession_accuracy@1": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "supersession_accuracy@5": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "uncertainty_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "uncertainty_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": null,
+      "n": 0
+     }
+    }
+   },
+   "note": "each value is the mean over the split's applicable queries of a per-query score (n = queries); no CI computed",
+   "state_conformance": {
+    "all:conformance": {
+     "mean": 0.9216,
+     "n": 17
+    },
+    "all:retirement_recall": {
+     "mean": 0.9,
+     "n": 10
+    },
+    "all:false_retirement": {
+     "mean": 0.0,
+     "n": 15
+    },
+    "dev:conformance": {
+     "mean": 0.8788,
+     "n": 11
+    },
+    "dev:retirement_recall": {
+     "mean": 0.8,
+     "n": 5
+    },
+    "dev:false_retirement": {
+     "mean": 0.0,
+     "n": 9
+    },
+    "holdout:conformance": {
+     "mean": 1.0,
+     "n": 6
+    },
+    "holdout:retirement_recall": {
+     "mean": 1.0,
+     "n": 5
+    },
+    "holdout:false_retirement": {
+     "mean": 0.0,
+     "n": 6
+    }
+   }
+  },
+  "note": "identical to lifecycle: the bench sends explicit views, so the detector never decides; no false-positive/negative rates measured"
+ },
+ "existing_feature_baselines": {
+  "memory_lifecycle": "baseline.json existing_feature_baselines (prefer_observations: stale@5 0.233 -> 0.352; types=observation: stale 0 but hist@5 0.125)",
+  "amb_obs": {
+   "P-obs": {
+    "knowledge-update:earlier@10": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:earlier@20": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:earlier@5": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:latest@10": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:latest@20": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:latest@5": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:latest_first": {
+     "value": 0.15,
+     "x": 6,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.0571,
+      0.2984
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 0.225,
+     "ref_only": 3,
+     "arm_only": 0,
+     "p_exact_mcnemar": 0.25,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    }
+   },
+   "T-obs": {
+    "knowledge-update:earlier@10": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:earlier@20": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:earlier@5": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:latest@10": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:latest@20": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:latest@5": {
+     "value": 1.0,
+     "x": 40,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.9119,
+      1.0
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 1.0,
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    },
+    "knowledge-update:latest_first": {
+     "value": 0.15,
+     "x": 6,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.0571,
+      0.2984
+     ],
+     "reference_arm": "B-obs",
+     "reference_value": 0.225,
+     "ref_only": 3,
+     "arm_only": 0,
+     "p_exact_mcnemar": 0.25,
+     "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+    }
+   }
+  }
+ },
+ "not_run": {
+  "R55_last_write_wins (conflict_policy=latest)": "8 of 40 banks consolidated before the Anthropic credit ran out (4 failed, 28 not run); none used; not resumed by user decision (STATE.md 2026-10-18 02:03)",
+  "R55_recency_decay_only_baseline": "not run; no reason recorded. Hypothesis: on banks without reinforcement events D reduces to a decay-only arm; check: count memory_reinforcement_events rows on a D bank",
+  "archive / prune": "no benchmark arm; system story tests/test_101_retention_archive.py and api tests only",
+  "recall_reinforcement": "no benchmark arm (default off)",
+  "observe_shadow": "no benchmark arm; system story tests/test_103_observe_mode.py",
+  "D_reinforcement_off": "pre-registered memory_lifecycle ablation; not run; no reason recorded",
+  "C_observe_base_update": "pre-registered memory_lifecycle encoding for arm C; only p1/arm-observe-base-delete.json exists; no reason recorded"
+ },
+ "harm_bench_ungated_nopreamble": "see context-admission.json harm_bench.original (exploratory; preamble hypothesis refuted)"
+}

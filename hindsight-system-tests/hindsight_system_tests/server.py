@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 API_DIR = REPO_ROOT / "hindsight-api-slim"
 
+#: Run the server from another ``hindsight-api-slim`` checkout — a worktree at a base
+#: commit, say — so one harness can drive two versions of the server and compare them.
+#: That checkout needs its own synced environment (``uv sync`` inside it).
+ENV_API_DIR = "HINDSIGHT_SYSTEST_API_DIR"
+
+#: Point the server at another database than the suite's own pg0 instance, so a run
+#: that must not share one with a concurrent suite (the golden capture) can have its own.
+ENV_DATABASE_URL = "HINDSIGHT_SYSTEST_DATABASE_URL"
+
 # A pg0 instance of its own, on a port nothing else uses. The api-slim suite and
 # the dev server share the default "hindsight" instance, and pointing system
 # tests at that one would both see their leftovers and block on their locks.
@@ -230,7 +239,7 @@ def _server_env(stub_url: str, extra_env: dict[str, str] | None) -> dict[str, st
 
     env.update(
         {
-            "HINDSIGHT_API_DATABASE_URL": f"pg0://{PG0_INSTANCE}:{PG0_PORT}",
+            "HINDSIGHT_API_DATABASE_URL": os.environ.get(ENV_DATABASE_URL) or f"pg0://{PG0_INSTANCE}:{PG0_PORT}",
             "HINDSIGHT_API_LOG_LEVEL": "info",
             # Everything the server does by default stays on, background work
             # included. A retain enqueues observation extraction and can trigger
@@ -243,6 +252,18 @@ def _server_env(stub_url: str, extra_env: dict[str, str] | None) -> dict[str, st
         }
     )
     return env
+
+
+def api_dir() -> Path:
+    """The ``hindsight-api-slim`` tree the server runs from: this repo's, unless ``ENV_API_DIR``
+    names another one."""
+    override = os.environ.get(ENV_API_DIR)
+    if not override:
+        return API_DIR
+    path = Path(override).expanduser().resolve()
+    if not (path / "pyproject.toml").is_file():
+        raise RuntimeError(f"{ENV_API_DIR}={override!r} is not a hindsight-api-slim checkout: no pyproject.toml")
+    return path
 
 
 def _start(command: list[str], *, env: dict[str, str], url: str, log_path: Path) -> HindsightServer:
@@ -258,7 +279,7 @@ def _start(command: list[str], *, env: dict[str, str], url: str, log_path: Path)
 
     log_file = log_path.open("w")
     process = subprocess.Popen(
-        ["uv", "run", "--project", str(API_DIR), *command],
+        ["uv", "run", "--project", str(api_dir()), *command],
         cwd=run_dir,
         env=env,
         stdout=log_file,

@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from hindsight_api.engine.consolidation import consolidator as C
+from hindsight_api.engine.consolidation import lifecycle as claim_lifecycle
 from hindsight_api.engine.consolidation.consolidator import (
     _build_observations_for_llm,
     _consolidate_batch_with_llm,
@@ -195,6 +196,39 @@ def test_system_prompt_documents_the_scope_field_and_rule():
     assert prompt.index("12. AN UPDATE REPLACES") < prompt.index("13. SCOPES STAY APART") < prompt.index("## INPUT")
     # The language variant composes the same rules.
     assert "13. SCOPES STAY APART" in build_consolidation_system_prompt("Chinese")
+
+
+def test_the_lifecycle_prompt_keeps_one_scope_rule_that_also_bans_cross_scope_labels():
+    """Lifecycle mode sends its own prompt variant: the scope fields and rule 13 reach it once.
+
+    Its rule 13 must not contradict rule 4 (which turns a state change into a labelled UPDATE or a
+    ``supersedes`` CREATE): a fact from another scope is never a retirement, so the variant extends
+    the ban to every lifecycle label instead of adding a second rule.
+    """
+    prompt = build_consolidation_system_prompt(lifecycle=True)
+    assert prompt.count("SCOPES STAY APART") == 1
+    assert "`[uuid] fact text (temporal fields) [scope: key=value, ...]`" in prompt
+    assert "- `scope`: where the fact holds" in prompt
+    assert prompt.count("  - `scope`: optional — where that fact holds") == 1
+    rule_13 = prompt[prompt.index("13. SCOPES STAY APART") : prompt.index("## INPUT")]
+    assert "never name it in a lifecycle label" in rule_13
+    for label in ("`relation`", "`supersedes`", "`refutes`", "`conflicts_with`", "`split_from`"):
+        assert label in rule_13
+    assert "never name it in a lifecycle label" not in build_consolidation_system_prompt()
+    assert prompt.index("12. AN UPDATE REPLACES") < prompt.index("13. SCOPES STAY APART") < prompt.index("## INPUT")
+
+
+def test_a_lifecycle_pool_entry_shows_its_source_facts_scope():
+    obs = MemoryFact(
+        id="obs", text="Uploads are capped at 25 MB.", fact_type="observation", source_fact_ids=["f1"], tags=[]
+    )
+    facts = {"f1": MemoryFact(id="f1", text="upload cap 25 MB", fact_type="world", metadata={"service": "media"})}
+    pool = {"obs": claim_lifecycle.pool_entry(obs, None, frozenset())}
+
+    [serialized] = _build_observations_for_llm([obs], facts, pool)
+
+    assert serialized["retirable"] is True
+    assert serialized["source_memories"] == [{"id": "f1", "text": "upload cap 25 MB", "scope": "service=media"}]
 
 
 @pytest.mark.asyncio

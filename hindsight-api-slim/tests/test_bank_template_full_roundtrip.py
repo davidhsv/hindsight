@@ -50,7 +50,6 @@ from hindsight_api.api import create_app
 from hindsight_api.api.http import BankTemplateConfig
 from hindsight_api.config import HindsightConfig
 
-
 # One value per BankTemplateConfig field, each chosen to differ visibly from the
 # server default so a value that silently reverts is caught rather than matching
 # by luck. Cross-field constraints enforced by validate_bank_template() and the
@@ -58,6 +57,7 @@ from hindsight_api.config import HindsightConfig
 #   * retain_custom_instructions requires retain_extraction_mode == "custom"
 #   * retain_default_strategy names a key in retain_strategies
 #   * recall_budget_min <= recall_budget_max
+#   * adaptive_memory_base_stability_days <= adaptive_memory_max_stability_days
 _SAMPLE_VALUES: dict[str, Any] = {
     "reflect_mission": "Answer as a careful archivist.",
     "retain_mission": "Keep only decisions and the reasoning behind them.",
@@ -137,6 +137,23 @@ _SAMPLE_VALUES: dict[str, Any] = {
     "recall_prefer_observations": True,
     "recall_max_tokens": 9000,
     "recall_chunks_max_tokens": 4500,
+    "adaptive_memory_mode": "rank",
+    "adaptive_memory_score_alpha": 0.25,
+    "adaptive_memory_score_floor": 0.4,
+    "adaptive_memory_reinforcement_enabled": False,
+    "adaptive_memory_base_stability_days": 45.0,
+    "adaptive_memory_max_stability_days": 900.0,
+    "adaptive_memory_default_view": "historical",
+    "adaptive_memory_historical_cues": True,
+    "context_admission_mode": "observe",
+    "context_admission_threshold_auto": 0.7,
+    "context_admission_threshold_explicit": 0.3,
+    "context_admission_reference_bonus": 0.1,
+    "context_admission_candidates": 20,
+    "context_admission_max_memories": 6,
+    "context_admission_max_tokens": 1500,
+    "context_admission_mmr_lambda": 0.6,
+    "context_admission_dup_similarity": 0.9,
     # Validated against the DefensePolicy schema on write (parse_policy), so this
     # must be a real policy — and carrying a rule means the round-trip covers the
     # nested list, not just the top-level flag.
@@ -202,8 +219,13 @@ def test_sample_values_cover_every_exportable_field():
 
 
 @pytest.mark.asyncio
-async def test_every_exportable_field_survives_export_then_import(api_client, bank_id):
-    """Set every exportable field, export it, and import into a fresh bank."""
+async def test_every_exportable_field_survives_export_then_import(
+    api_client, bank_id, adaptive_memory_decay_experimental
+):
+    """Set every exportable field, export it, and import into a fresh bank.
+
+    The sample alpha is positive, which only a server with the decay switch accepts.
+    """
     source_id = f"{bank_id}_source"
     clone_id = f"{bank_id}_clone"
 

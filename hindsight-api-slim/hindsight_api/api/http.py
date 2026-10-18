@@ -31,6 +31,7 @@ from hindsight_api.api.observability import HttpObservabilityMiddleware
 from hindsight_api.api.passthrough_headers import collect_passthrough_headers
 from hindsight_api.api.unknown_params import UnknownParamsRoute, use_unknown_params_routes
 from hindsight_api.cancellation import OperationCancelledError
+from hindsight_api.engine.adaptive.views import MemoryLifecycle
 from hindsight_api.engine.audit import (
     AuditEntry,
     AuditLogger,
@@ -241,9 +242,11 @@ from hindsight_api.engine.response_models import (
     VALID_RECALL_FACT_TYPES,
     ConsolidationStrategiesPreview,
     ConsolidationStrategySpec,
+    ContextAdmissionSummary,
     DryRunExtractionResult,
     MemoryFact,
     MinScores,
+    RecallLifecycle,
     RecallScores,
     TemporalWindow,
     TokenUsage,
@@ -259,6 +262,7 @@ from hindsight_api.engine.retain.attachment_content import (
     validate_and_canonicalize_content,
 )
 from hindsight_api.engine.retain.attachment_store import StoredAttachment
+from hindsight_api.engine.search.lifecycle_filter import ClaimStateUnavailable
 from hindsight_api.engine.search.tag_resolution import needs_resolution
 from hindsight_api.engine.search.tags import TagGroup, TagsMatch
 
@@ -551,6 +555,41 @@ class IncludeOptions(BaseModel):
     )
 
 
+class RecallTaskContext(BaseModel):
+    """Where the caller is working, compared with memory metadata by context admission.
+
+    Every key is optional. With the bank's ``context_admission_mode`` at ``off`` the whole object is
+    ignored. Otherwise each key the server lists in ``HINDSIGHT_API_CONTEXT_ADMISSION_SCOPE_KEYS``
+    is compared with the memory metadata key of the same name (match, mismatch or unknown), and a
+    mismatch on a key in ``HINDSIGHT_API_CONTEXT_ADMISSION_HARD_SCOPE_KEYS`` rejects the memory in
+    strict mode. ``task_intent`` and ``workspace`` only reach the decision-model scorer.
+    """
+
+    repository: str | None = Field(
+        default=None,
+        description="Stable repository identity, e.g. the normalized git remote 'github.com/acme/payments'",
+    )
+    branch: str | None = Field(default=None, description="Current branch")
+    module: str | None = Field(default=None, description="Subsystem or top-level folder the task is in")
+    environment: str | None = Field(default=None, description="Deployment environment, e.g. 'prod' or 'staging'")
+    service: str | None = Field(default=None, description="Service the task concerns")
+    task_intent: str | None = Field(
+        default=None, description="Free-text kind of task, e.g. 'debug', 'implementation', 'code review'"
+    )
+    workspace: str | None = Field(default=None, description="Workspace or session label")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _known_keys_only(cls, value: Any) -> Any:
+        # A misspelled key ('repo') would otherwise be dropped and the recall judged as if the
+        # caller had sent no scope at all.
+        if isinstance(value, dict):
+            unknown = sorted(set(value) - set(cls.model_fields))
+            if unknown:
+                raise ValueError(f"Unknown context keys: {unknown}. Allowed keys: {sorted(cls.model_fields)}")
+        return value
+
+
 class RecallRequest(BaseModel):
     """Request model for recall endpoint."""
 
@@ -642,6 +681,45 @@ class RecallRequest(BaseModel):
         "while the semantic, keyword and graph arms are unaffected — so memories dated outside the window "
         "are still returned. Ignored when the bank has temporal retrieval disabled.",
     )
+    lifecycle_view: Literal["current", "historical"] | None = Field(
+        default=None,
+        description="Which memories to show when the bank's adaptive memory mode is 'lifecycle' (ignored "
+        "in every other mode). 'current' leaves out memories that were superseded or refuted; 'historical' "
+        "also returns superseded ones, each annotated with `lifecycle` (its validity and successor), but "
+        "never refuted ones. When omitted, the bank's `adaptive_memory_default_view` applies.",
+    )
+    as_of: datetime | None = Field(
+        default=None,
+        description="Show memories as they stood at this instant (ISO 8601; a time without an offset is "
+        "UTC), when the bank's adaptive memory mode is 'lifecycle': a memory is returned only if its claim "
+        "was valid then. Refuted memories never are. Takes precedence over `lifecycle_view`. It does not "
+        "change ranking: `query_timestamp` stays the clock recency is scored against.",
+    )
+    purpose: Literal["auto_context", "explicit_search", "historical_search"] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Why the caller recalls, which sets the trade-off context admission makes when the bank's "
+        "`context_admission_mode` is not 'off'. 'auto_context': memories injected into an agent's context "
+        "that nobody asked for, judged against the stricter `context_admission_threshold_auto`; "
+        "'explicit_search' (the default when omitted): someone asked, judged against "
+        "`context_admission_threshold_explicit`; 'historical_search': the caller wants how things were, so "
+        "superseded memories are admissible, and in lifecycle mode the claim view is 'historical' unless "
+        "`lifecycle_view` or `as_of` is given (whatever the admission mode). In filter and strict modes the result may be empty when no "
+        "memory is worth injecting.",
+    )
+    context: RecallTaskContext | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Where the caller is working (repository, branch, module, ...), compared with memory "
+        "metadata by context admission. Ignored when the bank's `context_admission_mode` is 'off'.",
+    )
+
+    @field_validator("as_of")
+    @classmethod
+    def _as_of_utc(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            return value.replace(tzinfo=timezone.utc)
+        return value
 
     @field_validator("query")
     @classmethod
@@ -698,6 +776,15 @@ class RecallResult(BaseModel):
         None  # IDs of source facts (observation type only, when source_facts is enabled)
     )
     scores: RecallScores | None = None  # Per-stage recall scores (final/reranker/semantic/text)
+    lifecycle: RecallLifecycle | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description=(
+            "Claim lifecycle state, when the bank's adaptive memory mode is 'lifecycle' and the memory is not "
+            "plain active: a superseded or refuted memory a historical or as_of recall returned, or an "
+            "uncertain one. Omitted otherwise."
+        ),
+    )
     attachments: list["ChunkAttachment"] | None = Field(
         default=None,
         description=(
@@ -974,6 +1061,13 @@ class RecallResponse(BaseModel):
             "warning, not a filter: the results are the same either way. None when the check is off or the "
             "decision model did not answer."
         ),
+    )
+    context_admission: ContextAdmissionSummary | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Set only when context admission filtered this recall (bank context_admission_mode filter "
+        "or strict). abstained=true means the empty results are the answer: candidates were judged and none "
+        "was relevant to the task.",
     )
 
 
@@ -1285,6 +1379,20 @@ class MemoryItem(BaseModel):
         description="How to handle an existing document with the same document_id. "
         "'replace' (default) deletes old data and reprocesses from scratch. "
         "'append' concatenates new content to the existing document text and reprocesses.",
+    )
+    importance: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="How much the memories extracted from this item matter, in [0, 1] (0.5 is neutral). "
+        "Scales how long they stay readily recallable without being reinforced. Applied only when the "
+        "bank's adaptive memory mode is 'rank' or 'lifecycle'; ignored in every other mode.",
+    )
+    forgetting_exempt: bool | None = Field(
+        default=None,
+        description="Exempt the memories extracted from this item from retention decay: they always "
+        "rank as fully retrievable. Applied only when the bank's adaptive memory mode is 'rank' or "
+        "'lifecycle'; ignored in every other mode.",
     )
 
     @field_validator("timestamp", mode="before")
@@ -2924,6 +3032,162 @@ class UpdateMemoryRequest(BaseModel):
         return self
 
 
+class ConfirmMemoryRequest(BaseModel):
+    """Request model for explicitly confirming that a memory still holds.
+
+    A confirmation is reinforcement evidence: it makes the memory more stable, so it stays
+    readily recallable for longer. Needs the bank's adaptive memory mode to be 'rank' or
+    'lifecycle' with reinforcement enabled.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "source_key": "review-2026-10-17",
+                "event_time": "2026-10-17T09:00:00Z",
+                "reason": "verified against the deployment inventory",
+            }
+        }
+    )
+
+    source_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="Identifies this piece of evidence. A memory is confirmed at most once per key: "
+        "re-sending the same key is reported as deduplicated and changes nothing, so a retry is safe. "
+        "Omit it and every request counts as a separate confirmation.",
+    )
+    event_time: datetime | None = Field(
+        default=None,
+        description="When the confirmation happened (ISO 8601; a time without an offset is UTC). "
+        "Defaults to now. It may be in the past, but not in the future.",
+    )
+    reason: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Free-text note for the audit log, when audit logging is on. Not stored with the memory.",
+    )
+
+    @field_validator("event_time")
+    @classmethod
+    def _event_time_utc(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+
+class ConfirmMemoryResponse(BaseModel):
+    """What an explicit confirmation did."""
+
+    memory_id: str
+    recorded: bool = Field(description="True when the confirmation was recorded as evidence for the memory.")
+    deduplicated: bool = Field(
+        description="True when this source_key had already confirmed the memory; nothing changed."
+    )
+    outcome: str | None = Field(
+        default=None,
+        description="'applied' (the memory was reinforced), 'cooldown' (recorded, but too soon after its last "
+        "reinforcement to add stability) or 'deduplicated'.",
+    )
+    stability_days: float | None = Field(
+        default=None,
+        description="The memory's stability after the call: the days until, without reinforcement, its "
+        "retrievability falls to about 37%.",
+    )
+    reinforcement_count: int | None = Field(
+        default=None, description="How many times the memory has been reinforced, after the call."
+    )
+
+
+class UpdateMemoryLifecycleRequest(BaseModel):
+    """Request model for changing how a memory is retained, and what should be believed about it.
+
+    The retention fields need the bank's adaptive memory mode to be 'rank' or 'lifecycle'; the truth
+    fields need 'lifecycle'. Omitted fields stay as they are; at least one must be set.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "truth_status": "superseded",
+                "superseded_by": "123e4567-e89b-12d3-a456-426614174000",
+                "reason": "upgraded to Java 21",
+            }
+        }
+    )
+
+    importance: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="How much the memory matters, in [0, 1] (0.5 is neutral). Rescales the stability the "
+        "memory has learned by the ratio of the old and new importance, so earlier reinforcement is kept.",
+    )
+    forgetting_exempt: bool | None = Field(
+        default=None,
+        description="Exempt the memory from retention decay: it always ranks as fully retrievable. "
+        "False lifts the exemption and clears its reason.",
+    )
+    exemption_reason: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description="Why the memory is exempt. Cannot be set while turning forgetting_exempt off.",
+    )
+    truth_status: Literal["active", "uncertain", "superseded", "refuted"] | None = Field(
+        default=None,
+        description="What should be believed about the memory ('lifecycle' mode only). 'superseded' or "
+        "'refuted' retires it from current recall (it must be active or uncertain, 409 otherwise): on an "
+        "observation its source facts inherit the status unless another observation still stands on them; "
+        "on a fact, the observations built on it are rebuilt from their other sources. 'active' restores a "
+        "retired memory; 'uncertain' marks it contested.",
+    )
+    superseded_by: str | None = Field(
+        default=None,
+        description="With truth_status 'superseded' or 'refuted': the memory that replaces this one. It must be "
+        "a different live memory of the same bank with exactly the same tags.",
+    )
+    reason: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description="Why the truth status changed; recorded on the claim and its lifecycle relation.",
+    )
+    hold: bool | None = Field(
+        default=None,
+        description="Place the memory on hold ('rank' or 'lifecycle' mode): it is never archived or pruned "
+        "and always ranks as fully retrievable. Stored as forgetting_exempt with exemption_reason 'hold'. "
+        "False lifts the exemption. Cannot be combined with forgetting_exempt or exemption_reason.",
+    )
+    retention_state: Literal["active"] | None = Field(
+        default=None,
+        description="'active' returns an archived memory to normal recall ('rank' or 'lifecycle' mode). "
+        "A memory that is not archived is left as it is.",
+    )
+
+    @model_validator(mode="after")
+    def _require_a_change(self) -> "UpdateMemoryLifecycleRequest":
+        if (
+            self.importance is None
+            and self.forgetting_exempt is None
+            and self.exemption_reason is None
+            and self.truth_status is None
+            and self.hold is None
+            and self.retention_state is None
+        ):
+            raise ValueError("Provide at least one field to update.")
+        if self.hold is not None and (self.forgetting_exempt is not None or self.exemption_reason is not None):
+            raise ValueError("hold cannot be combined with forgetting_exempt or exemption_reason.")
+        if self.exemption_reason is not None and self.forgetting_exempt is False:
+            raise ValueError("exemption_reason cannot be set while turning forgetting_exempt off.")
+        if self.superseded_by is not None and self.truth_status not in ("superseded", "refuted"):
+            raise ValueError("superseded_by needs truth_status 'superseded' or 'refuted'.")
+        if self.reason is not None and self.truth_status is None:
+            raise ValueError("reason is recorded with a truth_status change; set truth_status too.")
+        return self
+
+
 class DeleteDocumentResponse(BaseModel):
     """Response model for delete document endpoint."""
 
@@ -4130,6 +4394,105 @@ class BankTemplateConfig(BaseModel):
     recall_max_tokens: int | None = Field(default=None, description="Max tokens of results returned by recall")
     recall_chunks_max_tokens: int | None = Field(
         default=None, description="Max tokens of raw chunks returned by recall (when recall_include_chunks is set)"
+    )
+    adaptive_memory_mode: str | None = Field(
+        default=None,
+        description="Adaptive memory mode: 'off' (default; recall is unchanged), 'observe' (compute retention "
+        "and report it in traces and metrics only), 'rank' (retention and reinforcement state; rarely reinforced "
+        "memories are down-weighted only when adaptive_memory_score_alpha is above 0, which the server must allow) "
+        "or 'lifecycle' (rank plus claim lifecycle: superseded and refuted memories stop answering current "
+        "recall, and history is available through recall's lifecycle_view and as_of)",
+    )
+    adaptive_memory_score_alpha: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Weight of the retention factor in the final recall score (0, the default, = no decay). A "
+        "value above 0 is experimental: it is accepted only when the server sets "
+        "HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL, and without it a stored value reads as 0",
+    )
+    adaptive_memory_score_floor: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Lowest retention factor a fully-forgotten memory can reach",
+    )
+    adaptive_memory_reinforcement_enabled: bool | None = Field(
+        default=None,
+        description="Let reinforcement events raise a memory's stability (rank and lifecycle modes only)",
+    )
+    adaptive_memory_base_stability_days: float | None = Field(
+        default=None,
+        gt=0,
+        description="Days before an unreinforced world fact's retrievability falls to e^-1",
+    )
+    adaptive_memory_max_stability_days: float | None = Field(
+        default=None,
+        gt=0,
+        description="Cap on a memory's stability in days (must be >= adaptive_memory_base_stability_days)",
+    )
+    adaptive_memory_default_view: str | None = Field(
+        default=None,
+        description="Lifecycle recall view when the request names none: 'current' (default; superseded and "
+        "refuted memories are left out) or 'historical' (superseded ones are returned too, annotated)",
+    )
+    adaptive_memory_historical_cues: bool | None = Field(
+        default=None,
+        description="Detect historical phrasing ('used to', 'before the migration', 'before <date>', ...) in "
+        "external recall queries that name no lifecycle_view, and answer them from the historical view (or as of "
+        "the date). Lifecycle mode only",
+    )
+    context_admission_mode: str | None = Field(
+        default=None,
+        description="Context admission mode for external recalls: 'off' (default; recall is unchanged) or 'observe' "
+        "(decisions and the would-be admitted set go to traces and metrics only). The experimental 'filter' "
+        "(rejected memories are dropped and recall may return none) and 'strict' (filter plus hard scope, "
+        "near-duplicate suppression and the memory/token budget) are accepted only when the server sets "
+        "HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL",
+    )
+    context_admission_threshold_auto: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Admission score a memory needs on a recall with purpose 'auto_context'",
+    )
+    context_admission_threshold_explicit: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Admission score a memory needs on a recall with purpose 'explicit_search' or 'historical_search'",
+    )
+    context_admission_reference_bonus: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Subtracted from the auto_context threshold when the query refers to shared history "
+        "('last time', 'what did we decide')",
+    )
+    context_admission_candidates: int | None = Field(
+        default=None,
+        ge=1,
+        description="Top-ranked recall results the admission gate judges; the rest are never admitted",
+    )
+    context_admission_max_memories: int | None = Field(
+        default=None, ge=1, description="Most memories admitted per recall (strict mode)"
+    )
+    context_admission_max_tokens: int | None = Field(
+        default=None, ge=1, description="Most memory tokens admitted per recall (strict mode)"
+    )
+    context_admission_mmr_lambda: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="MMR trade-off between a memory's score and its novelty against those already admitted "
+        "(1 = score only; strict mode)",
+    )
+    context_admission_dup_similarity: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Embedding cosine above which a memory counts as a near-duplicate of one already admitted "
+        "(strict mode)",
     )
     memory_defense: dict | None = Field(
         default=None,
@@ -6188,7 +6551,10 @@ def _register_routes(app: FastAPI):
     @app.get(
         "/v1/default/banks/{bank_id}/memories/{memory_id}",
         summary="Get memory unit",
-        description="Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead.",
+        description="Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead. "
+        "When the bank's adaptive memory mode is not 'off', or adaptive state is stored for the memory, the "
+        "payload also carries 'lifecycle': its retention (stability, retrievability now, importance, exemption), "
+        "claim, lifecycle relations and most recent reinforcement events.",
         operation_id="get_memory",
         tags=["Memory"],
     )
@@ -6305,6 +6671,103 @@ def _register_routes(app: FastAPI):
             raise _internal_error(e, f"/v1/default/banks/{bank_id}/memories/{memory_id}/history")
 
     @app.post(
+        "/v1/default/banks/{bank_id}/memories/{memory_id}/confirm",
+        response_model=ConfirmMemoryResponse,
+        summary="Confirm memory",
+        description="Record explicit evidence that a memory (a fact or an observation) still holds. "
+        "The confirmation reinforces the memory, so it stays readily recallable for longer. A source_key "
+        "confirms a memory at most once; re-sending it changes nothing. Needs the bank's adaptive memory "
+        "mode to be 'rank' or 'lifecycle' with reinforcement enabled (409 otherwise; observe mode never "
+        "changes state). 404 when the memory is missing or invalidated.",
+        operation_id="confirm_memory",
+        tags=["Memory"],
+    )
+    @audited("confirm_memory")
+    async def api_confirm_memory(
+        bank_id: str,
+        memory_id: str,
+        request: ConfirmMemoryRequest | None = None,
+        request_context: RequestContext = Depends(get_request_context),
+    ):
+        """Explicitly confirm a memory (an explicit_confirmation reinforcement event)."""
+        body = request or ConfirmMemoryRequest()
+        try:
+            confirmation = await app.state.memory.confirm_memory(
+                bank_id,
+                memory_id,
+                source_key=body.source_key,
+                event_time=body.event_time,
+                request_context=request_context,
+            )
+            if confirmation is None:
+                raise HTTPException(status_code=404, detail=f"Memory unit '{memory_id}' not found")
+            return ConfirmMemoryResponse(
+                memory_id=confirmation.memory_id,
+                recorded=confirmation.recorded,
+                deduplicated=confirmation.deduplicated,
+                outcome=confirmation.outcome,
+                stability_days=confirmation.stability_days,
+                reinforcement_count=confirmation.reinforcement_count,
+            )
+        except OperationValidationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.reason)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            raise _internal_error(e, f"POST /v1/default/banks/{bank_id}/memories/{memory_id}/confirm")
+
+    @app.patch(
+        "/v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle",
+        response_model=MemoryLifecycle,
+        summary="Update memory lifecycle",
+        description="Change how a memory (a fact or an observation) is retained — its importance and its "
+        "exemption from retention decay, in adaptive memory mode 'rank' or 'lifecycle' — and what should be "
+        "believed about it: truth_status, superseded_by and reason, in mode 'lifecycle' only. Retiring a memory "
+        "(superseded/refuted) takes it out of current recall and records an explicit lifecycle relation; "
+        "'active' restores it. Returns the memory's lifecycle view, the same one GET /memories/{memory_id} "
+        "shows under 'lifecycle'. 409 when the bank's mode does not allow the change or the memory is already "
+        "retired; 404 when the memory (or superseded_by) is missing or invalidated; 400 for a successor in "
+        "another scope.",
+        operation_id="update_memory_lifecycle",
+        tags=["Memory"],
+    )
+    @audited("update_memory_lifecycle")
+    async def api_update_memory_lifecycle(
+        bank_id: str,
+        memory_id: str,
+        request: UpdateMemoryLifecycleRequest,
+        request_context: RequestContext = Depends(get_request_context),
+    ):
+        """Set a memory's importance, forgetting exemption and/or truth status."""
+        try:
+            view = await app.state.memory.update_memory_lifecycle(
+                bank_id,
+                memory_id,
+                importance=request.importance,
+                forgetting_exempt=request.forgetting_exempt,
+                exemption_reason=request.exemption_reason,
+                truth_status=request.truth_status,
+                superseded_by=request.superseded_by,
+                reason=request.reason,
+                hold=request.hold,
+                retention_state=request.retention_state,
+                request_context=request_context,
+            )
+            if view is None:
+                raise HTTPException(status_code=404, detail=f"Memory unit '{memory_id}' not found")
+            return view
+        except OperationValidationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.reason)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except (AuthenticationError, HTTPException):
+            raise
+        except Exception as e:
+            raise _internal_error(e, f"PATCH /v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle")
+
+    @app.post(
         "/v1/default/banks/{bank_id}/memories/recall",
         response_model=RecallResponse,
         summary="Recall memory",
@@ -6415,6 +6878,13 @@ def _register_routes(app: FastAPI):
                         min_scores=request.min_scores,
                         temporal_window=request.temporal_window,
                         recall_checks=True,
+                        lifecycle_view=request.lifecycle_view,
+                        as_of=request.as_of,
+                        purpose=request.purpose,
+                        task_context=request.context.model_dump(exclude_none=True) if request.context else None,
+                        # A final, external recall: the one kind that may reinforce what it returns
+                        # (and the one the historical-cue detector looks at).
+                        _external=True,
                     ),
                     operation="recall",
                     bank_id=bank_id,
@@ -6439,6 +6909,7 @@ def _register_routes(app: FastAPI):
                     tags=fact.tags,
                     source_fact_ids=fact.source_fact_ids,
                     scores=fact.scores,
+                    lifecycle=fact.lifecycle,
                 )
 
             recall_results = [_fact_to_result(fact) for fact in core_result.results]
@@ -6506,6 +6977,7 @@ def _register_routes(app: FastAPI):
                 source_facts=source_facts_response,
                 source_facts_truncated=core_result.source_facts_truncated,
                 nothing_relevant=core_result.nothing_relevant,
+                context_admission=core_result.context_admission,
             )
 
             handler_duration = time.perf_counter() - handler_start
@@ -6530,6 +7002,9 @@ def _register_routes(app: FastAPI):
             raise HTTPException(status_code=e.status_code, detail=e.reason)
         except (AuthenticationError, HTTPException):
             raise
+        except ClaimStateUnavailable as e:
+            # Lifecycle mode fails closed: no answer rather than retired memories shown as current.
+            raise HTTPException(status_code=503, detail=str(e), headers={"Retry-After": str(e.retry_after)})
         except (asyncio.TimeoutError, TimeoutError):
             handler_duration = time.perf_counter() - handler_start
             logger.error(
@@ -10304,6 +10779,13 @@ def _register_routes(app: FastAPI):
                 item.document_id or (f"retain_{uuid.uuid4()}" if canonical.attachments else None)
                 for item, canonical in zip(request.items, canonical_contents, strict=True)
             ]
+            # An id minted here is the server's, not the caller's: reinforcement must count it as
+            # weak evidence, as it does the ids retain_batch mints. Asked only when one was minted,
+            # and marked only where the bank's adaptive mode writes state, like retain_batch does.
+            mark_minted = any(
+                document_id and not item.document_id
+                for item, document_id in zip(request.items, item_document_ids, strict=True)
+            ) and await app.state.memory.records_minted_document_ids(bank_id, request_context=request_context)
             attachments_by_document: dict[str, list] = {}
             for item_document_id, canonical in zip(item_document_ids, canonical_contents, strict=True):
                 if item_document_id and canonical.attachments:
@@ -10351,6 +10833,8 @@ def _register_routes(app: FastAPI):
                     content_dict["metadata"] = item.metadata
                 if item_document_id:
                     content_dict["document_id"] = item_document_id
+                    if mark_minted and not item.document_id:
+                        content_dict["document_id_minted"] = True
                 if item.entities:
                     content_dict["entities"] = [{"text": e.text, "type": e.type or "CONCEPT"} for e in item.entities]
                     content_dict["resolve_entities"] = item.resolve_entities
@@ -10360,6 +10844,10 @@ def _register_routes(app: FastAPI):
                     content_dict["observation_scopes"] = item.observation_scopes
                 if item.update_mode is not None:
                     content_dict["update_mode"] = item.update_mode
+                if item.importance is not None:
+                    content_dict["importance"] = item.importance
+                if item.forgetting_exempt is not None:
+                    content_dict["forgetting_exempt"] = item.forgetting_exempt
                 # Carried on the item, not just used as the grouping key: reprocess
                 # rebuilds its retain call from retain_params, so a strategy that
                 # never reaches the content dict never reaches retain_params either
@@ -10622,6 +11110,9 @@ def _register_routes(app: FastAPI):
 
             file_items = []
             total_batch_size = 0
+            # Whether this bank records a server-minted document id as such (see api_retain); asked
+            # once, and only if a file arrives without a document_id.
+            mark_minted: bool | None = None
 
             for i, file in enumerate(files):
                 # Read file content to check size
@@ -10643,6 +11134,10 @@ def _register_routes(app: FastAPI):
                 # Get per-file metadata
                 file_meta = request_data.files_metadata[i] if request_data.files_metadata else FileRetainMetadata()
                 doc_id = file_meta.document_id or f"file_{uuid.uuid4()}"
+                if not file_meta.document_id and mark_minted is None:
+                    mark_minted = await app.state.memory.records_minted_document_ids(
+                        bank_id, request_context=request_context
+                    )
 
                 # Resolve and validate per-file parser chain
                 # Priority: per-file > request-level > server default
@@ -10660,6 +11155,8 @@ def _register_routes(app: FastAPI):
                     "parser": parser_chain,
                     "strategy": file_meta.strategy,
                 }
+                if mark_minted and not file_meta.document_id:
+                    item["document_id_minted"] = True
                 file_items.append(item)
 
             # Check total batch size after processing all files

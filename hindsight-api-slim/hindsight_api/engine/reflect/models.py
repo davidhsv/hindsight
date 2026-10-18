@@ -174,3 +174,11 @@ class ReflectAgentResult(BaseModel):
     directives_applied: list[DirectiveInfo] = Field(
         default_factory=list, description="Directive mental models that affected this reflection"
     )
+    answer_found: bool | None = Field(
+        default=None,
+        description=(
+            "What the ``done`` call reported as ``answer_found``: False when the agent concluded the "
+            "bank does not know the answer. None when the answer did not come through ``done`` (forced "
+            "or fallback synthesis, nothing to search for)."
+        ),
+    )

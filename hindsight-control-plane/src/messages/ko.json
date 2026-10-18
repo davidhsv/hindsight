@@ -695,6 +695,7 @@
       "webhookDelivery": "Webhook 전달",
       "graphMaintenance": "그래프 유지관리",
       "vectorIndexMaintenance": "벡터 인덱스 유지 관리",
+      "adaptiveMemoryMaintenance": "적응형 메모리 유지 관리",
       "exportDocuments": "문서 내보내기",
       "importDocuments": "문서 가져오기",
       "exportBank": "뱅크 내보내기",
@@ -2021,7 +2022,9 @@
         "retain": "배치 Retain을 실행하지 못했습니다",
         "retainAsync": "비동기 배치 Retain을 실행하지 못했습니다",
         "history": "관찰 기록을 가져오지 못했습니다",
-        "update": "메모리를 업데이트하지 못했습니다"
+        "update": "메모리를 업데이트하지 못했습니다",
+        "confirm": "메모리를 확인하지 못했습니다",
+        "lifecycle": "메모리 수명 주기를 업데이트하지 못했습니다"
       },
       "documents": {
         "fetchList": "문서를 가져오지 못했습니다",
@@ -2259,5 +2262,32 @@
     "pausedTitle": "마지막 새로 고침이 실패하여 이 모델은 더 이상 자동으로 새로 고쳐지지 않습니다. 새로 고치면 다시 시작됩니다",
     "retrying": "재시도 중",
     "retryingTitle": "마지막 시도가 실패했고 다음 시도가 대기 중입니다. 이번에도 실패하면 자동 새로 고침이 중지됩니다"
+  },
+  "memoryLifecycle": {
+    "sectionTitle": "적응형 메모리",
+    "truthStatus": "진위 상태",
+    "status": {
+      "active": "활성",
+      "uncertain": "불확실",
+      "superseded": "대체됨",
+      "refuted": "반박됨"
+    },
+    "until": "{date}까지",
+    "supersededByTitle": "{id}(으)로 대체됨",
+    "validity": "유효 기간",
+    "unknownStart": "기록 이전",
+    "openEnd": "현재",
+    "supersededBy": "대체한 메모리",
+    "retiredVia": "폐기 경로",
+    "reason": "사유",
+    "retrievability": "회상 가능성",
+    "stability": "안정성",
+    "stabilityValue": "{days}일",
+    "reinforcements": "강화 횟수",
+    "importance": "중요도",
+    "exempt": "망각 제외",
+    "yes": "예",
+    "archived": "보관됨",
+    "observeShadow": "관찰 모드 판정"
   }
 }

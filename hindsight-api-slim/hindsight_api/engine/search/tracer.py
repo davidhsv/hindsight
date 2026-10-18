@@ -10,8 +10,13 @@ import time
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from ..response_models import RecallLifecycle
 from .trace import (
+    AdaptiveTraceInfo,
+    ContextAdmissionTraceInfo,
     EntryPoint,
+    LifecycleFilteredResult,
+    LifecycleTraceInfo,
     NodeVisit,
     QueryInfo,
     RerankedResult,
@@ -94,6 +99,15 @@ class SearchTracer:
         self.retrieval_results: list[RetrievalMethodResults] = []
         self.rrf_merged: list[RRFMergeResult] = []
         self.reranked: list[RerankedResult] = []
+
+        # Adaptive memory summary; set by recall only when the bank's mode loads state, and only
+        # when a trace was asked for. None leaves the finalized trace exactly as it was.
+        self.adaptive: AdaptiveTraceInfo | None = None
+        # Lifecycle mode only (same rule): the claim view and the candidates it removed.
+        self.lifecycle: LifecycleTraceInfo | None = None
+        self.lifecycle_filtered: list[LifecycleFilteredResult] | None = None
+        # Only when the context-admission gate ran (same rule).
+        self.context_admission: ContextAdmissionTraceInfo | None = None
 
         # Tracking state
         self.current_step = 0
@@ -343,7 +357,9 @@ class SearchTracer:
 
             # Extract score components (only include non-None values)
             # Keys from ScoredResult.to_dict(): cross_encoder_score, cross_encoder_score_normalized,
-            # rrf_normalized, temporal, recency, proof_norm, combined_score, weight
+            # rrf_normalized, temporal, recency, proof_norm, combined_score, weight. The adaptive
+            # keys are in the dict only when the bank's adaptive mode scored this recall, so a
+            # mode-off trace carries exactly the components it always did.
             score_components = {}
             for key in [
                 "cross_encoder_score",
@@ -354,10 +370,19 @@ class SearchTracer:
                 "recency",
                 "proof_norm",
                 "combined_score",
+                "semantic_score",
+                "adaptive_base_score",
+                "retrievability",
+                "stability_days",
+                "importance",
+                "reinforcement_count",
+                "retention_factor",
+                "adaptive_factor",
             ]:
                 if key in result and result[key] is not None:
                     score_components[key] = result[key]
 
+            lifecycle = result.get("lifecycle")
             self.reranked.append(
                 RerankedResult(
                     node_id=node_id,
@@ -367,6 +392,7 @@ class SearchTracer:
                     rrf_rank=rrf_rank,
                     rank_change=rank_change,
                     score_components=score_components,
+                    lifecycle=RecallLifecycle.model_validate(lifecycle) if lifecycle is not None else None,
                 )
             )
 
@@ -426,6 +452,10 @@ class SearchTracer:
             visits=self.visits,
             summary=summary,
             final_results=final_results,
+            adaptive=self.adaptive,
+            lifecycle=self.lifecycle,
+            lifecycle_filtered=self.lifecycle_filtered,
+            context_admission=self.context_admission,
         )
 
         return trace

@@ -16,11 +16,14 @@ Follows the Strategy pattern (Fowler's "Replace Conditional with Polymorphism")
 and mirrors Django's ``DatabaseOperations`` architecture.
 """
 
+import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from ..causal_links import CausalLinkDescriptor
 from .base import DatabaseConnection
 from .result import ResultRow
 
@@ -151,7 +154,7 @@ def key_serialization_sql(table: str, alias: str) -> str:
     """
 
 
-_BANK_SERIALIZED_OPERATION_TYPES = ("graph_maintenance", "consolidation")
+_BANK_SERIALIZED_OPERATION_TYPES = ("graph_maintenance", "consolidation", "adaptive_memory_maintenance")
 
 
 def bank_serialization_sql(table: str, alias: str, operation_type: str | None = None) -> str:
@@ -169,6 +172,9 @@ def bank_serialization_sql(table: str, alias: str, operation_type: str | None = 
     * ``consolidation`` (#3700). Two runs claimed together read the same
       ``total_unconsolidated`` backlog and hand the same memories to the LLM
       twice — pure duplicated inference on the slowest path in the system.
+    * ``adaptive_memory_maintenance``. One run sweeps the bank's whole
+      retention table (archive, then prune); a concurrent one would sweep the
+      same rows and race it to delete the same archived memories.
 
     Ordering, not just exclusion, is the point, and both halves of the predicate
     are needed:
@@ -333,6 +339,90 @@ class LinkExpansionRows:
     entity: list[ResultRow]
     semantic: list[ResultRow]
     causal: list[ResultRow]
+
+
+#: The ``memory_retention_state`` columns :meth:`DataAccessOps.upsert_default_retention_state`
+#: returns for every locked row (the store maps them onto ``RetentionState``).
+RETENTION_STATE_COLUMNS = (
+    "memory_id, importance, stability_days, last_reinforced_at, reinforcement_count, access_count, "
+    "forgetting_exempt, exemption_reason, retention_state, last_recalled_at, below_threshold_since, "
+    "archived_at, updated_at"
+)
+
+
+@dataclass(frozen=True)
+class RetentionLock:
+    """The adaptive writers' lock on a set of memories (see ``upsert_default_retention_state``)."""
+
+    present: list[str]
+    """The requested memories that are live in the bank and now locked, sorted by id. A memory
+    that is missing, in another bank or (``skip_locked``) being deleted is absent."""
+
+    initialized: frozenset[str]
+    """The ``present`` memories whose default retention row this call inserted."""
+
+    rows: list[ResultRow]
+    """The ``present`` memories' retention rows (:data:`RETENTION_STATE_COLUMNS`), locked
+    ``FOR UPDATE``, sorted by memory id."""
+
+
+@dataclass(frozen=True)
+class ReinforcementKey:
+    """The reinforcement ledger's unique key, ``(memory_id, source_type, source_key)``."""
+
+    memory_id: str
+    source_type: str
+    source_key: str
+
+
+@dataclass(frozen=True)
+class ReinforcementEventRow:
+    """One ``memory_reinforcement_events`` row to insert, already decided (outcome and gain)."""
+
+    id: uuid.UUID
+    memory_id: uuid.UUID
+    source_type: str
+    source_key: str
+    event_time: datetime
+    weight: float
+    independence_weight: float
+    applied_gain: float
+    outcome: str
+    processed_at: datetime
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class RetentionStateUpdate:
+    """Every writable column of one ``memory_retention_state`` row, as it should now read."""
+
+    memory_id: uuid.UUID
+    importance: float
+    stability_days: float
+    last_reinforced_at: datetime
+    reinforcement_count: int
+    access_count: int
+    last_recalled_at: datetime | None
+    forgetting_exempt: bool
+    exemption_reason: str | None
+
+
+@dataclass(frozen=True)
+class LifecycleRelationRow:
+    """One ``memory_lifecycle_relations`` row to insert; the JSON columns already serialized."""
+
+    id: uuid.UUID
+    bank_id: str
+    relation_type: str
+    source_memory_id: uuid.UUID | None
+    target_memory_id: uuid.UUID | None
+    source_snapshot: str
+    target_snapshot: str
+    origin: str
+    reason: str | None
+    confidence: float | None
+    evidence: str
+    created_at: datetime
 
 
 class DataAccessOps(ABC):
@@ -1044,6 +1134,244 @@ class DataAccessOps(ABC):
 
         Used to fold peers into an execution that has already been claimed;
         runs in the same transaction that locked them.
+        """
+        ...
+
+    # -- Adaptive memory: retention state and the reinforcement ledger ------
+    #
+    # The lock protocol every adaptive writer follows: the parent
+    # ``memory_units`` rows first, in id order, so a concurrent delete cannot take them before
+    # the side rows reference them (PG's deferred FKs check only at COMMIT, #1882); then the
+    # retention rows ``FOR UPDATE`` in id order, which is where writers of one memory serialize.
+    # Every ledger write happens under that second lock, so a writer that checks the ledger
+    # after taking it sees every committed event and races no one for the unique key.
+
+    @abstractmethod
+    async def upsert_default_retention_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        retention_table: str,
+        units_table: str,
+        bank_id: str,
+        memory_ids: Sequence[uuid.UUID],
+        default_stability: Mapping[str, float],
+        fallback_stability: float,
+        anchors: Mapping[uuid.UUID, datetime],
+        now: datetime,
+        skip_locked: bool,
+    ) -> RetentionLock:
+        """Lock ``memory_ids``, give each live one a retention row if it has none, and lock those rows.
+
+        The parents are locked in id order (PG: ``FOR KEY SHARE`` in the same statement as the
+        insert, the ``bulk_insert_links`` shape; Oracle: per-row ``FOR UPDATE``). With
+        ``skip_locked`` (background producers) a memory whose row another transaction holds
+        exclusively — one being deleted — is skipped instead of waited for.
+
+        A new row gets neutral importance, ``default_stability[fact_type]`` (else
+        ``fallback_stability``) and ``last_reinforced_at`` = ``anchors[id]``, else the memory's
+        ``mentioned_at``, ``occurred_start``, ``event_date``, and finally ``created_at``, so the
+        NOT NULL column always has a value.
+        """
+        ...
+
+    @abstractmethod
+    async def fetch_reinforcement_keys(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        keys: Sequence[ReinforcementKey],
+    ) -> frozenset[ReinforcementKey]:
+        """Which of ``keys`` are already in the ledger."""
+        ...
+
+    @abstractmethod
+    async def insert_reinforcement_events(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        rows: Sequence[ReinforcementEventRow],
+    ) -> frozenset[str]:
+        """Insert ledger rows, skipping any whose unique key exists; returns the inserted row ids.
+
+        PG: one ``INSERT … ON CONFLICT DO NOTHING RETURNING id``. Oracle:
+        ``IGNORE_ROW_ON_DUPKEY_INDEX`` via executemany, then a re-select of the ids.
+        """
+        ...
+
+    @abstractmethod
+    async def update_retention_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        bank_id: str,
+        rows: Sequence[RetentionStateUpdate],
+        now: datetime,
+    ) -> None:
+        """Write every writable column of the given retention rows and stamp ``updated_at = now``."""
+        ...
+
+    # -- Claim lifecycle -------------------------------------------------------
+    #
+    # Same protocol as the retention writers above: parents locked in id order in the statement that
+    # inserts the side rows (PG ``FOR KEY SHARE``; Oracle per-row ``FOR UPDATE``), then the claim rows
+    # ``FOR UPDATE`` in id order. Per-memory serialization of truth status is on the claim row.
+
+    @abstractmethod
+    async def upsert_default_claim_state(
+        self,
+        conn: DatabaseConnection,
+        *,
+        claims_table: str,
+        units_table: str,
+        bank_id: str,
+        memory_ids: Sequence[uuid.UUID],
+        now: datetime,
+        skip_locked: bool,
+    ) -> list[str]:
+        """Lock ``memory_ids``' claim rows, giving every live memory without one a default ``active`` row.
+
+        Returns the ids now locked, sorted: the requested memories that are live in the bank (and, with
+        ``skip_locked``, not held exclusively by another transaction — a memory being deleted).
+        """
+        ...
+
+    @abstractmethod
+    async def insert_claim_evidence(
+        self,
+        conn: DatabaseConnection,
+        *,
+        evidence_table: str,
+        units_table: str,
+        bank_id: str,
+        pairs: Sequence[tuple[uuid.UUID, uuid.UUID]],
+        now: datetime,
+    ) -> int:
+        """Insert ``(memory_id, evidence_memory_id)`` rows whose two memories are live in the bank.
+
+        Both parents are locked in id order with ``SKIP LOCKED`` in the inserting statement (PG), so an
+        evidence fact being deleted is skipped rather than failing the deferred FK at COMMIT. Existing
+        rows are left alone. Returns how many rows were inserted.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_lifecycle_relation(
+        self, conn: DatabaseConnection, *, table: str, row: LifecycleRelationRow
+    ) -> bool:
+        """Insert one relation row unless ``(source, target, type)`` already exists; True when inserted.
+
+        PG: ``ON CONFLICT ON CONSTRAINT uq_mlr_edge DO NOTHING``. Oracle: ``IGNORE_ROW_ON_DUPKEY_INDEX``
+        on the function-based ``uq_mlr_edge``, then a re-select of the id.
+        """
+        ...
+
+    @abstractmethod
+    async def lock_relations_for_delete(
+        self, conn: DatabaseConnection, *, table: str, bank_id: str, unit_ids: Sequence[uuid.UUID]
+    ) -> None:
+        """Lock every relation row touching ``unit_ids``, ordered by ``LEAST``/``GREATEST`` of its
+        endpoints then type, ``FOR UPDATE``, so the ``ON DELETE SET NULL`` cascade of the parent delete
+        that follows cannot deadlock against another delete (the #4251 shape). Never deletes a row.
+        """
+        ...
+
+    @abstractmethod
+    async def upsert_claim_shadow(
+        self,
+        conn: DatabaseConnection,
+        *,
+        table: str,
+        units_table: str,
+        bank_id: str,
+        memory_id: uuid.UUID,
+        would_status: str,
+        deciding_snapshot: str,
+        evidence_ids: str,
+        now: datetime,
+    ) -> bool:
+        """Write the memory's observe-mode would-retire record (the latest decision replaces an older
+        one). The parent is locked ``SKIP LOCKED``; False when it is not live (or being deleted)."""
+        ...
+
+    # -- Curation archive and observation folds ----------------------------
+
+    @abstractmethod
+    async def table_columns(self, conn: DatabaseConnection, table: str) -> list[str]:
+        """``table``'s columns in ordinal order, each quoted the way this dialect's SQL must name it.
+
+        The curation archive round trip copies ``memory_units`` rows column by column, so the list
+        comes from the catalog rather than code. PG reads ``pg_attribute`` (``table`` is the
+        schema-qualified name, resolved through ``regclass``). Oracle reads ``all_tab_columns`` in the
+        session's ``CURRENT_SCHEMA`` (``table`` is the bare name there) and quotes the upper-case
+        names, because Oracle folds unquoted DDL identifiers to upper case.
+        """
+        ...
+
+    @abstractmethod
+    def search_vector_expr(self, config, *, text_col: str = "text", context_col: str = "context") -> str | None:
+        """The SQL that rebuilds ``memory_units.search_vector`` from ``text_col`` / ``context_col``, or
+        None when nothing has to write it.
+
+        PG: :func:`~.ops_postgresql.pg_search_vector_expr` for the configured text-search backend.
+        Oracle: always None. Its ``CTXSYS.CONTEXT`` index on ``memory_units(text)`` syncs on commit
+        and the retain path never writes ``search_vector``, so a restored or edited row needs nothing.
+        """
+        ...
+
+    @abstractmethod
+    async def fetch_causal_link_descriptors(
+        self,
+        conn: DatabaseConnection,
+        *,
+        links_table: str,
+        archive_table: str,
+        bank_id: str,
+        unit_id: str,
+        link_types: Sequence[str],
+    ) -> list[CausalLinkDescriptor]:
+        """Every causal edge of ``unit_id``, deduplicated: the live
+        ``memory_links`` rows plus the descriptors parked in ``invalidated_memory_units.causal_links``
+        of archived peers that name it (an edge whose other endpoint was invalidated first survives
+        only there). Entries with a missing endpoint or a type outside ``link_types`` are skipped.
+
+        PG: one ``UNION`` with ``jsonb_to_recordset``. Oracle: the live edges, then ``JSON_TABLE`` over
+        the archive (endpoints compared as ``RAW``), merged in Python.
+        """
+        ...
+
+    @abstractmethod
+    async def fold_sources_into_observation(
+        self,
+        conn: DatabaseConnection,
+        *,
+        units_table: str,
+        sources_table: str,
+        observation_id: uuid.UUID,
+        expected_text: str,
+        merged_text: str,
+        source_memory_ids: Sequence[uuid.UUID],
+        event_date: datetime | None,
+        occurred_start: datetime | None,
+        occurred_end: datetime | None,
+        mentioned_at: datetime | None,
+        search_vector_clause: str,
+    ) -> bool:
+        """Fold ``source_memory_ids`` and ``merged_text`` into an observation, gated on its text still
+        being ``expected_text``; True when folded. The source list becomes the distinct union of the
+        stored one and the new ids, ``proof_count`` its length, and the dates widen (earliest
+        ``event_date`` / ``occurred_start``, latest ``occurred_end`` / ``mentioned_at``, a NULL on
+        either side ignored). The stored embedding is kept.
+
+        PG: one ``UPDATE ... RETURNING`` over the ``uuid[]`` column (``search_vector_clause`` is
+        appended to its SET list). Oracle: the row is locked and its text compared in Python (a CLOB
+        cannot be compared with ``=``), the JSON source list rewritten, and the new ids posted to the
+        ``observation_sources`` junction; ``search_vector_clause`` is empty there.
         """
         ...
 

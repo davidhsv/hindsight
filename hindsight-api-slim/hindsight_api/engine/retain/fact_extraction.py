@@ -3392,6 +3392,8 @@ async def extract_facts_from_contents_batch_api(
                 metadata=content.metadata,
                 tags=content.tags,
                 observation_scopes=content.observation_scopes,
+                importance=content.importance,
+                forgetting_exempt=content.forgetting_exempt,
             )
 
             extracted_facts.append(extracted_fact)
@@ -3462,6 +3464,8 @@ def _extract_facts_chunks(
                     metadata=content.metadata,
                     tags=content.tags,
                     observation_scopes=content.observation_scopes,
+                    importance=content.importance,
+                    forgetting_exempt=content.forgetting_exempt,
                 )
             )
             global_chunk_idx += 1
@@ -3608,6 +3612,8 @@ async def extract_facts_from_contents(
                     metadata=content.metadata,
                     tags=content.tags,
                     observation_scopes=content.observation_scopes,
+                    importance=content.importance,
+                    forgetting_exempt=content.forgetting_exempt,
                 )
 
                 extracted_facts.append(extracted_fact)

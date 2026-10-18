@@ -283,6 +283,140 @@ func (a *MemoryAPIService) ClearMemoryObservationsExecute(r ApiClearMemoryObserv
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
+type ApiConfirmMemoryRequest struct {
+	ctx context.Context
+	ApiService *MemoryAPIService
+	bankId string
+	memoryId string
+	authorization *string
+	confirmMemoryRequest *ConfirmMemoryRequest
+}
+
+func (r ApiConfirmMemoryRequest) Authorization(authorization string) ApiConfirmMemoryRequest {
+	r.authorization = &authorization
+	return r
+}
+
+func (r ApiConfirmMemoryRequest) ConfirmMemoryRequest(confirmMemoryRequest ConfirmMemoryRequest) ApiConfirmMemoryRequest {
+	r.confirmMemoryRequest = &confirmMemoryRequest
+	return r
+}
+
+func (r ApiConfirmMemoryRequest) Execute() (*ConfirmMemoryResponse, *http.Response, error) {
+	return r.ApiService.ConfirmMemoryExecute(r)
+}
+
+/*
+ConfirmMemory Confirm memory
+
+Record explicit evidence that a memory (a fact or an observation) still holds. The confirmation reinforces the memory, so it stays readily recallable for longer. A source_key confirms a memory at most once; re-sending it changes nothing. Needs the bank's adaptive memory mode to be 'rank' or 'lifecycle' with reinforcement enabled (409 otherwise; observe mode never changes state). 404 when the memory is missing or invalidated.
+
+ @param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+ @param bankId
+ @param memoryId
+ @return ApiConfirmMemoryRequest
+*/
+func (a *MemoryAPIService) ConfirmMemory(ctx context.Context, bankId string, memoryId string) ApiConfirmMemoryRequest {
+	return ApiConfirmMemoryRequest{
+		ApiService: a,
+		ctx: ctx,
+		bankId: bankId,
+		memoryId: memoryId,
+	}
+}
+
+// Execute executes the request
+//  @return ConfirmMemoryResponse
+func (a *MemoryAPIService) ConfirmMemoryExecute(r ApiConfirmMemoryRequest) (*ConfirmMemoryResponse, *http.Response, error) {
+	var (
+		localVarHTTPMethod   = http.MethodPost
+		localVarPostBody     interface{}
+		formFiles            []formFile
+		localVarReturnValue  *ConfirmMemoryResponse
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "MemoryAPIService.ConfirmMemory")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v1/default/banks/{bank_id}/memories/{memory_id}/confirm"
+	localVarPath = strings.Replace(localVarPath, "{"+"bank_id"+"}", url.PathEscape(parameterValueToString(r.bankId, "bankId")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"memory_id"+"}", url.PathEscape(parameterValueToString(r.memoryId, "memoryId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{"application/json"}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	if r.authorization != nil {
+		parameterAddToHeaderOrQuery(localVarHeaderParams, "authorization", r.authorization, "simple", "")
+	}
+	// body params
+	localVarPostBody = r.confirmMemoryRequest
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 422 {
+			var v HTTPValidationError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+					newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+					newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
 type ApiDryRunExtractMemoriesRequest struct {
 	ctx context.Context
 	ApiService *MemoryAPIService
@@ -763,7 +897,7 @@ func (r ApiGetMemoryRequest) Execute() (interface{}, *http.Response, error) {
 /*
 GetMemory Get memory unit
 
-Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead.
+Get a single memory unit by ID with all its metadata including entities and tags. Note: the 'history' field is deprecated and always returns an empty list - use GET /memories/{memory_id}/history instead. When the bank's adaptive memory mode is not 'off', or adaptive state is stored for the memory, the payload also carries 'lifecycle': its retention (stability, retrievability now, importance, exemption), claim, lifecycle relations and most recent reinforcement events.
 
  @param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
  @param bankId
@@ -2232,6 +2366,143 @@ func (a *MemoryAPIService) UpdateMemoryExecute(r ApiUpdateMemoryRequest) (interf
 	}
 	// body params
 	localVarPostBody = r.updateMemoryRequest
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 422 {
+			var v HTTPValidationError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+					newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+					newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type ApiUpdateMemoryLifecycleRequest struct {
+	ctx context.Context
+	ApiService *MemoryAPIService
+	bankId string
+	memoryId string
+	updateMemoryLifecycleRequest *UpdateMemoryLifecycleRequest
+	authorization *string
+}
+
+func (r ApiUpdateMemoryLifecycleRequest) UpdateMemoryLifecycleRequest(updateMemoryLifecycleRequest UpdateMemoryLifecycleRequest) ApiUpdateMemoryLifecycleRequest {
+	r.updateMemoryLifecycleRequest = &updateMemoryLifecycleRequest
+	return r
+}
+
+func (r ApiUpdateMemoryLifecycleRequest) Authorization(authorization string) ApiUpdateMemoryLifecycleRequest {
+	r.authorization = &authorization
+	return r
+}
+
+func (r ApiUpdateMemoryLifecycleRequest) Execute() (*MemoryLifecycle, *http.Response, error) {
+	return r.ApiService.UpdateMemoryLifecycleExecute(r)
+}
+
+/*
+UpdateMemoryLifecycle Update memory lifecycle
+
+Change how a memory (a fact or an observation) is retained — its importance and its exemption from retention decay, in adaptive memory mode 'rank' or 'lifecycle' — and what should be believed about it: truth_status, superseded_by and reason, in mode 'lifecycle' only. Retiring a memory (superseded/refuted) takes it out of current recall and records an explicit lifecycle relation; 'active' restores it. Returns the memory's lifecycle view, the same one GET /memories/{memory_id} shows under 'lifecycle'. 409 when the bank's mode does not allow the change or the memory is already retired; 404 when the memory (or superseded_by) is missing or invalidated; 400 for a successor in another scope.
+
+ @param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+ @param bankId
+ @param memoryId
+ @return ApiUpdateMemoryLifecycleRequest
+*/
+func (a *MemoryAPIService) UpdateMemoryLifecycle(ctx context.Context, bankId string, memoryId string) ApiUpdateMemoryLifecycleRequest {
+	return ApiUpdateMemoryLifecycleRequest{
+		ApiService: a,
+		ctx: ctx,
+		bankId: bankId,
+		memoryId: memoryId,
+	}
+}
+
+// Execute executes the request
+//  @return MemoryLifecycle
+func (a *MemoryAPIService) UpdateMemoryLifecycleExecute(r ApiUpdateMemoryLifecycleRequest) (*MemoryLifecycle, *http.Response, error) {
+	var (
+		localVarHTTPMethod   = http.MethodPatch
+		localVarPostBody     interface{}
+		formFiles            []formFile
+		localVarReturnValue  *MemoryLifecycle
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "MemoryAPIService.UpdateMemoryLifecycle")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle"
+	localVarPath = strings.Replace(localVarPath, "{"+"bank_id"+"}", url.PathEscape(parameterValueToString(r.bankId, "bankId")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"memory_id"+"}", url.PathEscape(parameterValueToString(r.memoryId, "memoryId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.updateMemoryLifecycleRequest == nil {
+		return localVarReturnValue, nil, reportError("updateMemoryLifecycleRequest is required and must be specified")
+	}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{"application/json"}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	if r.authorization != nil {
+		parameterAddToHeaderOrQuery(localVarHeaderParams, "authorization", r.authorization, "simple", "")
+	}
+	// body params
+	localVarPostBody = r.updateMemoryLifecycleRequest
 	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
 	if err != nil {
 		return localVarReturnValue, nil, err
