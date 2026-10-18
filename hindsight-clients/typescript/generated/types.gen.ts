@@ -851,13 +851,13 @@ export type BankTemplateConfig = {
   /**
    * Adaptive Memory Mode
    *
-   * Adaptive memory mode: 'off' (default; recall is unchanged), 'observe' (compute retention and report it in traces and metrics only), 'rank' (retention down-weights rarely reinforced memories) or 'lifecycle' (rank plus claim lifecycle: superseded and refuted memories stop answering current recall, and history is available through recall's lifecycle_view and as_of)
+   * Adaptive memory mode: 'off' (default; recall is unchanged), 'observe' (compute retention and report it in traces and metrics only), 'rank' (retention and reinforcement state; rarely reinforced memories are down-weighted only when adaptive_memory_score_alpha is above 0) or 'lifecycle' (rank plus claim lifecycle: superseded and refuted memories stop answering current recall, and history is available through recall's lifecycle_view and as_of)
    */
   adaptive_memory_mode?: string | null;
   /**
    * Adaptive Memory Score Alpha
    *
-   * Weight of the retention factor in the final recall score (0 = no decay)
+   * Weight of the retention factor in the final recall score (0, the default, = no decay)
    */
   adaptive_memory_score_alpha?: number | null;
   /**

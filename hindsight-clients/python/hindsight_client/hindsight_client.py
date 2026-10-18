@@ -3482,10 +3482,11 @@ class Hindsight:
             audit_log_enabled: Write an audit log entry for each operation on this bank.
             adaptive_memory_mode: Adaptive memory mode: 'off' (default; recall is unchanged),
                 'observe' (compute retention and report it in traces and metrics only), 'rank'
-                (retention down-weights rarely reinforced memories) or 'lifecycle' (rank plus claim
+                (retention and reinforcement state; rarely reinforced memories are down-weighted
+                only when adaptive_memory_score_alpha is above 0) or 'lifecycle' (rank plus claim
                 lifecycle: superseded and refuted memories stop answering current recall).
             adaptive_memory_score_alpha: Weight of the retention factor in the final recall score,
-                in [0, 1] (0 = no decay).
+                in [0, 1] (0, the default, = no decay).
             adaptive_memory_score_floor: Lowest retention factor a fully-forgotten memory can
                 reach, in [0, 1].
             adaptive_memory_reinforcement_enabled: Let reinforcement events raise a memory's

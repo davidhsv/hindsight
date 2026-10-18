@@ -1136,7 +1136,7 @@ export class HindsightClient {
       auditLogEnabled?: boolean;
       /** Adaptive memory mode: 'off' (default), 'observe', 'rank' or 'lifecycle' (rank plus claim lifecycle: superseded and refuted memories stop answering current recall). */
       adaptiveMemoryMode?: string;
-      /** Weight of the retention factor in the final recall score, in [0, 1] (0 = no decay). */
+      /** Weight of the retention factor in the final recall score, in [0, 1] (0, the default, = no decay). */
       adaptiveMemoryScoreAlpha?: number;
       /** Lowest retention factor a fully-forgotten memory can reach, in [0, 1]. */
       adaptiveMemoryScoreFloor?: number;
