@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from hindsight_system_tests.context_bench.runner import BenchmarkError
+from hindsight_system_tests.context_bench.runner import AdmissionDecisionRow, AdmissionRow, BenchmarkError
 from hindsight_system_tests.context_bench.scenarios import MEMORIES as CONTEXT_BENCH_MEMORIES
 from hindsight_system_tests.harm_bench import scoring
 from hindsight_system_tests.harm_bench.h2 import GROUPS, H2_MEMORIES, H2_TASKS, validate_h2
@@ -33,9 +33,11 @@ from hindsight_system_tests.harm_bench.llm import (
 from hindsight_system_tests.harm_bench.runner import (
     AnswerRow,
     RecallRow,
+    ResultRow,
     RunConfig,
     RunRecord,
     _Budget,
+    _recall,
     _work,
     check_conditions,
     parse_results,
@@ -554,3 +556,406 @@ def test_summary_refuses_a_condition_from_two_runs() -> None:
     b = _record("b", ["none"], [ans("H01", "none", 1, True)])
     with pytest.raises(ValueError, match="both"):
         scoring.summarize([a, b])
+
+
+# ---------------------------------------------------------------------------
+# Gated recalls: admission summary, traced replay, gate account, downstream rule
+# ---------------------------------------------------------------------------
+
+
+def _trace_decision(label: str, memory_id: str, admitted: bool, reason: str, score: float) -> dict:
+    return {
+        "memory_id": memory_id,
+        "base_retrieval_score": 0.5,
+        "scope_score": 0.5,
+        "task_relevance": score,
+        "expected_utility": 0.5,
+        "truth_status": "active",
+        "admission_score": score,
+        "admitted": admitted,
+        "reason": reason,
+        "tokens": 20,
+        "features": {"semantic": 0.4},
+    }
+
+
+async def test_gated_recall_records_summary_and_traced_replay() -> None:
+    trap, useful = MEMORY_BY_LABEL["o.trap.jackson"], MEMORY_BY_LABEL["o.oncall"]
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        payload: dict = {
+            "results": [{"id": "m2", "text": useful.text, "document_id": useful.document_id}],
+            "context_admission": {"abstained": False, "candidates": 2, "admitted": 1},
+        }
+        if body.get("trace"):
+            payload["trace"] = {
+                "context_admission": {
+                    "mode": "strict",
+                    "scorer": "hybrid",
+                    "candidates": 2,
+                    "admitted": 1,
+                    "reasons": {"below_threshold": 1},
+                    "decisions": [
+                        _trace_decision("o.trap.jackson", "m1", False, "below_threshold", 0.12),
+                        _trace_decision("o.oncall", "m2", True, "admitted", 0.91),
+                    ],
+                },
+                "summary": {"phase_metrics": [{"phase_name": "context_admission", "duration_seconds": 0.35}]},
+            }
+        return httpx.Response(200, json=payload)
+
+    record = _record("feat-gated", ["gated"], [])
+    record.memory_labels = {"m1": trap.label, "m2": useful.label}
+    config = RunConfig(label="feat-gated", conditions=("gated",), out_dir=Path("."))
+    async with httpx.AsyncClient(base_url="http://test", transport=httpx.MockTransport(handler)) as http:
+        row = await _recall(http, "bank", H, "gated", config, record)
+    assert len(bodies) == 2
+    assert "trace" not in bodies[0] and bodies[0]["purpose"] == "auto_context"
+    assert bodies[1] == {**bodies[0], "trace": True}  # the replay is the same request, traced
+    assert row.admission_summary == {"abstained": False, "candidates": 2, "admitted": 1}
+    assert [m.label for m in row.injected] == ["o.oncall"]
+    assert row.traced_labels == ["o.oncall"]
+    assert row.admission is not None and row.admission.phase_ms == 350.0
+    assert [(d.label, d.admitted, d.reason) for d in row.admission.decisions] == [
+        ("o.trap.jackson", False, "below_threshold"),
+        ("o.oncall", True, "admitted"),
+    ]
+
+
+async def test_ungated_recall_records_no_admission() -> None:
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"results": []})
+
+    record = _record("base", ["ungated"], [])
+    config = RunConfig(label="base", conditions=("ungated",), out_dir=Path("."))
+    async with httpx.AsyncClient(base_url="http://test", transport=httpx.MockTransport(handler)) as http:
+        row = await _recall(http, "bank", H, "ungated", config, record)
+    assert len(calls) == 1
+    assert row.admission is None and row.admission_summary is None and row.traced_labels is None
+
+
+def test_profile_env_reads_the_key_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hindsight_system_tests.harm_bench.__main__ import _profile_env
+
+    assert _profile_env("local") == {}
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    with pytest.raises(SystemExit):
+        _profile_env("jev-admission")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    env = _profile_env("jev-admission")
+    assert env["HINDSIGHT_API_CONTEXT_ADMISSION_DECISION_MODEL_PROVIDER"] == "typesafe"
+    assert env["HINDSIGHT_API_CONTEXT_ADMISSION_DECISION_MODEL_API_KEY"] == "ts-test"
+
+
+def _gated_recall(
+    task_id: str, injected: tuple[str, ...], decisions: list[AdmissionDecisionRow], **summary
+) -> RecallRow:
+    return RecallRow(
+        task_id=task_id,
+        condition="gated",
+        status=200,
+        latency_ms=1.0,
+        results=[ResultRow(label=label, server_rank=i) for i, label in enumerate(injected, start=1)],
+        injected=[InjectedMemory(label=label, text="t") for label in injected],
+        admission_summary={
+            "abstained": not injected,
+            "candidates": len(decisions),
+            "admitted": len(injected),
+            **summary,
+        },
+        admission=AdmissionRow(
+            candidates=len(decisions),
+            admitted=len(injected),
+            reasons={"below_threshold": sum(1 for d in decisions if not d.admitted)},
+            relevance_source="reranker",
+            decisions=decisions,
+        ),
+        traced_labels=list(injected),
+    )
+
+
+def _row(label: str, admitted: bool, score: float, reason: str = "") -> AdmissionDecisionRow:
+    return AdmissionDecisionRow(
+        label=label,
+        memory_id=label,
+        base_retrieval_score=0.5,
+        scope_score=0.5,
+        task_relevance=score,
+        expected_utility=0.5,
+        truth_status="active",
+        admission_score=score,
+        admitted=admitted,
+        reason=reason or ("admitted" if admitted else "below_threshold"),
+        tokens=20,
+    )
+
+
+def test_gate_account_names_dropped_kept_and_unjudged_memories() -> None:
+    recall = _gated_recall(
+        "H02", ("o.oncall",), [_row("o.trap.vpn", False, 0.2), _row("o.oncall", True, 0.9), _row("x", False, 0.1)]
+    )
+    ungated = RecallRow(
+        task_id="H02",
+        condition="ungated",
+        status=200,
+        latency_ms=1.0,
+        results=[],
+        injected=[InjectedMemory(label=label, text="t") for label in ("o.trap.vpn", "g.humor.vpn", "o.oncall")],
+    )
+    account = scoring.gate_account(ALL_TASKS["H02"], recall, ungated)
+    assert account["abstained"] is False and account["candidates"] == 3
+    assert [(i["label"], i["admitted"]) for i in account["injected"]] == [("o.oncall", True)]
+    dropped = {i["label"]: i for i in account["dropped"]}
+    assert dropped["o.trap.vpn"]["role"] == "trap" and dropped["o.trap.vpn"]["reason"] == "below_threshold"
+    assert dropped["g.humor.vpn"]["judged"] is False  # never among the gate's candidates
+    assert account["added"] == []
+    assert [i["label"] for i in account["traps"]] == ["o.trap.vpn", "g.humor.vpn"]
+
+
+def test_admission_stats_counts_abstentions_errors_and_replay_mismatches() -> None:
+    ok = _gated_recall("H01", ("o.oncall",), [_row("o.oncall", True, 0.9), _row("o.trap.jackson", False, 0.1)])
+    abstained = _gated_recall("N01", (), [_row("o.money", False, 0.3)])
+    abstained.admission.jev_error = "not_configured"
+    drifted = _gated_recall("U01", ("p.use.deploy",), [_row("p.use.deploy", True, 0.8)])
+    drifted.traced_labels = ["o.money"]
+    stats = scoring.admission_stats([ok, abstained, drifted])
+    assert stats["recalls"] == 3
+    assert stats["abstained_tasks"] == ["N01"]
+    assert stats["reasons"] == {"below_threshold": 2}
+    assert stats["jev_error_tasks"] == ["N01"]
+    assert stats["replay_mismatch_tasks"] == ["U01"]
+    assert stats["mean_admitted"] == pytest.approx(2 / 3)
+    plain = RecallRow(task_id="H01", condition="ungated", status=200, latency_ms=1.0, results=[], injected=[])
+    assert scoring.admission_stats([plain]) is None
+
+
+def test_downstream_rule_items() -> None:
+    def cond(success: float, harm_h: float | None, complete: bool = True) -> dict:
+        return {"success": success, "harm_H": harm_h, "coverage": {"complete": complete}}
+
+    rule = scoring.downstream_rule({"none": cond(0.667, 0.0), "ungated": cond(1.0, 0.0), "gated": cond(0.95, 0.0)})
+    assert rule["success"]["bar"] == pytest.approx(0.95) and rule["success"]["holds"] is True
+    assert rule["harm"]["holds"] is True
+    rule = scoring.downstream_rule({"none": cond(0.9, 0.0), "ungated": cond(0.7, 0.3), "gated": cond(0.8, 0.4)})
+    assert rule["success"]["holds"] is False and rule["harm"]["holds"] is False
+    assert scoring.downstream_rule({"none": cond(1.0, 0.0), "ungated": cond(1.0, 0.0)}) is None
+    # An incomplete condition leaves every item that reads it without a verdict; the harm item
+    # does not read `none`.
+    rule = scoring.downstream_rule(
+        {"none": cond(0.667, 0.0, complete=False), "ungated": cond(1.0, 0.0), "gated": cond(0.95, 0.0)}
+    )
+    assert rule["success"]["holds"] is None and rule["success"]["bar"] is None
+    assert rule["success"]["incomplete"] == ["none"]
+    assert rule["harm"]["holds"] is True and rule["harm"]["incomplete"] == []
+    rule = scoring.downstream_rule(
+        {"none": cond(0.667, 0.0), "ungated": cond(1.0, 0.0), "gated": cond(0.95, 0.0, False)}
+    )
+    assert rule["success"]["holds"] is None and rule["harm"]["holds"] is None
+    assert rule["harm"]["incomplete"] == ["gated"]
+    # Without coverage the items are not evaluable, never assumed complete.
+    bare = {c: {"success": 1.0, "harm_H": 0.0} for c in ("none", "ungated", "gated")}
+    assert scoring.downstream_rule(bare)["success"]["holds"] is None
+
+
+def test_coverage_needs_every_task_and_repeat_judged_once_and_no_budget_stop() -> None:
+    tasks = [ALL_TASKS["H01"], ALL_TASKS["U01"]]
+    full = [ans(t.id, "gated", r, True) for t in tasks for r in (1, 2)]
+    assert scoring.coverage(full, tasks, 2, stopped_for_budget=False) == {
+        "expected": 4,
+        "judged": 4,
+        "failed": 0,
+        "stopped_for_budget": False,
+        "complete": True,
+    }
+    assert scoring.coverage(full, tasks, 2, stopped_for_budget=True)["complete"] is False
+    failed = [*full[:3], ans("U01", "gated", 2, None)]
+    assert scoring.coverage(failed, tasks, 2, stopped_for_budget=False) == {
+        "expected": 4,
+        "judged": 3,
+        "failed": 1,
+        "stopped_for_budget": False,
+        "complete": False,
+    }
+    assert scoring.coverage(full[:3], tasks, 2, stopped_for_budget=False)["complete"] is False  # one never answered
+    duplicated = [*full[:3], ans("U01", "gated", 1, True)]  # four verdicts, but repeat 2 of U01 is missing
+    assert scoring.coverage(duplicated, tasks, 2, stopped_for_budget=False)["complete"] is False
+
+
+def test_changed_tasks_compare_counts_over_repeats() -> None:
+    table = {
+        "H01": {
+            "ungated": {"success": [True, False], "harm": [False, True], "complete": True},
+            "gated": {"success": [False, True], "harm": [True, False], "complete": True},
+        },
+        "H02": {
+            "ungated": {"success": [True, True], "harm": [False, False], "complete": True},
+            "gated": {"success": [True, False], "harm": [False, False], "complete": True},
+        },
+        # One gated repeat failed: its single judged repeat must not read as a change.
+        "H03": {
+            "ungated": {"success": [True, True], "harm": [False, False], "complete": True},
+            "gated": {"success": [True], "harm": [False], "complete": False},
+        },
+        "U01": {"ungated": {"success": [True, True], "harm": [False, False], "complete": True}},
+    }
+    assert scoring.changed_tasks(table, "ungated", "gated") == ["H02"]
+    assert scoring.not_compared_tasks(table, "ungated", "gated") == ["H03", "U01"]
+
+
+def test_gated_summary_has_rule_group_comparisons_and_gate_section() -> None:
+    base = _record(
+        "base-h2",
+        ["none", "ungated"],
+        [
+            ans("J02", "none", 1, True),
+            ans("J02", "none", 2, True),
+            ans("J02", "ungated", 1, False, harmed=True, injected=("p.h2.webhook.cert",)),
+            ans("J02", "ungated", 2, False, harmed=True, injected=("p.h2.webhook.cert",)),
+            ans("C01", "none", 1, False),
+            ans("C01", "ungated", 1, True, injected=("o.h2.actuator",)),
+        ],
+        suite="h2",
+    )
+    base.recalls = [
+        RecallRow(
+            task_id="J02",
+            condition="ungated",
+            status=200,
+            latency_ms=1.0,
+            results=[],
+            injected=[InjectedMemory(label="p.h2.webhook.cert", text="t")],
+        )
+    ]
+    feat = _record(
+        "feat-gated-h2",
+        ["gated"],
+        [
+            ans("J02", "gated", 1, True),
+            ans("J02", "gated", 2, True),
+            ans("C01", "gated", 1, True, injected=("o.h2.actuator",)),
+        ],
+        suite="h2",
+    )
+    feat.recalls = [
+        _gated_recall("J02", (), [_row("p.h2.webhook.cert", False, 0.31)]),
+        _gated_recall("C01", ("o.h2.actuator",), [_row("o.h2.actuator", True, 0.93)]),
+    ]
+    summary = scoring.summarize([base, feat])
+    assert list(summary["conditions"]) == ["none", "ungated", "gated"]
+    assert "none_vs_gated" in summary["comparisons"] and "ungated_vs_gated" in summary["comparisons"]
+    harm_pair = summary["group_comparisons"]["joke_episode"]["ungated_vs_gated"]["harm"]["majority"]
+    assert harm_pair["a_only"] == ["J02"] and harm_pair["b_only"] == []
+    assert "harm" not in summary["group_comparisons"]["control"]["ungated_vs_gated"]
+    # Only J02 and C01 of the 16 H2 tasks were answered, so no rule item has a verdict.
+    assert summary["conditions"]["gated"]["coverage"] == {
+        "expected": 32,
+        "judged": 3,
+        "failed": 0,
+        "stopped_for_budget": False,
+        "complete": False,
+    }
+    assert summary["downstream_rule"]["harm"]["holds"] is None
+    assert summary["downstream_rule"]["harm"]["incomplete"] == ["ungated", "gated"]
+    assert summary["changed_vs_ungated"] == ["J02"]
+    assert "J02" not in summary["not_compared_vs_ungated"] and "C01" in summary["not_compared_vs_ungated"]
+    assert summary["gate_accounts"]["J02"]["dropped"][0]["role"] == "trap"
+    report = scoring.markdown(summary)
+    assert "### Downstream rule items (exploratory: suite not pre-registered)" in report
+    assert "### Paired comparisons per group" in report
+    assert "| joke_episode | ungated vs gated | harm |" in report
+    assert "#### Tasks where gated differs from ungated (1)" in report
+    assert "Compared over 1 of 16 tasks (every repeat judged under both conditions); not compared (15):" in report
+    assert "not evaluable (ungated 3/32 judged; gated 3/32 judged)" in report
+    assert "`p.h2.webhook.cert` below_threshold 0.31 [trap]" in report
+
+
+def test_report_names_failed_and_unanswered_conditions() -> None:
+    base = _record("base", ["none"], [ans("H01", "none", 1, True), ans("H01", "none", 2, None)])
+    feat = _record("feat-gated", ["gated"], [])
+    feat.recalls = [_gated_recall("H01", (), [_row("o.trap.jackson", False, 0.59)])]
+    summary = scoring.summarize([base, feat])
+    assert summary["conditions"]["none"]["errors"] == {"boom": 1}
+    report = scoring.markdown(summary)
+    assert "- `none`: 1 of 2 answers failed and are excluded from every rate: 1× boom" in report
+    assert "- `gated`: recalls recorded, no answer made yet" in report
+    # The gate account is recall-level, so it renders before any answer exists.
+    assert "| H01 | H | — | — | — (abstained) | `o.trap.jackson` below_threshold 0.59 | — |" in report
+    assert "Not evaluable: no gated answer was judged." in report
+
+
+def _full_suite(condition: str, ok: bool = True, harmed: bool = False) -> list[AnswerRow]:
+    return [ans(task.id, condition, r, ok, harmed=harmed) for task in SUITES["original"].tasks for r in (1, 2)]
+
+
+def test_one_failed_gated_answer_leaves_the_rule_items_not_evaluable() -> None:
+    base = _record("base", ["none", "ungated"], _full_suite("none") + _full_suite("ungated"))
+    gated = _full_suite("gated")
+    feat = _record("feat-gated", ["gated"], gated)
+    feat.recalls = [_gated_recall(task.id, (), []) for task in SUITES["original"].tasks]
+    complete = scoring.summarize([base, feat])
+    assert complete["conditions"]["gated"]["coverage"]["complete"] is True
+    assert complete["downstream_rule"]["success"]["holds"] is True
+    assert complete["downstream_rule"]["harm"]["holds"] is True
+    assert complete["changed_vs_ungated"] == [] and complete["not_compared_vs_ungated"] == []
+
+    # H01 repeat 2 fails under gated: the other 47 answers all succeed, but a verdict on them
+    # would be a verdict on a subset, and H01's one judged repeat must not count as a change.
+    feat.answers = [*gated[:1], ans("H01", "gated", 2, None), *gated[2:]]
+    partial = scoring.summarize([base, feat])
+    rule = partial["downstream_rule"]
+    assert partial["conditions"]["gated"]["success"] == 1.0  # the pooled rate is still reported
+    assert rule["success"]["holds"] is None and rule["harm"]["holds"] is None
+    assert rule["success"]["incomplete"] == ["gated"] and rule["harm"]["incomplete"] == ["gated"]
+    assert partial["per_task"]["H01"]["gated"] == {
+        "success": [True],
+        "harm": [False],
+        "injected": [],
+        "reasons": ["r"],
+        "complete": False,
+    }
+    assert partial["changed_vs_ungated"] == [] and partial["not_compared_vs_ungated"] == ["H01"]
+    report = scoring.markdown(partial)
+    assert (
+        "| gated harm (H) ≤ ungated harm (H) | — | 0.000 | 0.000 | 0.000 | not evaluable (gated 47/48 judged, 1 failed) |"
+        in report
+    )
+    assert "not compared (1): H01." in report
+
+    # A run that stopped at its budget is never complete, even with every answer it made judged.
+    feat.answers = gated
+    feat.stopped_for_budget = True
+    stopped = scoring.summarize([base, feat])
+    assert stopped["downstream_rule"]["success"]["holds"] is None
+    assert "not evaluable (gated 48/48 judged, stopped at budget)" in scoring.markdown(stopped)
+
+
+def test_condition_notes_mark_a_pre_registered_condition_exploratory(tmp_path: Path) -> None:
+    assert scoring.load_notes(tmp_path) == {}
+    (tmp_path / scoring.NOTES_FILE).write_text(json.dumps({"gated": "exploratory: setting chosen after a result"}))
+    notes = scoring.load_notes(tmp_path)
+    assert notes == {"gated": "exploratory: setting chosen after a result"}
+    base = _record("base", ["none", "ungated"], _full_suite("none") + _full_suite("ungated"))
+    feat = _record("feat-gated", ["gated"], _full_suite("gated"))
+    summary = scoring.summarize([base, feat], notes)
+    assert summary["reported_exploratory"] == notes and summary["exploratory"] == {}
+    report = scoring.markdown(summary)
+    assert (
+        "- `gated`: **exploratory: setting chosen after a result**; every number for it is reported as exploratory."
+        in report
+    )
+    assert "| gated (exploratory) |" in report
+    assert "### Downstream rule items (pre-registered items; exploratory because `gated` is, see above)" in report
+    # Notes for conditions a suite does not have are ignored; unknown conditions are refused.
+    assert scoring.summarize([base], notes)["reported_exploratory"] == {}
+    (tmp_path / scoring.NOTES_FILE).write_text(json.dumps({"gatd": "typo"}))
+    with pytest.raises(ValueError, match="unknown condition"):
+        scoring.load_notes(tmp_path)
+    (tmp_path / scoring.NOTES_FILE).write_text(json.dumps({"gated": ""}))
+    with pytest.raises(ValueError, match="non-empty note"):
+        scoring.load_notes(tmp_path)

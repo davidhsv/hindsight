@@ -15,6 +15,11 @@ One run is one server build. Recalls are deterministic, so each (task, condition
 once and its context is reused by every repeat; the repeats differ only by the model's sampling.
 The server is stopped before any model call. Every answer and verdict is checkpointed, so a run
 that dies — or stops at its budget — can be resumed without paying twice.
+
+A ``gated`` recall also records what the gate did: the response's ``context_admission`` summary,
+and the per-candidate decisions of a replay of the same request with ``trace`` on. The replay is
+diagnostic only (what is injected always comes from the untraced request, as registered), and its
+result list is kept so the report can show whether it reproduced the injected one.
 """
 
 from __future__ import annotations
@@ -34,7 +39,19 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, Field
 
-from ..context_bench.runner import BASE_ENV, LOCAL_MODEL_ENV, BenchmarkError, _git, _redacted
+from ..context_bench.runner import (
+    ADMISSION_DECISION_MODEL_PROVIDER,
+    BASE_ENV,
+    LOCAL_MODEL_ENV,
+    TYPESAFE_UPSTREAM,
+    AdmissionRow,
+    BenchmarkError,
+    TypeSafeCall,
+    _git,
+    _redacted,
+    _TypeSafeProxy,
+    parse_admission,
+)
 from ..rulebook import Stubs
 from ..server import ENV_API_DIR, ENV_DATABASE_URL, start_hindsight_server, start_stub_server
 from .llm import (
@@ -71,6 +88,7 @@ EXPLORATORY: dict[str, str] = {"ungated-nopreamble": "exploratory, added after t
 
 ENV_ADMISSION_MODE = "HINDSIGHT_API_CONTEXT_ADMISSION_MODE"
 GATED_MODE = "strict"
+ENV_ADMISSION_DECISION_MODEL_BASE_URL = "HINDSIGHT_API_CONTEXT_ADMISSION_DECISION_MODEL_BASE_URL"
 
 DEFAULT_PG0 = "hindsight-harmbench:15541"
 DEFAULT_TOP_K = 10
@@ -107,6 +125,13 @@ class RecallRow(BaseModel):
     injected: list[InjectedMemory]
     """The first ``top_k`` results, as the prompt shows them."""
     error: str | None = None
+    admission_summary: dict[str, Any] | None = None
+    """``gated``: the response's ``context_admission`` summary (abstained, candidates, admitted)."""
+    admission: AdmissionRow | None = None
+    """``gated``: the gate's per-candidate decisions, from the traced replay of the same request."""
+    traced_labels: list[str] | None = None
+    """``gated``: the traced replay's result labels; equal to ``results``' when the replay reproduced
+    the injected recall, so its decisions describe what was injected."""
 
 
 class AnswerRow(BaseModel):
@@ -159,6 +184,15 @@ class RunRecord(BaseModel):
     unlabelled_texts: dict[str, str] = Field(default_factory=dict)
     recalls_from: str | None = None
     """The run file the recalls were copied from, when they were not made by this run."""
+    harness_dirty: bool | None = None
+    """Whether the harness package had uncommitted changes, so ``harness_sha`` alone does not name it."""
+    memory_labels: dict[str, str] = Field(default_factory=dict)
+    """Server memory id -> scenario label, from the bank listing (the trace names memories by id)."""
+    admission_settings: dict[str, Any] = Field(default_factory=dict)
+    """The bank's resolved ``context_admission_*`` / ``adaptive_memory_mode`` config, as the server
+    reported it after ingest (what the gated recalls ran under)."""
+    typesafe_calls: list[TypeSafeCall] = Field(default_factory=list)
+    """Decision-model requests made through the usage-recording proxy (``typesafe_proxy``)."""
 
     @property
     def spend_usd(self) -> float:
@@ -191,6 +225,9 @@ class RunConfig:
     same build, byte-identical top-k); see :data:`RECALL_AS`."""
     recall_only: bool = False
     """Build the bank and record the recalls, but make no model call (a free construction check)."""
+    typesafe_proxy: bool = False
+    """Send the admission decision model's TypeSafe requests through context_bench's usage-recording
+    proxy (retries 429/5xx), as context_bench's admission arms were run."""
 
 
 def check_conditions(conditions: Sequence[str], server_env: Mapping[str, str]) -> None:
@@ -229,7 +266,9 @@ def recall_body(task: Task, condition: str, *, max_tokens: int) -> dict[str, Any
 # ---------------------------------------------------------------------------
 
 
-async def _ingest(http: httpx.AsyncClient, bank_id: str, memories: Sequence[Memory]) -> int:
+async def _ingest(
+    http: httpx.AsyncClient, bank_id: str, memories: Sequence[Memory], memory_labels: dict[str, str] | None = None
+) -> int:
     response = await http.put(f"/v1/default/banks/{bank_id}", json={})
     response.raise_for_status()
     response = await http.patch(
@@ -251,11 +290,14 @@ async def _ingest(http: httpx.AsyncClient, bank_id: str, memories: Sequence[Memo
         response = await http.post(f"/v1/default/banks/{bank_id}/memories", json={"items": items[start : start + 25]})
         if response.status_code != 200:
             raise BenchmarkError(f"retain into {bank_id} -> {response.status_code}: {response.text[:500]}")
-    return await _verify_bank(http, bank_id, memories)
+    return await _verify_bank(http, bank_id, memories, memory_labels)
 
 
-async def _verify_bank(http: httpx.AsyncClient, bank_id: str, memories: Sequence[Memory]) -> int:
-    """The bank holds exactly one memory per scenario document, and nothing else."""
+async def _verify_bank(
+    http: httpx.AsyncClient, bank_id: str, memories: Sequence[Memory], memory_labels: dict[str, str] | None = None
+) -> int:
+    """The bank holds exactly one memory per scenario document, and nothing else. Fills
+    ``memory_labels`` (server memory id -> scenario label) when given."""
     response = await http.get(f"/v1/default/banks/{bank_id}/memories/list", params={"limit": 1000})
     response.raise_for_status()
     items = response.json()["items"]
@@ -266,7 +308,22 @@ async def _verify_bank(http: httpx.AsyncClient, bank_id: str, memories: Sequence
             f"bank {bank_id}: {len(items)} memories for {len(expected)} documents "
             f"(missing {len(set(expected) - set(documents))}, extra {len(documents) - len(expected)})"
         )
+    if memory_labels is not None:
+        for item in items:
+            memory_labels[str(item["id"])] = LABEL_BY_DOCUMENT[item["document_id"]]
     return len(items)
+
+
+async def _admission_config(http: httpx.AsyncClient, bank_id: str) -> dict[str, Any]:
+    """The bank's resolved admission and adaptive-memory config, as the server reports it."""
+    response = await http.get(f"/v1/default/banks/{bank_id}/config")
+    response.raise_for_status()
+    config = response.json()["config"]
+    return {
+        key: value
+        for key, value in sorted(config.items())
+        if key.startswith(("context_admission_", "adaptive_memory_mode"))
+    }
 
 
 def parse_results(
@@ -313,10 +370,21 @@ async def _recall(
             injected=[],
             error=response.text[:500],
         )
-    rows, injected = parse_results(response.json(), config.top_k, record.unlabelled_texts)
-    return RecallRow(
+    payload = response.json()
+    rows, injected = parse_results(payload, config.top_k, record.unlabelled_texts)
+    row = RecallRow(
         task_id=task.id, condition=condition, status=200, latency_ms=latency_ms, results=rows, injected=injected
     )
+    if RECALL_AS.get(condition, condition) == "gated":
+        row.admission_summary = payload.get("context_admission")
+        traced = await http.post(f"/v1/default/banks/{bank_id}/memories/recall", json={**body, "trace": True})
+        if traced.status_code != 200:
+            raise BenchmarkError(f"traced replay of {task.id} -> {traced.status_code}: {traced.text[:300]}")
+        traced_payload = traced.json()
+        traced_rows, _ = parse_results(traced_payload, config.top_k, record.unlabelled_texts)
+        row.traced_labels = [r.label for r in traced_rows]
+        row.admission = parse_admission(traced_payload, record.memory_labels)
+    return row
 
 
 def _server_env(config: RunConfig) -> dict[str, str]:
@@ -335,17 +403,27 @@ async def _build_and_recall(config: RunConfig, record: RunRecord, tasks: Sequenc
     log_dir.mkdir(parents=True, exist_ok=True)
     os.environ[ENV_API_DIR] = str(config.api_dir)
     os.environ[ENV_DATABASE_URL] = record.database_url
+    env = _server_env(config)
+    proxy = _TypeSafeProxy(TYPESAFE_UPSTREAM) if config.typesafe_proxy else None
+    if proxy is not None:
+        if env.get(ADMISSION_DECISION_MODEL_PROVIDER) != "typesafe":
+            raise BenchmarkError(f"typesafe_proxy needs {ADMISSION_DECISION_MODEL_PROVIDER}=typesafe in the server env")
+        env[ENV_ADMISSION_DECISION_MODEL_BASE_URL] = proxy.url
+        record.server_env = _redacted(env)
     stub = start_stub_server(Stubs())
+    if proxy is not None:
+        proxy.start()
     server = None
     try:
         server = start_hindsight_server(
             stub_url=stub.url,
             log_path=log_dir / "server.log",
-            extra_env={**_server_env(config), "HINDSIGHT_API_DATABASE_SCHEMA": record.database_schema},
+            extra_env={**env, "HINDSIGHT_API_DATABASE_SCHEMA": record.database_schema},
         )
         async with httpx.AsyncClient(base_url=server.url, timeout=300) as http:
-            record.bank_size = await _ingest(http, record.bank_id, SUITES[config.suite].memories)
-            logger.info("bank %s ready: %d memories", record.bank_id, record.bank_size)
+            record.bank_size = await _ingest(http, record.bank_id, SUITES[config.suite].memories, record.memory_labels)
+            record.admission_settings = await _admission_config(http, record.bank_id)
+            logger.info("bank %s ready: %d memories; %s", record.bank_id, record.bank_size, record.admission_settings)
             for condition in config.conditions:
                 if condition not in MEMORY_CONDITIONS:
                     continue
@@ -354,6 +432,9 @@ async def _build_and_recall(config: RunConfig, record: RunRecord, tasks: Sequenc
     finally:
         if server is not None:
             server.stop()
+        if proxy is not None:
+            proxy.stop()
+            record.typesafe_calls = list(proxy.calls)
         stub.stop()
     failed = [r for r in record.recalls if r.status != 200]
     if failed:
@@ -506,6 +587,8 @@ def _adopt_recalls(record: RunRecord, source_path: Path, conditions: Sequence[st
     record.database_schema = source.database_schema
     record.bank_id = source.bank_id
     record.bank_size = source.bank_size
+    record.memory_labels = dict(source.memory_labels)
+    record.admission_settings = dict(source.admission_settings)
 
 
 def _new_record(config: RunConfig) -> RunRecord:
@@ -516,6 +599,7 @@ def _new_record(config: RunConfig) -> RunRecord:
         api_sha=_git(config.api_dir, "rev-parse", "HEAD") if config.api_dir else None,
         api_dirty=bool(_git(config.api_dir, "status", "--porcelain", "--", ".")) if config.api_dir else None,
         harness_sha=_git(Path(__file__).resolve().parent, "rev-parse", "HEAD"),
+        harness_dirty=bool(_git(Path(__file__).resolve().parents[1], "status", "--porcelain", "--", ".")),
         server_env=_redacted(_server_env(config)) if config.api_dir else {},
         conditions=list(config.conditions),
         repeats=config.repeats,

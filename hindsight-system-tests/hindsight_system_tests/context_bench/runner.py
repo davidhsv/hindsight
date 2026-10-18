@@ -7,6 +7,10 @@ One run = one server profile (a checkout plus server env) and a list of request
 - ``tags`` — plus the task's project as a hard tag scope (``tags_match=any``, so the
   user's own untagged memories stay reachable);
 - ``final@0.30`` / ``reranker@0.30`` — plus a ``min_scores`` floor on that stage;
+- ``adm=filter+ta=0.55+te=0.40`` — a context-admission setting (feature server only): before
+  the variant's queries every bank's config is patched to that ``context_admission_mode`` and
+  auto / explicit thresholds, and each request asks for a trace so the gate's per-candidate
+  decisions are recorded (:class:`AdmissionRow`);
 - components join with ``+`` (``tags+final@0.30``); ``#2`` repeats a variant (determinism).
 
 With ``send_context`` every request also carries the request ``context`` object and ``purpose``,
@@ -67,12 +71,24 @@ LOCAL_MODEL_ENV = {
 BASE_ENV = {"HINDSIGHT_API_LLM_PROVIDER": "none", "UV_NO_SYNC": "1"}
 
 TYPESAFE_UPSTREAM = "https://api.typesafe.ai"
+#: The context-admission decision model (the Jev scorer), configured like the other operations'.
+ADMISSION_DECISION_MODEL_PROVIDER = "HINDSIGHT_API_CONTEXT_ADMISSION_DECISION_MODEL_PROVIDER"
 
-#: Server env whose values are never written to a run file.
+#: Server env whose values are never written to a run file. Scope-key lists name metadata keys
+#: (``..._SCOPE_KEYS=repository,module``), not credentials, and a replay needs them.
 _SECRET = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD)", re.IGNORECASE)
+_NOT_SECRET = re.compile(r"_SCOPE_KEYS$")
 
 DEFAULT_PG0 = "hindsight-ctxbench:15529"
 SWEEP = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+
+ADMISSION_MODES = ("observe", "filter", "strict")
+#: Admission variant component -> the bank config field it sets.
+_ADMISSION_FIELDS = {
+    "adm": "context_admission_mode",
+    "ta": "context_admission_threshold_auto",
+    "te": "context_admission_threshold_explicit",
+}
 
 
 class BenchmarkError(Exception):
@@ -98,12 +114,43 @@ def base_body(query: Query, *, max_tokens: int, send_context: bool) -> dict[str,
     return body
 
 
-def variant_body(variant: str, query: Query, *, max_tokens: int, send_context: bool) -> dict[str, Any]:
+def admission_updates(variant: str) -> dict[str, Any] | None:
+    """The bank config an admission variant sets before its queries, or None for a variant
+    without admission components. An admission variant names all three fields, so a run file
+    always says which setting each row was asked under."""
+    updates: dict[str, Any] = {}
+    for part in variant.split("#", 1)[0].split("+"):
+        name, sep, value = part.partition("=")
+        if not sep:
+            continue
+        if name not in _ADMISSION_FIELDS:
+            raise ValueError(f"unknown admission component {part!r} in {variant!r}")
+        if name == "adm":
+            if value not in ADMISSION_MODES:
+                raise ValueError(f"admission mode must be one of {ADMISSION_MODES}, got {value!r} in {variant!r}")
+            updates[_ADMISSION_FIELDS[name]] = value
+        else:
+            threshold = float(value)
+            if not 0.0 <= threshold <= 1.0:
+                raise ValueError(f"admission threshold must be in [0, 1], got {value!r} in {variant!r}")
+            updates[_ADMISSION_FIELDS[name]] = threshold
+    if not updates:
+        return None
+    missing = sorted(set(_ADMISSION_FIELDS.values()) - set(updates))
+    if missing:
+        raise ValueError(f"admission variant {variant!r} must set adm=, ta= and te= (missing {missing})")
+    return updates
+
+
+def variant_body(
+    variant: str, query: Query, *, max_tokens: int, send_context: bool, trace: bool = False
+) -> dict[str, Any]:
     """The recall body a variant sends for one query (see the module docstring)."""
     body = base_body(query, max_tokens=max_tokens, send_context=send_context)
     floors: dict[str, float] = {}
+    admission = admission_updates(variant) is not None
     for part in variant.split("#", 1)[0].split("+"):
-        if part == "plain":
+        if part == "plain" or "=" in part:
             continue
         if part == "tags":
             if query.project is not None:
@@ -117,6 +164,8 @@ def variant_body(variant: str, query: Query, *, max_tokens: int, send_context: b
         raise ValueError(f"unknown variant component {part!r} in {variant!r}")
     if floors:
         body["min_scores"] = floors
+    if trace or admission:
+        body["trace"] = True
     return body
 
 
@@ -140,6 +189,55 @@ class ResultRow(BaseModel):
     keyword: float | None = None
 
 
+class AdmissionDecisionRow(BaseModel):
+    """One judged candidate, as the server's ``trace.context_admission.decisions[]`` reports it,
+    plus the scenario label of its memory (``?<memory id>`` for one the scenario did not write)."""
+
+    label: str
+    memory_id: str
+    base_retrieval_score: float
+    scope_score: float
+    task_relevance: float
+    expected_utility: float
+    truth_status: str
+    retrievability: float | None = None
+    admission_score: float
+    admitted: bool
+    reason: str
+    tokens: int
+    duplicates: int = 0
+    scope: dict[str, str] = Field(default_factory=dict)
+    features: dict[str, float] = Field(default_factory=dict)
+    """In the server's order: the deterministic scorer sums them in this order."""
+
+
+class AdmissionRow(BaseModel):
+    """What the gate did on one recall: the response's ``context_admission`` summary (filter and
+    strict only) and the trace's account. ``decisions`` are in recall order. Empty when the gate
+    did not run (nothing was retrieved)."""
+
+    summary: dict[str, Any] | None = None
+    mode: str | None = None
+    scorer: str | None = None
+    purpose: str | None = None
+    threshold: float | None = None
+    historical: bool | None = None
+    reference_signal: str | None = None
+    candidates: int = 0
+    admitted: int = 0
+    abstained: bool = False
+    reasons: dict[str, int] = Field(default_factory=dict)
+    cross_scope_candidates: int = 0
+    relevance_source: str | None = None
+    jev_error: str | None = None
+    embeddings_error: str | None = None
+    scope_error: str | None = None
+    phase_ms: float | None = None
+    """The trace's ``context_admission`` phase duration in ms (summed over search retries); None
+    when the trace reports no such phase."""
+    decisions: list[AdmissionDecisionRow] = Field(default_factory=list)
+
+
 class QueryRow(BaseModel):
     variant: str
     query_id: str
@@ -148,6 +246,7 @@ class QueryRow(BaseModel):
     status: int
     results: list[ResultRow]
     error: str | None = None
+    admission: AdmissionRow | None = None
 
 
 class TypeSafeCall(BaseModel):
@@ -182,6 +281,13 @@ class RunRecord(BaseModel):
     rows: list[QueryRow] = Field(default_factory=list)
     typesafe_calls: list[TypeSafeCall] = Field(default_factory=list)
     unlabelled_texts: dict[str, str] = Field(default_factory=dict)
+    memory_labels: dict[str, str] = Field(default_factory=dict)
+    """Server memory id -> scenario label, from the bank listing (the trace names memories by id)."""
+    admission_settings: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    """Admission variant -> the resolved ``context_admission_*`` / ``adaptive_memory_*`` bank config
+    the server answered the patch with (the same for every bank, checked)."""
+    embeddings_file: str | None = None
+    """A side file (label -> stored embedding) for replaying redundancy suppression offline."""
 
 
 @dataclass(frozen=True)
@@ -199,6 +305,10 @@ class RunConfig:
     reuse: Path | None = None
     """A previous run file whose schema and banks this run queries instead of ingesting."""
     query_ids: tuple[str, ...] | None = None
+    trace: bool = False
+    """Ask every recall for a trace (admission variants always do)."""
+    dump_embeddings: bool = False
+    """Read the banks' stored embeddings from the run's pg0 instance into a side file."""
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +419,10 @@ def _git(path: Path, *args: str) -> str | None:
 
 
 def _redacted(env: Mapping[str, str]) -> dict[str, str]:
-    return {key: ("<redacted>" if _SECRET.search(key) else value) for key, value in sorted(env.items())}
+    return {
+        key: ("<redacted>" if _SECRET.search(key) and not _NOT_SECRET.search(key) else value)
+        for key, value in sorted(env.items())
+    }
 
 
 def server_environment(config: RunConfig, proxy_url: str | None) -> dict[str, str]:
@@ -319,10 +432,14 @@ def server_environment(config: RunConfig, proxy_url: str | None) -> dict[str, st
     env.update(config.server_env)
     if proxy_url is not None:
         env["HINDSIGHT_API_RERANKER_TYPESAFE_BASE_URL"] = proxy_url
+        if env.get(ADMISSION_DECISION_MODEL_PROVIDER) == "typesafe":
+            env["HINDSIGHT_API_CONTEXT_ADMISSION_DECISION_MODEL_BASE_URL"] = proxy_url
     return env
 
 
-async def _ingest(http: httpx.AsyncClient, banks: Mapping[str, str]) -> dict[str, int]:
+async def _ingest(
+    http: httpx.AsyncClient, banks: Mapping[str, str], memory_labels: dict[str, str] | None = None
+) -> dict[str, int]:
     for bank_id in banks.values():
         response = await http.put(f"/v1/default/banks/{bank_id}", json={})
         response.raise_for_status()
@@ -349,11 +466,14 @@ async def _ingest(http: httpx.AsyncClient, banks: Mapping[str, str]) -> dict[str
             )
             if response.status_code != 200:
                 raise BenchmarkError(f"retain into {bank_id} -> {response.status_code}: {response.text[:500]}")
-    return await _verify_banks(http, banks)
+    return await _verify_banks(http, banks, memory_labels)
 
 
-async def _verify_banks(http: httpx.AsyncClient, banks: Mapping[str, str]) -> dict[str, int]:
-    """Each bank holds exactly one memory per scenario document, and nothing else."""
+async def _verify_banks(
+    http: httpx.AsyncClient, banks: Mapping[str, str], memory_labels: dict[str, str] | None = None
+) -> dict[str, int]:
+    """Each bank holds exactly one memory per scenario document, and nothing else. Fills
+    ``memory_labels`` (server memory id -> scenario label) when given."""
     sizes: dict[str, int] = {}
     for bank_key, bank_id in banks.items():
         response = await http.get(f"/v1/default/banks/{bank_id}/memories/list", params={"limit": 1000})
@@ -367,7 +487,96 @@ async def _verify_banks(http: httpx.AsyncClient, banks: Mapping[str, str]) -> di
                 f"(missing {len(expected - set(documents))}, extra {len(documents) - len(expected)})"
             )
         sizes[bank_key] = len(items)
+        if memory_labels is not None:
+            for item in items:
+                memory_labels[str(item["id"])] = LABEL_BY_DOCUMENT[item["document_id"]]
     return sizes
+
+
+async def _apply_admission(
+    http: httpx.AsyncClient, banks: Mapping[str, str], updates: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Patch every bank to one admission setting; returns the resolved admission (and adaptive
+    memory) config the server answered with, which must be the same for every bank."""
+    resolved: dict[str, Any] | None = None
+    for bank_id in banks.values():
+        response = await http.patch(f"/v1/default/banks/{bank_id}/config", json={"updates": dict(updates)})
+        if response.status_code != 200:
+            raise BenchmarkError(f"admission config on {bank_id} -> {response.status_code}: {response.text[:500]}")
+        config = response.json()["config"]
+        relevant = {
+            key: value
+            for key, value in sorted(config.items())
+            if key.startswith(("context_admission_", "adaptive_memory_mode"))
+        }
+        for key, value in updates.items():
+            if relevant.get(key) != value:
+                raise BenchmarkError(f"bank {bank_id}: {key} reads {relevant.get(key)!r} after setting {value!r}")
+        if resolved is not None and relevant != resolved:
+            raise BenchmarkError(f"bank {bank_id} resolved a different admission config than the first bank")
+        resolved = relevant
+    return resolved or {}
+
+
+def _pg0_instance(pg0: str) -> dict[str, Any]:
+    name = pg0.split(":", 1)[0]
+    path = Path.home() / ".pg0" / "instances" / name / "instance.json"
+    if not path.is_file():
+        raise BenchmarkError(f"no pg0 instance file at {path}")
+    return json.loads(path.read_text())
+
+
+def dump_embeddings(
+    pg0: str, schema: str, banks: Mapping[str, str], memory_labels: Mapping[str, str]
+) -> dict[str, list[float]]:
+    """The banks' stored embeddings, label -> floats, read with the pg0 instance's own ``psql``
+    in the server's text form and parsed the way the server parses it (``float`` per component),
+    so an offline replay of redundancy suppression sees the server's numbers."""
+    instance = _pg0_instance(pg0)
+    psql = Path(instance["installation_dir"]) / instance["version"] / "bin" / "psql"
+    if not re.fullmatch(r"[a-z0-9_]+", schema):
+        raise BenchmarkError(f"unexpected schema name {schema!r}")
+    bank_list = ", ".join("'" + bank.replace("'", "''") + "'" for bank in banks.values())
+    sql = f'SELECT id::text, embedding::text FROM "{schema}".memory_units WHERE bank_id IN ({bank_list})'
+    completed = subprocess.run(
+        [
+            str(psql),
+            "-h",
+            "127.0.0.1",
+            "-p",
+            str(instance["port"]),
+            "-U",
+            instance["username"],
+            "-d",
+            instance["database"],
+            "-At",
+            "-F",
+            "\t",
+            "-c",
+            sql,
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PGPASSWORD": instance["password"]},
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise BenchmarkError(f"embedding read failed: {completed.stderr.strip()[:500]}")
+    return parse_embedding_rows(completed.stdout, memory_labels)
+
+
+def parse_embedding_rows(text: str, memory_labels: Mapping[str, str]) -> dict[str, list[float]]:
+    """``<memory id>\t[x,y,...]`` lines (pgvector's text form) -> label -> floats, one per memory."""
+    out: dict[str, list[float]] = {}
+    for line in text.splitlines():
+        memory_id, _, vector = line.partition("\t")
+        label = memory_labels.get(memory_id)
+        if label is None:
+            raise BenchmarkError(f"embedding for unknown memory {memory_id}")
+        out[label] = [float(part) for part in vector.strip().removeprefix("[").removesuffix("]").split(",")]
+    if len(out) != len(memory_labels):
+        raise BenchmarkError(f"read {len(out)} embeddings for {len(memory_labels)} memories")
+    return out
 
 
 def _parse_results(payload: Mapping[str, Any], unlabelled: dict[str, str]) -> list[ResultRow]:
@@ -436,12 +645,30 @@ async def run_benchmark(config: RunConfig) -> RunRecord:
             extra_env={**env, "HINDSIGHT_API_DATABASE_SCHEMA": schema},
         )
         async with httpx.AsyncClient(base_url=server.url, timeout=300) as http:
-            record.bank_sizes = await (_verify_banks(http, banks) if reused else _ingest(http, banks))
+            record.bank_sizes = await (
+                _verify_banks(http, banks, record.memory_labels)
+                if reused
+                else _ingest(http, banks, record.memory_labels)
+            )
             logger.info("banks ready: %s", record.bank_sizes)
+            if config.dump_embeddings:
+                embeddings = dump_embeddings(config.pg0, schema, banks, record.memory_labels)
+                path = config.out_dir / "runs" / f"{config.label}.embeddings.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(embeddings))
+                record.embeddings_file = path.name
+                logger.info("embeddings: %d memories -> %s", len(embeddings), path)
             for variant in config.variants:
                 variant_started = time.monotonic()
+                updates = admission_updates(variant)
+                if updates is not None:
+                    record.admission_settings[variant] = await _apply_admission(http, banks, updates)
                 for query in queries:
-                    record.rows.append(await _recall(http, banks, variant, query, config, record.unlabelled_texts))
+                    record.rows.append(
+                        await _recall(
+                            http, banks, variant, query, config, record.unlabelled_texts, record.memory_labels
+                        )
+                    )
                 logger.info("%s: %d queries in %.1fs", variant, len(queries), time.monotonic() - variant_started)
                 # A checkpoint per variant: a long run that dies keeps what it measured.
                 write_record(record, config.out_dir / "runs" / f"{config.label}.partial.json")
@@ -464,8 +691,11 @@ async def _recall(
     query: Query,
     config: RunConfig,
     unlabelled: dict[str, str],
+    memory_labels: Mapping[str, str],
 ) -> QueryRow:
-    body = variant_body(variant, query, max_tokens=config.max_tokens, send_context=config.send_context)
+    body = variant_body(
+        variant, query, max_tokens=config.max_tokens, send_context=config.send_context, trace=config.trace
+    )
     started = time.monotonic()
     response = await http.post(f"/v1/default/banks/{banks[query.bank]}/memories/recall", json=body)
     latency_ms = (time.monotonic() - started) * 1000
@@ -480,13 +710,42 @@ async def _recall(
             results=[],
             error=response.text[:500],
         )
+    payload = response.json()
     return QueryRow(
         variant=variant,
         query_id=query.id,
         split=split_of(query.id),
         latency_ms=round(latency_ms, 1),
         status=200,
-        results=_parse_results(response.json(), unlabelled),
+        results=_parse_results(payload, unlabelled),
+        admission=parse_admission(payload, memory_labels) if admission_updates(variant) is not None else None,
+    )
+
+
+def parse_admission(payload: Mapping[str, Any], memory_labels: Mapping[str, str]) -> AdmissionRow:
+    """The gate's account of one recall: the response summary plus the trace's decisions."""
+    full_trace = payload.get("trace") or {}
+    trace = full_trace.get("context_admission")
+    summary = payload.get("context_admission")
+    if trace is None:
+        return AdmissionRow(summary=summary)
+    decisions = [
+        AdmissionDecisionRow(label=memory_labels.get(item["memory_id"], f"?{item['memory_id']}"), **item)
+        for item in trace.get("decisions", [])
+    ]
+    phases = [
+        phase["duration_seconds"]
+        for phase in (full_trace.get("summary") or {}).get("phase_metrics") or []
+        if phase.get("phase_name") == "context_admission" and isinstance(phase.get("duration_seconds"), (int, float))
+    ]
+    fields = {
+        key: trace.get(key) for key in AdmissionRow.model_fields if key not in ("summary", "decisions", "phase_ms")
+    }
+    return AdmissionRow(
+        summary=summary,
+        decisions=decisions,
+        phase_ms=round(sum(phases) * 1000, 3) if phases else None,
+        **{key: value for key, value in fields.items() if value is not None},
     )
 
 

@@ -40,6 +40,33 @@ INJECTION_CAP = 10
 #: agreement with ``<run>`` (run-to-run stability of a network model), never as an arm.
 REPEAT_SUFFIX = "-repeat"
 TIE_TOLERANCE = 1e-6
+#: Where the admission arms' runs and dev fit live, apart from the baseline runs.
+T2_DIR = "t2"
+T2_SECTION_FILE = "dev-section.md"
+T2_PREFIX = "## T2 "
+T2_HEADING = f"{T2_PREFIX}dev"
+T2_HOLDOUT_HEADING = f"{T2_PREFIX}holdout"
+
+
+def insert_t2_section(report_path: Path, section: str, *, heading: str = T2_HEADING) -> None:
+    """Put a T2 section (``heading``: the dev one by default) into an existing REPORT.md without
+    re-scoring the baseline runs: it replaces a previous section under that heading, up to the next
+    T2 section or the appendix (so regenerating one T2 section keeps the others), or goes before the
+    appendix (where a regeneration puts it)."""
+    text = report_path.read_text()
+    body = section.rstrip() + "\n\n"
+    appendix = text.find("## Arms not run")
+    if appendix < 0:
+        raise ValueError(f"{report_path} has no '## Arms not run' section to place the T2 section before")
+    start = text.find(heading)
+    if start >= 0:
+        following = text.find(f"\n{T2_PREFIX}", start + len(heading))
+        end = following + 1 if 0 <= following < appendix else appendix
+        text = text[:start] + body + text[end:]
+    else:
+        text = text[:appendix] + body + text[appendix:]
+    report_path.write_text(text)
+
 
 #: Client-side floors over the ungated rows. ``semantic`` is arm B: the threshold sweep plus two
 #: midpoints, because bge-small cosines of relevant memories sit in a narrow 0.7-0.9 band.
@@ -381,6 +408,11 @@ def write_report(out_dir: Path) -> None:
     lines += _determinism_section(
         determinism_local, repeats, summary["typesafe"], summary["server_vs_client_min_scores"]
     )
+    t2_section = out_dir / T2_DIR / T2_SECTION_FILE
+    if t2_section.is_file():
+        # The admission arms' dev fit, written by `context_bench admission-section`; kept across
+        # regenerations. Their runs live under t2/ so they are never scored as baseline arms here.
+        lines += [t2_section.read_text().rstrip(), ""]
     lines += _appendix()
     findings = out_dir / "findings.md"
     if findings.is_file():

@@ -11,6 +11,12 @@ Examples (from ``hindsight-system-tests/``, with ANTHROPIC_API_KEY in the enviro
         --conditions gated --api-dir /path/to/feature/hindsight-api-slim \\
         --set HINDSIGHT_API_CONTEXT_ADMISSION_MODE=strict
 
+    # Gated with the Jev (TypeSafe) decision model, TYPESAFE_API_KEY from the environment, its
+    # requests counted by the usage-recording proxy; scorer, weights and thresholds via --set.
+    uv run python -m hindsight_system_tests.harm_bench run --label feat-gated --profile jev-admission \\
+        --conditions gated --api-dir /path/to/feature/hindsight-api-slim \\
+        --set HINDSIGHT_API_CONTEXT_ADMISSION_SCORER=hybrid --set ...
+
     # Exploratory: the ungated recalls of run "base" injected without the integration's preamble.
     uv run python -m hindsight_system_tests.harm_bench run --label base-nopreamble \\
         --conditions ungated-nopreamble --reuse-recalls <out>/runs/base.json --budget-usd 1
@@ -31,6 +37,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -49,6 +56,23 @@ from .suites import SUITES, validate_all
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUT = REPO_ROOT / "tasks" / "adaptive-memory" / "eval" / "harm-bench"
+
+PROFILES = ("local", "jev-admission")
+
+
+def _profile_env(profile: str) -> dict[str, str]:
+    """``jev-admission``: TypeSafe as the context-admission decision model (the Jev scorer), its
+    key read from ``TYPESAFE_API_KEY`` so it never appears on a command line; recall keeps the
+    local reranker. The same profile context_bench's admission arms ran under."""
+    if profile == "local":
+        return {}
+    key = os.environ.get("TYPESAFE_API_KEY")
+    if not key:
+        sys.exit(f"--profile {profile} needs TYPESAFE_API_KEY in the environment")
+    return {
+        "HINDSIGHT_API_CONTEXT_ADMISSION_DECISION_MODEL_PROVIDER": "typesafe",
+        "HINDSIGHT_API_CONTEXT_ADMISSION_DECISION_MODEL_API_KEY": key,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -70,6 +94,9 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         metavar="KEY=VALUE",
         help=f"server env; gated defaults {ENV_ADMISSION_MODE}={GATED_MODE}",
+    )
+    run_p.add_argument(
+        "--profile", choices=PROFILES, default="local", help="jev-admission: TypeSafe decision model via the proxy"
     )
     run_p.add_argument("--repeats", type=int, default=2)
     run_p.add_argument("--top-k", type=int, default=10)
@@ -113,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     conditions = tuple(c.strip() for c in args.conditions.split(",") if c.strip())
-    server_env: dict[str, str] = {}
+    server_env: dict[str, str] = _profile_env(args.profile)
     for item in args.server_env:
         key, sep, value = item.partition("=")
         if not sep:
@@ -147,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
             resume=args.resume,
             reuse_recalls=args.reuse_recalls,
             recall_only=args.recall_only,
+            typesafe_proxy=args.profile == "jev-admission",
         )
     )
     failed = sum(1 for row in record.answers if row.verdict is None)
