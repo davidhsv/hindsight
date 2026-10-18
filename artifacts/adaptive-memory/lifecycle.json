@@ -1,0 +1,3062 @@
+{
+ "arm": "E",
+ "description": "feature branch, adaptive_memory_mode=lifecycle (rank + claim lifecycle, lifecycle consolidation prompt, current view by default)",
+ "generated_at": "2026-10-18T08:42:28-03:00",
+ "base_sha": "5331da2f4db369528bb122075341a7de9c3df6df",
+ "feature_head_sha": "554284233f4fdb38d1e065c0d90b94ed9deb38a4",
+ "phase_commits": {
+  "P1": "dafd09a64",
+  "P2": "3816d0e4b",
+  "P3": "b491b2bb9",
+  "P4": "d65f17b05",
+  "P5": "728b265c9",
+  "T2": "504ca72e9",
+  "T2_harm_bench": "2f4c7daae"
+ },
+ "models": {
+  "server_extraction_consolidation": "claude-haiku-5-5",
+  "amb_answer": "claude-haiku-5-5",
+  "judge": "claude-sonnet-5-5",
+  "decision_model": "TypeSafe jev-latest"
+ },
+ "embedder": "local bge-small-en-v1.5 (CPU)",
+ "reranker": "local ms-marco-MiniLM-L-6-v2 cross-encoder (CPU)",
+ "frozen_parameters": {
+  "adaptive_memory_score_alpha": 0.1,
+  "score_floor": 0.3,
+  "base_stability_days": 30,
+  "max_stability_days": 3650,
+  "type_multipliers": {
+   "experience": 0.5,
+   "world": 1.0,
+   "observation": 2.0
+  },
+  "cooldown_hours": 6,
+  "gain": 1.0,
+  "recall_reinforcement": false,
+  "conflict_policy": "evidence",
+  "historical_cues": false,
+  "source": "tasks/adaptive-memory/eval/PREREGISTRATION.md"
+ },
+ "memory_lifecycle": {
+  "P3 base-delete": {
+   "label": "p3-lifecycle-base-delete",
+   "arm": "lifecycle",
+   "encoding": "base-delete",
+   "api_sha": "b491b2bb9cba775fdb082a75288c0c2192f36726",
+   "api_dirty": false,
+   "embedder": "local (bge-small-en-v1.5 + ms-marco-MiniLM-L-6-v2, CPU)",
+   "payload_source": "authored",
+   "server_env_adaptive": {
+    "HINDSIGHT_API_ADAPTIVE_MEMORY_MODE": "lifecycle"
+   },
+   "bank_config": {},
+   "recall_types": null,
+   "started_at_utc": "2026-10-17T17:22:21.012799+00:00",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/p3/p3-lifecycle-base-delete.json",
+   "metrics": {
+    "all": {
+     "current_precision@1": {
+      "mean": 0.9483,
+      "n": 58
+     },
+     "current_precision@5": {
+      "mean": 0.6759,
+      "n": 58
+     },
+     "current_recall@1": {
+      "mean": 0.8161,
+      "n": 58
+     },
+     "current_recall@5": {
+      "mean": 0.9511,
+      "n": 58
+     },
+     "stale_contamination@1": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination@5": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0333,
+      "n": 18
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0222,
+      "n": 18
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.375,
+      "n": 16
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 16
+     },
+     "scope_accuracy@1": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "scope_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.8333,
+      "n": 18
+     },
+     "uncertainty_accuracy@1": {
+      "mean": 0.0,
+      "n": 6
+     },
+     "uncertainty_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": 0.3333,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": 0.3333,
+      "n": 6
+     }
+    },
+    "holdout": {
+     "current_precision@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_precision@5": {
+      "mean": 0.5278,
+      "n": 18
+     },
+     "current_recall@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_recall@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "stale_contamination@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.4,
+      "n": 10
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 10
+     },
+     "scope_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "scope_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "supersession_accuracy@1": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "supersession_accuracy@5": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "uncertainty_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "uncertainty_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": null,
+      "n": 0
+     }
+    }
+   },
+   "note": "each value is the mean over the split's applicable queries of a per-query score (n = queries); no CI computed",
+   "state_conformance": {
+    "all:conformance": {
+     "mean": 0.9216,
+     "n": 17
+    },
+    "all:retirement_recall": {
+     "mean": 0.9,
+     "n": 10
+    },
+    "all:false_retirement": {
+     "mean": 0.0,
+     "n": 15
+    },
+    "dev:conformance": {
+     "mean": 0.8788,
+     "n": 11
+    },
+    "dev:retirement_recall": {
+     "mean": 0.8,
+     "n": 5
+    },
+    "dev:false_retirement": {
+     "mean": 0.0,
+     "n": 9
+    },
+    "holdout:conformance": {
+     "mean": 1.0,
+     "n": 6
+    },
+    "holdout:retirement_recall": {
+     "mean": 1.0,
+     "n": 5
+    },
+    "holdout:false_retirement": {
+     "mean": 0.0,
+     "n": 6
+    }
+   }
+  },
+  "P3 base-update": {
+   "label": "p3-lifecycle-base-update",
+   "arm": "lifecycle",
+   "encoding": "base-update",
+   "api_sha": "b491b2bb9cba775fdb082a75288c0c2192f36726",
+   "api_dirty": false,
+   "embedder": "local (bge-small-en-v1.5 + ms-marco-MiniLM-L-6-v2, CPU)",
+   "payload_source": "authored",
+   "server_env_adaptive": {
+    "HINDSIGHT_API_ADAPTIVE_MEMORY_MODE": "lifecycle"
+   },
+   "bank_config": {},
+   "recall_types": null,
+   "started_at_utc": "2026-10-17T17:30:22.879860+00:00",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/p3/p3-lifecycle-base-update.json",
+   "metrics": {
+    "all": {
+     "current_precision@1": {
+      "mean": 0.9483,
+      "n": 58
+     },
+     "current_precision@5": {
+      "mean": 0.6759,
+      "n": 58
+     },
+     "current_recall@1": {
+      "mean": 0.8161,
+      "n": 58
+     },
+     "current_recall@5": {
+      "mean": 0.9511,
+      "n": 58
+     },
+     "stale_contamination@1": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination@5": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0556,
+      "n": 18
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0333,
+      "n": 18
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0222,
+      "n": 18
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.375,
+      "n": 16
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 16
+     },
+     "scope_accuracy@1": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "scope_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "supersession_accuracy@5": {
+      "mean": 0.8333,
+      "n": 18
+     },
+     "uncertainty_accuracy@1": {
+      "mean": 0.0,
+      "n": 6
+     },
+     "uncertainty_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": 0.3333,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": 0.3333,
+      "n": 6
+     }
+    },
+    "holdout": {
+     "current_precision@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_precision@5": {
+      "mean": 0.5278,
+      "n": 18
+     },
+     "current_recall@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_recall@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "stale_contamination@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.4,
+      "n": 10
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 10
+     },
+     "scope_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "scope_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "supersession_accuracy@1": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "supersession_accuracy@5": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "uncertainty_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "uncertainty_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": null,
+      "n": 0
+     }
+    }
+   },
+   "note": "each value is the mean over the split's applicable queries of a per-query score (n = queries); no CI computed",
+   "state_conformance": {
+    "all:conformance": {
+     "mean": 0.9216,
+     "n": 17
+    },
+    "all:retirement_recall": {
+     "mean": 0.9,
+     "n": 10
+    },
+    "all:false_retirement": {
+     "mean": 0.0,
+     "n": 15
+    },
+    "dev:conformance": {
+     "mean": 0.8788,
+     "n": 11
+    },
+    "dev:retirement_recall": {
+     "mean": 0.8,
+     "n": 5
+    },
+    "dev:false_retirement": {
+     "mean": 0.0,
+     "n": 9
+    },
+    "holdout:conformance": {
+     "mean": 1.0,
+     "n": 6
+    },
+    "holdout:retirement_recall": {
+     "mean": 1.0,
+     "n": 5
+    },
+    "holdout:false_retirement": {
+     "mean": 0.0,
+     "n": 6
+    }
+   }
+  },
+  "P5 base-delete (final split semantics; tree dirty at run time)": {
+   "label": "p5-lifecycle-base-delete",
+   "arm": "lifecycle",
+   "encoding": "base-delete",
+   "api_sha": "60c1cc87fd7f6128e4842bf5bd54a4ca041916ce",
+   "api_dirty": true,
+   "embedder": "local (bge-small-en-v1.5 + ms-marco-MiniLM-L-6-v2, CPU)",
+   "payload_source": "authored",
+   "server_env_adaptive": {
+    "HINDSIGHT_API_ADAPTIVE_MEMORY_MODE": "lifecycle"
+   },
+   "bank_config": {},
+   "recall_types": null,
+   "started_at_utc": "2026-10-17T20:14:48.952660+00:00",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/p5/p5-lifecycle-base-delete.json",
+   "metrics": {
+    "all": {
+     "current_precision@1": {
+      "mean": 0.9655,
+      "n": 58
+     },
+     "current_precision@5": {
+      "mean": 0.6828,
+      "n": 58
+     },
+     "current_recall@1": {
+      "mean": 0.8247,
+      "n": 58
+     },
+     "current_recall@5": {
+      "mean": 0.9511,
+      "n": 58
+     },
+     "stale_contamination@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.375,
+      "n": 16
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 16
+     },
+     "scope_accuracy@1": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "scope_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "supersession_accuracy@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "uncertainty_accuracy@1": {
+      "mean": 0.0,
+      "n": 6
+     },
+     "uncertainty_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": 0.3333,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": 0.3333,
+      "n": 6
+     }
+    },
+    "holdout": {
+     "current_precision@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_precision@5": {
+      "mean": 0.5278,
+      "n": 18
+     },
+     "current_recall@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_recall@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "stale_contamination@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.4,
+      "n": 10
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 10
+     },
+     "scope_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "scope_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "supersession_accuracy@1": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "supersession_accuracy@5": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "uncertainty_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "uncertainty_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": null,
+      "n": 0
+     }
+    }
+   },
+   "note": "each value is the mean over the split's applicable queries of a per-query score (n = queries); no CI computed",
+   "state_conformance": {
+    "all:conformance": {
+     "mean": 0.9412,
+     "n": 17
+    },
+    "all:retirement_recall": {
+     "mean": 1.0,
+     "n": 10
+    },
+    "all:false_retirement": {
+     "mean": 0.0,
+     "n": 15
+    },
+    "dev:conformance": {
+     "mean": 0.9091,
+     "n": 11
+    },
+    "dev:retirement_recall": {
+     "mean": 1.0,
+     "n": 5
+    },
+    "dev:false_retirement": {
+     "mean": 0.0,
+     "n": 9
+    },
+    "holdout:conformance": {
+     "mean": 1.0,
+     "n": 6
+    },
+    "holdout:retirement_recall": {
+     "mean": 1.0,
+     "n": 5
+    },
+    "holdout:false_retirement": {
+     "mean": 0.0,
+     "n": 6
+    }
+   }
+  },
+  "P5 base-update": {
+   "label": "p5-lifecycle-base-update",
+   "arm": "lifecycle",
+   "encoding": "base-update",
+   "api_sha": "60c1cc87fd7f6128e4842bf5bd54a4ca041916ce",
+   "api_dirty": true,
+   "embedder": "local (bge-small-en-v1.5 + ms-marco-MiniLM-L-6-v2, CPU)",
+   "payload_source": "authored",
+   "server_env_adaptive": {
+    "HINDSIGHT_API_ADAPTIVE_MEMORY_MODE": "lifecycle"
+   },
+   "bank_config": {},
+   "recall_types": null,
+   "started_at_utc": "2026-10-17T20:15:50.971927+00:00",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/p5/p5-lifecycle-base-update.json",
+   "metrics": {
+    "all": {
+     "current_precision@1": {
+      "mean": 0.9655,
+      "n": 58
+     },
+     "current_precision@5": {
+      "mean": 0.6828,
+      "n": 58
+     },
+     "current_recall@1": {
+      "mean": 0.8247,
+      "n": 58
+     },
+     "current_recall@5": {
+      "mean": 0.9511,
+      "n": 58
+     },
+     "stale_contamination@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.375,
+      "n": 16
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 16
+     },
+     "scope_accuracy@1": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "scope_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "supersession_accuracy@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "uncertainty_accuracy@1": {
+      "mean": 0.0,
+      "n": 6
+     },
+     "uncertainty_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": 0.3333,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": 0.3333,
+      "n": 6
+     }
+    },
+    "holdout": {
+     "current_precision@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_precision@5": {
+      "mean": 0.5278,
+      "n": 18
+     },
+     "current_recall@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_recall@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "stale_contamination@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.4,
+      "n": 10
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 10
+     },
+     "scope_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "scope_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "supersession_accuracy@1": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "supersession_accuracy@5": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "uncertainty_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "uncertainty_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": null,
+      "n": 0
+     }
+    }
+   },
+   "note": "each value is the mean over the split's applicable queries of a per-query score (n = queries); no CI computed",
+   "state_conformance": {
+    "all:conformance": {
+     "mean": 0.9412,
+     "n": 17
+    },
+    "all:retirement_recall": {
+     "mean": 1.0,
+     "n": 10
+    },
+    "all:false_retirement": {
+     "mean": 0.0,
+     "n": 15
+    },
+    "dev:conformance": {
+     "mean": 0.9091,
+     "n": 11
+    },
+    "dev:retirement_recall": {
+     "mean": 1.0,
+     "n": 5
+    },
+    "dev:false_retirement": {
+     "mean": 0.0,
+     "n": 9
+    },
+    "holdout:conformance": {
+     "mean": 1.0,
+     "n": 6
+    },
+    "holdout:retirement_recall": {
+     "mean": 1.0,
+     "n": 5
+    },
+    "holdout:false_retirement": {
+     "mean": 0.0,
+     "n": 6
+    }
+   }
+  },
+  "T2 base-delete (clean 2f4c7daae, admission off)": {
+   "label": "t2-lifecycle-base-delete",
+   "arm": "lifecycle",
+   "encoding": "base-delete",
+   "api_sha": "2f4c7daae32d3d7ed4019afa271bf1542b086139",
+   "api_dirty": false,
+   "embedder": "local (bge-small-en-v1.5 + ms-marco-MiniLM-L-6-v2, CPU)",
+   "payload_source": "authored",
+   "server_env_adaptive": {
+    "HINDSIGHT_API_ADAPTIVE_MEMORY_MODE": "lifecycle"
+   },
+   "bank_config": {},
+   "recall_types": null,
+   "started_at_utc": "2026-10-18T03:57:35.218255+00:00",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/t2/t2-lifecycle-base-delete.json",
+   "metrics": {
+    "all": {
+     "current_precision@1": {
+      "mean": 0.9655,
+      "n": 58
+     },
+     "current_precision@5": {
+      "mean": 0.6828,
+      "n": 58
+     },
+     "current_recall@1": {
+      "mean": 0.8247,
+      "n": 58
+     },
+     "current_recall@5": {
+      "mean": 0.9511,
+      "n": 58
+     },
+     "stale_contamination@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 58
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.375,
+      "n": 16
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 16
+     },
+     "scope_accuracy@1": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "scope_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "supersession_accuracy@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "supersession_accuracy@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "uncertainty_accuracy@1": {
+      "mean": 0.0,
+      "n": 6
+     },
+     "uncertainty_accuracy@5": {
+      "mean": 1.0,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": 0.3333,
+      "n": 6
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": 0.3333,
+      "n": 6
+     }
+    },
+    "holdout": {
+     "current_precision@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_precision@5": {
+      "mean": 0.5278,
+      "n": 18
+     },
+     "current_recall@1": {
+      "mean": 0.9444,
+      "n": 18
+     },
+     "current_recall@5": {
+      "mean": 1.0,
+      "n": 18
+     },
+     "stale_contamination@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_raw@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@1": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "stale_contamination_obs@5": {
+      "mean": 0.0,
+      "n": 7
+     },
+     "mixed_rate@1": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "mixed_rate@5": {
+      "mean": 0.0,
+      "n": 18
+     },
+     "refuted_leakage@1": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "refuted_leakage@5": {
+      "mean": 0.0,
+      "n": 4
+     },
+     "historical_recall@1": {
+      "mean": 0.4,
+      "n": 10
+     },
+     "historical_recall@5": {
+      "mean": 1.0,
+      "n": 10
+     },
+     "scope_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "scope_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "supersession_accuracy@1": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "supersession_accuracy@5": {
+      "mean": 1.0,
+      "n": 7
+     },
+     "uncertainty_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "uncertainty_accuracy@5": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@1": {
+      "mean": null,
+      "n": 0
+     },
+     "independent_reinforcement_accuracy@5": {
+      "mean": null,
+      "n": 0
+     }
+    }
+   },
+   "note": "each value is the mean over the split's applicable queries of a per-query score (n = queries); no CI computed",
+   "state_conformance": {
+    "all:conformance": {
+     "mean": 0.9412,
+     "n": 17
+    },
+    "all:retirement_recall": {
+     "mean": 1.0,
+     "n": 10
+    },
+    "all:false_retirement": {
+     "mean": 0.0,
+     "n": 15
+    },
+    "dev:conformance": {
+     "mean": 0.9091,
+     "n": 11
+    },
+    "dev:retirement_recall": {
+     "mean": 1.0,
+     "n": 5
+    },
+    "dev:false_retirement": {
+     "mean": 0.0,
+     "n": 9
+    },
+    "holdout:conformance": {
+     "mean": 1.0,
+     "n": 6
+    },
+    "holdout:retirement_recall": {
+     "mean": 1.0,
+     "n": 5
+    },
+    "holdout:false_retirement": {
+     "mean": 0.0,
+     "n": 6
+    }
+   }
+  },
+  "rows_P3_vs_P5": {
+   "text": "Row diff `p3-lifecycle-base-delete` vs `p5-lifecycle-base-delete`: 70/74 queries identical (type, labels, class and text at every rank); max |Δ final score| on identical rows 1.00e-06.\n- split_generalization/jf-q1: first difference at rank 1\n- split_generalization/jf-q2: first difference at rank 1\n- split_generalization/jf-q3: first difference at rank 1\n- split_generalization/jf-q4: first difference at rank 3",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/p5/rows-p3-vs-p5-base-delete.txt"
+  },
+  "rows_P5_vs_T2": {
+   "text": "Row diff `p5-lifecycle-base-delete` vs `t2-lifecycle-base-delete`: 74/74 queries identical (type, labels, class and text at every rank); max |Δ final score| on identical rows 1.00e-06.",
+   "source": "tasks/adaptive-memory/eval/lifecycle-bench/t2/rows-p5-vs-t2-base-delete.txt"
+  },
+  "caveat": "author-scripted consolidation decisions (stub LLM): a conformance and robustness suite, not evidence about a real model (DESIGN.md 11.1)"
+ },
+ "amb_longmemeval_retrieval_noobs": {
+  "dataset": "LongMemEval-s cleaned (AMB loader), knowledge-update 72 + temporal-reasoning 127 non-abstention questions; frozen arm-A banks imported into every arm",
+  "endpoint_definitions": "tasks/adaptive-memory/eval/arms/score_endpoints.py",
+  "reference_arm": "B",
+  "endpoints": {
+   "knowledge-update:earlier@10": {
+    "value": 0.9861,
+    "x": 71,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.925,
+     0.9996
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.9861,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:earlier@20": {
+    "value": 1.0,
+    "x": 72,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.9501,
+     1.0
+    ],
+    "reference_arm": "B",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:earlier@5": {
+    "value": 0.9722,
+    "x": 70,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.9032,
+     0.9966
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.9861,
+    "ref_only": 1,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:latest@10": {
+    "value": 1.0,
+    "x": 72,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.9501,
+     1.0
+    ],
+    "reference_arm": "B",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:latest@20": {
+    "value": 1.0,
+    "x": 72,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.9501,
+     1.0
+    ],
+    "reference_arm": "B",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:latest@5": {
+    "value": 1.0,
+    "x": 72,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.9501,
+     1.0
+    ],
+    "reference_arm": "B",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "knowledge-update:latest_first": {
+    "value": 0.8611,
+    "x": 62,
+    "n": 72,
+    "ci95_clopper_pearson": [
+     0.7594,
+     0.9313
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.8194,
+    "ref_only": 0,
+    "arm_only": 3,
+    "p_exact_mcnemar": 0.25,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:all_gold@10": {
+    "value": 0.8268,
+    "x": 105,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.7496,
+     0.8881
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.8268,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:all_gold@20": {
+    "value": 0.9134,
+    "x": 116,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.8503,
+     0.956
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.9134,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:all_gold@5": {
+    "value": 0.7008,
+    "x": 89,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.6132,
+     0.7788
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.7008,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:gold@10": {
+    "value": 0.9843,
+    "x": 125,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.9443,
+     0.9981
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.9843,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:gold@20": {
+    "value": 0.9921,
+    "x": 126,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.9569,
+     0.9998
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.9921,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   },
+   "temporal-reasoning:gold@5": {
+    "value": 0.9843,
+    "x": 125,
+    "n": 127,
+    "ci95_clopper_pearson": [
+     0.9443,
+     0.9981
+    ],
+    "reference_arm": "B",
+    "reference_value": 0.9764,
+    "ref_only": 0,
+    "arm_only": 1,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-noobs/endpoints.json"
+   }
+  },
+  "note": "no observations means no claim state, so E == D on every endpoint"
+ },
+ "amb_longmemeval_retrieval_obs": {
+  "dataset": "40 KU questions; each bank consolidated once with the lifecycle prompt (mode lifecycle) on P3 code, Haiku 5.5",
+  "reference_arm": "B-obs",
+  "E-obs (lifecycle, current view)": {
+   "knowledge-update:earlier@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:earlier@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:earlier@5": {
+    "value": 0.875,
+    "x": 35,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.732,
+     0.9581
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 5,
+    "arm_only": 0,
+    "p_exact_mcnemar": 0.0625,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@5": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest_first": {
+    "value": 0.825,
+    "x": 33,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.6722,
+     0.9266
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 0.225,
+    "ref_only": 0,
+    "arm_only": 24,
+    "p_exact_mcnemar": 1.1920928955078125e-07,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   }
+  },
+  "E-obs-hist (lifecycle, historical view)": {
+   "knowledge-update:earlier@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:earlier@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:earlier@5": {
+    "value": 0.925,
+    "x": 37,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.7961,
+     0.9843
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 3,
+    "arm_only": 0,
+    "p_exact_mcnemar": 0.25,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@10": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@20": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest@5": {
+    "value": 1.0,
+    "x": 40,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.9119,
+     1.0
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 1.0,
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   },
+   "knowledge-update:latest_first": {
+    "value": 0.8,
+    "x": 32,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.6435,
+     0.9095
+    ],
+    "reference_arm": "B-obs",
+    "reference_value": 0.225,
+    "ref_only": 1,
+    "arm_only": 24,
+    "p_exact_mcnemar": 1.5497207641601562e-06,
+    "source": "tasks/adaptive-memory/eval/arms/score-obs/endpoints.json"
+   }
+  },
+  "primary_P1_life": {
+   "endpoint": "knowledge-update:latest_first",
+   "p_exact_mcnemar": 1.1920928955078125e-07,
+   "p_holm": 2.384185791015625e-07,
+   "significant": true,
+   "observation_source_repair": {
+    "what": "shared_import_eval.py recorded empty source lists for every recalled observation; eval/arms/resolve_observations.py (mtime 2026-10-17 20:15 BRT) re-resolved them post-hoc against the still-running servers (resolve-cb.log: 20907 observation rows, 0 unresolved), keeping the originals in obs-cons-{base,life}/rows-unresolved/",
+    "pre_specified_rule": "eval/amb-pilot.md (h), 04:17 BRT: observation -> the set of sessions of its source_memory_ids; score_endpoints.py docstring (09:44 BRT) scores an observation through its resolved source documents",
+    "interim_look": "eval/arms/score-obs-interim/ (17:09 BRT, n=21, on the unrepaired rows): latest_first B-obs 0.952, E-obs 1.000, T-obs 0.000 on every endpoint",
+    "on_rows_as_recorded": "score_endpoints.py on rows-unresolved (40 questions): latest_first B-obs 0.850, E-obs 0.900 (0/2, p=0.5), D-obs 0.875, P-obs 0.525, T-obs 0.000; not significant",
+    "reading": "the pre-specified rule is applied, so P1-life holds mechanically, but its significance depends entirely on the post-hoc repair"
+   }
+  },
+  "exploratory_attribution_rescoring": {
+   "label": "EXPLORATORY, post-hoc re-scoring (not pre-registered); same rows as eval/arms/score-obs",
+   "arms": {
+    "B-obs": {
+     "as_scored": {
+      "x": 9,
+      "n": 40,
+      "rate": 0.225
+     },
+     "raw_only": {
+      "x": 34,
+      "n": 40,
+      "rate": 0.85
+     },
+     "obs_newest_source": {
+      "x": 37,
+      "n": 40,
+      "rate": 0.925
+     },
+     "top1_obs_cites_both": {
+      "x": 28,
+      "n": 40,
+      "rate": 0.7
+     }
+    },
+    "D-obs": {
+     "as_scored": {
+      "x": 7,
+      "n": 40,
+      "rate": 0.175,
+      "vs_B_obs_ref_only": 2,
+      "vs_B_obs_arm_only": 0,
+      "p_exact_mcnemar": 0.5
+     },
+     "raw_only": {
+      "x": 35,
+      "n": 40,
+      "rate": 0.875,
+      "vs_B_obs_ref_only": 0,
+      "vs_B_obs_arm_only": 1,
+      "p_exact_mcnemar": 1.0
+     },
+     "obs_newest_source": {
+      "x": 36,
+      "n": 40,
+      "rate": 0.9,
+      "vs_B_obs_ref_only": 1,
+      "vs_B_obs_arm_only": 0,
+      "p_exact_mcnemar": 1.0
+     },
+     "top1_obs_cites_both": {
+      "x": 29,
+      "n": 40,
+      "rate": 0.725
+     }
+    },
+    "E-obs": {
+     "as_scored": {
+      "x": 33,
+      "n": 40,
+      "rate": 0.825,
+      "vs_B_obs_ref_only": 0,
+      "vs_B_obs_arm_only": 24,
+      "p_exact_mcnemar": 1.1920928955078125e-07
+     },
+     "raw_only": {
+      "x": 36,
+      "n": 40,
+      "rate": 0.9,
+      "vs_B_obs_ref_only": 0,
+      "vs_B_obs_arm_only": 2,
+      "p_exact_mcnemar": 0.5
+     },
+     "obs_newest_source": {
+      "x": 35,
+      "n": 40,
+      "rate": 0.875,
+      "vs_B_obs_ref_only": 2,
+      "vs_B_obs_arm_only": 0,
+      "p_exact_mcnemar": 0.5
+     },
+     "top1_obs_cites_both": {
+      "x": 2,
+      "n": 40,
+      "rate": 0.05
+     }
+    },
+    "E-obs-hist": {
+     "as_scored": {
+      "x": 32,
+      "n": 40,
+      "rate": 0.8,
+      "vs_B_obs_ref_only": 1,
+      "vs_B_obs_arm_only": 24,
+      "p_exact_mcnemar": 1.5497207641601562e-06
+     },
+     "raw_only": {
+      "x": 35,
+      "n": 40,
+      "rate": 0.875,
+      "vs_B_obs_ref_only": 0,
+      "vs_B_obs_arm_only": 1,
+      "p_exact_mcnemar": 1.0
+     },
+     "obs_newest_source": {
+      "x": 34,
+      "n": 40,
+      "rate": 0.85,
+      "vs_B_obs_ref_only": 3,
+      "vs_B_obs_arm_only": 0,
+      "p_exact_mcnemar": 0.25
+     },
+     "top1_obs_cites_both": {
+      "x": 2,
+      "n": 40,
+      "rate": 0.05
+     }
+    },
+    "E-obs-nodecay": {
+     "as_scored": {
+      "x": 33,
+      "n": 40,
+      "rate": 0.825,
+      "vs_B_obs_ref_only": 0,
+      "vs_B_obs_arm_only": 24,
+      "p_exact_mcnemar": 1.1920928955078125e-07
+     },
+     "raw_only": {
+      "x": 36,
+      "n": 40,
+      "rate": 0.9,
+      "vs_B_obs_ref_only": 0,
+      "vs_B_obs_arm_only": 2,
+      "p_exact_mcnemar": 0.5
+     },
+     "obs_newest_source": {
+      "x": 35,
+      "n": 40,
+      "rate": 0.875,
+      "vs_B_obs_ref_only": 2,
+      "vs_B_obs_arm_only": 0,
+      "p_exact_mcnemar": 0.5
+     },
+     "top1_obs_cites_both": {
+      "x": 2,
+      "n": 40,
+      "rate": 0.05
+     }
+    },
+    "E-obs-off": {
+     "as_scored": {
+      "x": 32,
+      "n": 40,
+      "rate": 0.8,
+      "vs_B_obs_ref_only": 1,
+      "vs_B_obs_arm_only": 24,
+      "p_exact_mcnemar": 1.5497207641601562e-06
+     },
+     "raw_only": {
+      "x": 34,
+      "n": 40,
+      "rate": 0.85,
+      "vs_B_obs_ref_only": 0,
+      "vs_B_obs_arm_only": 0,
+      "p_exact_mcnemar": 1.0
+     },
+     "obs_newest_source": {
+      "x": 34,
+      "n": 40,
+      "rate": 0.85,
+      "vs_B_obs_ref_only": 3,
+      "vs_B_obs_arm_only": 0,
+      "p_exact_mcnemar": 0.25
+     },
+     "top1_obs_cites_both": {
+      "x": 2,
+      "n": 40,
+      "rate": 0.05
+     }
+    },
+    "P-obs": {
+     "as_scored": {
+      "x": 6,
+      "n": 40,
+      "rate": 0.15,
+      "vs_B_obs_ref_only": 3,
+      "vs_B_obs_arm_only": 0,
+      "p_exact_mcnemar": 0.25
+     },
+     "raw_only": {
+      "x": 21,
+      "n": 40,
+      "rate": 0.525,
+      "vs_B_obs_ref_only": 15,
+      "vs_B_obs_arm_only": 2,
+      "p_exact_mcnemar": 0.002349853515625
+     },
+     "obs_newest_source": {
+      "x": 36,
+      "n": 40,
+      "rate": 0.9,
+      "vs_B_obs_ref_only": 1,
+      "vs_B_obs_arm_only": 0,
+      "p_exact_mcnemar": 1.0
+     },
+     "top1_obs_cites_both": {
+      "x": 30,
+      "n": 40,
+      "rate": 0.75
+     }
+    },
+    "T-obs": {
+     "as_scored": {
+      "x": 6,
+      "n": 40,
+      "rate": 0.15,
+      "vs_B_obs_ref_only": 3,
+      "vs_B_obs_arm_only": 0,
+      "p_exact_mcnemar": 0.25
+     },
+     "raw_only": {
+      "x": 0,
+      "n": 40,
+      "rate": 0.0,
+      "vs_B_obs_ref_only": 34,
+      "vs_B_obs_arm_only": 0,
+      "p_exact_mcnemar": 1.1641532182693481e-10
+     },
+     "obs_newest_source": {
+      "x": 36,
+      "n": 40,
+      "rate": 0.9,
+      "vs_B_obs_ref_only": 1,
+      "vs_B_obs_arm_only": 0,
+      "p_exact_mcnemar": 1.0
+     },
+     "top1_obs_cites_both": {
+      "x": 30,
+      "n": 40,
+      "rate": 0.75
+     }
+    }
+   },
+   "source": "artifacts/adaptive-memory/derived/latest-first-attribution-exploratory.json",
+   "reading": "post-hoc, not pre-registered. Measured: in 28/40 questions B-obs's top-1 is an observation citing both evidence sessions, which the as-scored tie rule counts as not latest-first; attributing an observation to its newest source session gives B-obs 0.925 vs E-obs 0.875 (2/0), raw facts only 0.850 vs 0.900 (0/2). Hypothesis (not measured): these are observations the base prompt updated in place; check: the consolidation /llm-requests trace or observation history for those 28 banks"
+  }
+ },
+ "amb_longmemeval_judged_noobs": {
+  "n_questions": 211,
+  "source_scored": "tasks/adaptive-memory/eval/judged/judged-noobs.md",
+  "source_rows": {
+   "A": [
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-A-r1/rag/s.json",
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-A-r2/rag/s.json"
+   ],
+   "B": [
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-B-r1/rag/s.json",
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-B-r2/rag/s.json"
+   ],
+   "D": [
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-D-r1/rag/s.json",
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-D-r2/rag/s.json"
+   ],
+   "E": [
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-E-r1/rag/s.json",
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-E-r2/rag/s.json"
+   ]
+  },
+  "rule": "primary = correct in both repeats; sensitivity = correct in at least one (PREREGISTRATION amendment 2026-10-17 20:34); exact McNemar vs reference",
+  "all_arms": {
+   "A": {
+    "per_repeat": [
+     0.9242,
+     0.9194
+    ],
+    "both_correct": 0.891,
+    "both_correct_x": 188,
+    "at_least_one": 0.9526,
+    "both_correct_vs_B": {
+     "ref_only": 3,
+     "arm_only": 3,
+     "p_exact_mcnemar": 1.0
+    },
+    "at_least_one_vs_B": {
+     "ref_only": 2,
+     "arm_only": 4,
+     "p_exact_mcnemar": 0.6875
+    },
+    "both_correct_knowledge-update": 0.9487,
+    "both_correct_temporal-reasoning": 0.8571
+   },
+   "B": {
+    "per_repeat": [
+     0.9194,
+     0.9147
+    ],
+    "both_correct": 0.891,
+    "both_correct_x": 188,
+    "at_least_one": 0.9431,
+    "both_correct_knowledge-update": 0.9231,
+    "both_correct_temporal-reasoning": 0.8722
+   },
+   "D": {
+    "per_repeat": [
+     0.91,
+     0.9194
+    ],
+    "both_correct": 0.8957,
+    "both_correct_x": 189,
+    "at_least_one": 0.9336,
+    "both_correct_vs_B": {
+     "ref_only": 3,
+     "arm_only": 4,
+     "p_exact_mcnemar": 1.0
+    },
+    "at_least_one_vs_B": {
+     "ref_only": 3,
+     "arm_only": 1,
+     "p_exact_mcnemar": 0.625
+    },
+    "both_correct_knowledge-update": 0.9231,
+    "both_correct_temporal-reasoning": 0.8797
+   },
+   "E": {
+    "per_repeat": [
+     0.9147,
+     0.9336
+    ],
+    "both_correct": 0.9052,
+    "both_correct_x": 191,
+    "at_least_one": 0.9431,
+    "both_correct_vs_B": {
+     "ref_only": 3,
+     "arm_only": 6,
+     "p_exact_mcnemar": 0.5078
+    },
+    "at_least_one_vs_B": {
+     "ref_only": 2,
+     "arm_only": 2,
+     "p_exact_mcnemar": 1.0
+    },
+    "both_correct_knowledge-update": 0.9359,
+    "both_correct_temporal-reasoning": 0.8872
+   }
+  },
+  "arm": {
+   "runs": [
+    "judged-E-r1",
+    "judged-E-r2"
+   ],
+   "per_repeat": [
+    {
+     "value": 0.9147,
+     "x": 193,
+     "n": 211,
+     "ci95_clopper_pearson": [
+      0.8685,
+      0.9487
+     ]
+    },
+    {
+     "value": 0.9336,
+     "x": 197,
+     "n": 211,
+     "ci95_clopper_pearson": [
+      0.8912,
+      0.9633
+     ]
+    }
+   ],
+   "both_correct": {
+    "value": 0.9052,
+    "x": 191,
+    "n": 211,
+    "ci95_clopper_pearson": [
+     0.8574,
+     0.9411
+    ],
+    "reference_arm": "B",
+    "ref_only": 3,
+    "arm_only": 6,
+    "p_exact_mcnemar": 0.5078
+   },
+   "at_least_one": {
+    "value": 0.9431,
+    "x": 199,
+    "n": 211,
+    "ci95_clopper_pearson": [
+     0.9028,
+     0.9703
+    ],
+    "reference_arm": "B",
+    "ref_only": 2,
+    "arm_only": 2,
+    "p_exact_mcnemar": 1.0
+   },
+   "both_correct_knowledge-update": {
+    "value": 0.9359,
+    "x": 73,
+    "n": 78,
+    "ci95_clopper_pearson": [
+     0.8567,
+     0.9789
+    ]
+   },
+   "both_correct_temporal-reasoning": {
+    "value": 0.8872,
+    "x": 118,
+    "n": 133,
+    "ci95_clopper_pearson": [
+     0.8208,
+     0.9355
+    ]
+   }
+  },
+  "provenance": {
+   "runs": "judged-E-r1 and judged-E-r2 are fresh re-runs (2026-10-18 07:07-07:55 BRT) on srv-e: P5 worktree 728b265c9, ADAPTIVE_MEMORY_MODE=lifecycle, frozen arm-A archives, command eval/judged/rerun_E.sh",
+   "unused_partial": "the pre-outage E-r1 (189/211 judged answers, exit 1 on the 2026-10-18 01:09:41 BRT credit error) and E-r2 (exit 1, nothing saved) are used for no number; the partial AMB output is kept at <scratchpad>/judged-E-r1-partial-credit/rag/s.json, and its usage rows are the first 379 lines (00:47-01:09 BRT) of eval/judged/usage-judged-E-r1.jsonl",
+   "exit_codes": "tasks/adaptive-memory/eval/judged/exit-codes",
+   "spend_usd": {
+    "E-r1": 1.358,
+    "E-r2": 1.358,
+    "method": "eval/scripts/amb_cost.py over the usage rows after 06:00 BRT (AMB-side answer + judge)"
+   }
+  },
+  "recall_check": {
+   "what": "top-10 recalled (document, type, mentioned_at) sequence per question, ids excluded (import assigns new ids per server)",
+   "E_vs_D": [
+    {
+     "runs": [
+      "judged-D-r1",
+      "judged-E-r1"
+     ],
+     "n": 211,
+     "top10_identical": 211,
+     "full_context_identical": 18
+    },
+    {
+     "runs": [
+      "judged-D-r2",
+      "judged-E-r2"
+     ],
+     "n": 211,
+     "top10_identical": 209,
+     "full_context_identical": 14
+    }
+   ],
+   "D_repeat_vs_repeat": {
+    "runs": [
+     "judged-D-r1",
+     "judged-D-r2"
+    ],
+    "n": 211,
+    "top10_identical": 210,
+    "full_context_identical": 25
+   },
+   "E_repeat_vs_repeat": {
+    "runs": [
+     "judged-E-r1",
+     "judged-E-r2"
+    ],
+    "n": 211,
+    "top10_identical": 210,
+    "full_context_identical": 22
+   },
+   "B_vs_E": {
+    "runs": [
+     "judged-B-r1",
+     "judged-E-r1"
+    ],
+    "n": 211,
+    "top10_identical": 158,
+    "full_context_identical": 8
+   },
+   "B_vs_D": {
+    "runs": [
+     "judged-B-r1",
+     "judged-D-r1"
+    ],
+    "n": 211,
+    "top10_identical": 158,
+    "full_context_identical": 6
+   },
+   "reading": "E's top-10 matches D's as closely as D's two repeats match each other, as expected without observations (no claims); E differs from B like D does (the retention factor). Full contexts beyond the top 10 differ in most questions even between two repeats of one arm, so the context tail is not deterministic"
+  },
+  "exploratory_E_vs_D": {
+   "status": "exploratory: not a pre-registered comparison (the judged rule compares with B)",
+   "both_correct": {
+    "value": 0.9052,
+    "x": 191,
+    "n": 211,
+    "ci95_clopper_pearson": [
+     0.8574,
+     0.9411
+    ],
+    "reference_arm": "D",
+    "ref_only": 2,
+    "arm_only": 4,
+    "p_exact_mcnemar": 0.6875
+   },
+   "at_least_one": {
+    "value": 0.9431,
+    "x": 199,
+    "n": 211,
+    "ci95_clopper_pearson": [
+     0.9028,
+     0.9703
+    ],
+    "reference_arm": "D",
+    "ref_only": 2,
+    "arm_only": 4,
+    "p_exact_mcnemar": 0.6875
+   }
+  }
+ },
+ "amb_longmemeval_judged_obs": {
+  "n_questions": 40,
+  "source_scored": "tasks/adaptive-memory/eval/judged/judged-obs.md",
+  "source_rows": {
+   "B-obs": [
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-Bobs-r1/rag/s.json",
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-Bobs-r2/rag/s.json"
+   ],
+   "E-obs": [
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-Eobs-r1/rag/s.json",
+    "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/longmemeval/judged-Eobs-r2/rag/s.json"
+   ]
+  },
+  "rule": "primary = correct in both repeats; sensitivity = correct in at least one (PREREGISTRATION amendment 2026-10-17 20:34); exact McNemar vs reference",
+  "all_arms": {
+   "B-obs": {
+    "per_repeat": [
+     0.95,
+     0.975
+    ],
+    "both_correct": 0.95,
+    "both_correct_x": 38,
+    "at_least_one": 0.975,
+    "both_correct_knowledge-update": 0.95
+   },
+   "E-obs": {
+    "per_repeat": [
+     0.95,
+     0.95
+    ],
+    "both_correct": 0.925,
+    "both_correct_x": 37,
+    "at_least_one": 0.975,
+    "both_correct_vs_B-obs": {
+     "ref_only": 2,
+     "arm_only": 1,
+     "p_exact_mcnemar": 1.0
+    },
+    "at_least_one_vs_B-obs": {
+     "ref_only": 0,
+     "arm_only": 0,
+     "p_exact_mcnemar": 1.0
+    },
+    "both_correct_knowledge-update": 0.925
+   }
+  },
+  "arm": {
+   "runs": [
+    "judged-Eobs-r1",
+    "judged-Eobs-r2"
+   ],
+   "per_repeat": [
+    {
+     "value": 0.95,
+     "x": 38,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.8308,
+      0.9939
+     ]
+    },
+    {
+     "value": 0.95,
+     "x": 38,
+     "n": 40,
+     "ci95_clopper_pearson": [
+      0.8308,
+      0.9939
+     ]
+    }
+   ],
+   "both_correct": {
+    "value": 0.925,
+    "x": 37,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.7961,
+     0.9843
+    ],
+    "reference_arm": "B-obs",
+    "ref_only": 2,
+    "arm_only": 1,
+    "p_exact_mcnemar": 1.0
+   },
+   "at_least_one": {
+    "value": 0.975,
+    "x": 39,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.8684,
+     0.9994
+    ],
+    "reference_arm": "B-obs",
+    "ref_only": 0,
+    "arm_only": 0,
+    "p_exact_mcnemar": 1.0
+   },
+   "both_correct_knowledge-update": {
+    "value": 0.925,
+    "x": 37,
+    "n": 40,
+    "ci95_clopper_pearson": [
+     0.7961,
+     0.9843
+    ]
+   }
+  },
+  "recall_check": "judged E-obs top-10 (type, document, mentioned_at) identical to the endpoint E-obs arm in 40/40 (r1) and 39/40 (r2); source eval/judged/judged-obs.md and STATE.md 2026-10-18 00:20"
+ },
+ "locomo_retrieval": {
+  "n_queries": 1540,
+  "source_scored": "tasks/adaptive-memory/eval/judged/locomo-endpoints.md",
+  "source_rows": {
+   "A": "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/locomo/locomo-A/retrieval/locomo10.json",
+   "B": "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/locomo/locomo-B/retrieval/locomo10.json",
+   "D": "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/locomo/locomo-D/retrieval/locomo10.json",
+   "E": "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/locomo/locomo-E/retrieval/locomo10.json",
+   "E-nodecay": "/private/tmp/claude-502/-Users-davidvieira-code-hindsight/823f87da-11e6-43e4-a7a6-b3e4cbaba9e3/scratchpad/amb-checkout/outputs/locomo/locomo-E-nodecay/retrieval/locomo10.json"
+  },
+  "endpoint": "first gold rank <= k (AMB retrieval mode, AMB default budget)",
+  "arm": {
+   "run": "locomo-E",
+   "gold@5": {
+    "value": 0.8864,
+    "x": 1365,
+    "n": 1540,
+    "ci95_clopper_pearson": [
+     0.8694,
+     0.9018
+    ],
+    "reference_arm": "B",
+    "ref_only": 32,
+    "arm_only": 8,
+    "p_exact_mcnemar": 0.000182
+   },
+   "gold@10": {
+    "value": 0.939,
+    "x": 1446,
+    "n": 1540,
+    "ci95_clopper_pearson": [
+     0.9258,
+     0.9504
+    ],
+    "reference_arm": "B",
+    "ref_only": 15,
+    "arm_only": 3,
+    "p_exact_mcnemar": 0.00754
+   },
+   "gold@20": {
+    "value": 0.9753,
+    "x": 1502,
+    "n": 1540,
+    "ci95_clopper_pearson": [
+     0.9663,
+     0.9825
+    ],
+    "reference_arm": "B",
+    "ref_only": 4,
+    "arm_only": 4,
+    "p_exact_mcnemar": 1.0
+   },
+   "any_gold": {
+    "value": 0.9942,
+    "x": 1531,
+    "n": 1540,
+    "ci95_clopper_pearson": [
+     0.9889,
+     0.9973
+    ]
+   }
+  }
+ },
+ "classification_eval": {
+  "P3_K3": {
+   "runs": 162,
+   "scenarios": 27,
+   "repeats": 3,
+   "server_commit": "b491b2bb9",
+   "false_retirement_controls_scenario_run": {
+    "x": 0,
+    "n": 51,
+    "one_sided_95_upper": 0.057,
+    "ci95": [
+     0.0,
+     0.0698
+    ]
+   },
+   "false_retirement_controls_per_scenario": {
+    "x": 0,
+    "n": 17,
+    "one_sided_95_upper": 0.1616
+   },
+   "control_runs_with_wrong_uncertain_label": {
+    "x": 1,
+    "n": 51,
+    "one_sided_95_upper": 0.0897
+   },
+   "supersede_recall": {
+    "value": 0.9474,
+    "x": 54,
+    "n": 57,
+    "ci95_clopper_pearson": [
+     0.8538,
+     0.989
+    ]
+   },
+   "supersede_precision": {
+    "value": 0.9231,
+    "x": 60,
+    "n": 65,
+    "ci95_clopper_pearson": [
+     0.8295,
+     0.9746
+    ]
+   },
+   "refute_recall_strict": {
+    "value": 0.3333,
+    "x": 1,
+    "n": 3,
+    "ci95_clopper_pearson": [
+     0.0084,
+     0.9057
+    ]
+   },
+   "refute_recall_either_label": {
+    "value": 1.0,
+    "x": 3,
+    "n": 3,
+    "ci95_clopper_pearson": [
+     0.2924,
+     1.0
+    ]
+   },
+   "refute_precision": {
+    "value": 1.0,
+    "x": 2,
+    "n": 2,
+    "ci95_clopper_pearson": [
+     0.1581,
+     1.0
+    ]
+   },
+   "conflict_recall": {
+    "value": 1.0,
+    "x": 6,
+    "n": 6,
+    "ci95_clopper_pearson": [
+     0.5407,
+     1.0
+    ]
+   },
+   "conflict_precision": {
+    "value": 0.8571,
+    "x": 6,
+    "n": 7,
+    "ci95_clopper_pearson": [
+     0.4213,
+     0.9964
+    ]
+   },
+   "raw_fact_leak": {
+    "value": 0.0,
+    "x": 0,
+    "n": 67,
+    "ci95_clopper_pearson": [
+     0.0,
+     0.0536
+    ]
+   },
+   "judged_pass": {
+    "value": 0.9753,
+    "x": 79,
+    "n": 81,
+    "ci95_clopper_pearson": [
+     0.9136,
+     0.997
+    ]
+   },
+   "tokens": {
+    "calls": 505,
+    "input_tokens": 11352628,
+    "output_tokens": 327071,
+    "server_usd": 1.29,
+    "input_ratio_vs_B": 2.0
+   },
+   "source": "tasks/adaptive-memory/eval/classify/REPORT.md",
+   "summary": "tasks/adaptive-memory/eval/classify/summary.json"
+  },
+  "P5_K1": {
+   "runs": 54,
+   "server_code": "P5 working tree (schema $defs fix)",
+   "false_retirement_controls": {
+    "x": 0,
+    "n": 17,
+    "one_sided_95_upper": 0.1616
+   },
+   "supersede_recall": {
+    "value": 0.9474,
+    "x": 18,
+    "n": 19,
+    "ci95_clopper_pearson": [
+     0.7397,
+     0.9987
+    ]
+   },
+   "supersede_precision": {
+    "value": 0.9524,
+    "x": 20,
+    "n": 21,
+    "ci95_clopper_pearson": [
+     0.7618,
+     0.9988
+    ]
+   },
+   "judged_pass": {
+    "value": 0.9259,
+    "x": 25,
+    "n": 27,
+    "ci95_clopper_pearson": [
+     0.7571,
+     0.9909
+    ]
+   },
+   "tokens": {
+    "calls": 169,
+    "input_tokens": 2834592,
+    "output_tokens": 108371,
+    "server_usd": 0.335,
+    "input_ratio_vs_B": 1.52
+   },
+   "source": "tasks/adaptive-memory/eval/classify/raw-p5/score.md"
+  },
+  "pooled_P3_P5_false_retirement_controls": {
+   "x": 0,
+   "n": 68,
+   "one_sided_95_upper": 0.0431,
+   "label": "computed for this report; pooling two code versions is the author's judgment, not pre-registered"
+  }
+ },
+ "hs_llm_core_judge_tests": {
+  "result": "4/4 passed, single run (P3 worktree, server claude-haiku-5-5, judge claude-sonnet-5-5)",
+  "source": "tasks/adaptive-memory/STATE.md"
+ },
+ "performance": {
+  "source": "tasks/adaptive-memory/eval/perf/performance.json",
+  "report": "tasks/adaptive-memory/eval/perf/REPORT.md",
+  "recall_noobs_vs_B": {
+   "seq": {
+    "pooled": {
+     "p50": {
+      "overhead": 0.0864,
+      "ci95": [
+       0.0779,
+       0.0944
+      ],
+      "delta_ms": 6.26
+     },
+     "p95": {
+      "overhead": 0.011,
+      "ci95": [
+       -0.0159,
+       0.0256
+      ],
+      "delta_ms": 2.89
+     },
+     "p99": {
+      "overhead": -0.0998,
+      "ci95": [
+       -0.1358,
+       -0.0299
+      ],
+      "delta_ms": -32.26
+     },
+     "mean": {
+      "overhead": 0.0488,
+      "ci95": [
+       0.0304,
+       0.0679
+      ],
+      "delta_ms": 4.81
+     }
+    },
+    "per_round_p95_overhead": {
+     "1": -0.0903,
+     "2": 0.0387,
+     "3": 0.0373,
+     "4": 0.0347
+    }
+   },
+   "conc": {
+    "pooled": {
+     "p50": {
+      "overhead": 0.1417,
+      "ci95": [
+       0.1113,
+       0.1607
+      ],
+      "delta_ms": 75.88
+     },
+     "p95": {
+      "overhead": -0.0298,
+      "ci95": [
+       -0.1141,
+       0.0715
+      ],
+      "delta_ms": -23.87
+     },
+     "p99": {
+      "overhead": -0.0724,
+      "ci95": [
+       -0.1957,
+       0.119
+      ],
+      "delta_ms": -73.56
+     },
+     "mean": {
+      "overhead": 0.1257,
+      "ci95": [
+       0.0887,
+       0.1639
+      ],
+      "delta_ms": 65.2
+     }
+    },
+    "per_round_p95_overhead": {
+     "1": -0.0058,
+     "2": 0.2687,
+     "3": -0.037,
+     "4": 0.0955
+    }
+   }
+  },
+  "recall_obs_vs_B": {
+   "seq": {
+    "pooled": {
+     "p50": {
+      "overhead": 0.0748,
+      "ci95": [
+       0.0695,
+       0.0798
+      ],
+      "delta_ms": 5.4
+     },
+     "p95": {
+      "overhead": 0.0085,
+      "ci95": [
+       -0.0031,
+       0.0209
+      ],
+      "delta_ms": 2.19
+     },
+     "p99": {
+      "overhead": 0.0377,
+      "ci95": [
+       -0.0325,
+       0.0777
+      ],
+      "delta_ms": 10.57
+     },
+     "mean": {
+      "overhead": 0.0426,
+      "ci95": [
+       0.0269,
+       0.0567
+      ],
+      "delta_ms": 4.15
+     }
+    },
+    "per_round_p95_overhead": {
+     "1": 0.0489,
+     "2": 0.005,
+     "3": -0.0561,
+     "4": 0.0288
+    }
+   },
+   "conc": {
+    "pooled": {
+     "p50": {
+      "overhead": 0.1656,
+      "ci95": [
+       0.1401,
+       0.1941
+      ],
+      "delta_ms": 84.85
+     },
+     "p95": {
+      "overhead": 0.2231,
+      "ci95": [
+       0.1373,
+       0.3127
+      ],
+      "delta_ms": 147.58
+     },
+     "p99": {
+      "overhead": 0.1324,
+      "ci95": [
+       -0.0149,
+       0.293
+      ],
+      "delta_ms": 109.73
+     },
+     "mean": {
+      "overhead": 0.2277,
+      "ci95": [
+       0.1855,
+       0.2709
+      ],
+      "delta_ms": 107.5
+     }
+    },
+    "per_round_p95_overhead": {
+     "1": 0.273,
+     "2": 0.0153,
+     "3": -0.0188,
+     "4": 0.4679
+    }
+   }
+  },
+  "run_level": {
+   "recall_noobs": {
+    "seq": {
+     "p95_per_round": [
+      -0.0903,
+      0.0388,
+      0.0372,
+      0.0347
+     ],
+     "p95_run_level_mean": 0.0051,
+     "p95_run_level_t95": [
+      -0.0961,
+      0.1063
+     ],
+     "p50_per_round": [
+      -0.0603,
+      0.129,
+      0.1058,
+      0.0976
+     ],
+     "p50_run_level_mean": 0.0681,
+     "p50_run_level_t95": [
+      -0.0697,
+      0.2058
+     ],
+     "median_of_run_p95": 0.038,
+     "pooled_p95": 0.011,
+     "pooled_p95_cluster_ci95": [
+      -0.0159,
+      0.0256
+     ]
+    },
+    "conc": {
+     "p95_per_round": [
+      -0.0058,
+      0.2687,
+      -0.037,
+      0.0955
+     ],
+     "p95_run_level_mean": 0.0804,
+     "p95_run_level_t95": [
+      -0.1388,
+      0.2995
+     ],
+     "p50_per_round": [
+      -0.0393,
+      0.1485,
+      0.1667,
+      0.2397
+     ],
+     "p50_run_level_mean": 0.1289,
+     "p50_run_level_t95": [
+      -0.0602,
+      0.318
+     ],
+     "median_of_run_p95": 0.1066,
+     "pooled_p95": -0.0298,
+     "pooled_p95_cluster_ci95": [
+      -0.1141,
+      0.0715
+     ]
+    }
+   },
+   "recall_obs": {
+    "seq": {
+     "p95_per_round": [
+      0.0489,
+      0.0049,
+      -0.0561,
+      0.0288
+     ],
+     "p95_run_level_mean": 0.0067,
+     "p95_run_level_t95": [
+      -0.0658,
+      0.0791
+     ],
+     "p50_per_round": [
+      0.1129,
+      0.0563,
+      -0.0008,
+      0.1142
+     ],
+     "p50_run_level_mean": 0.0707,
+     "p50_run_level_t95": [
+      -0.0165,
+      0.1578
+     ],
+     "median_of_run_p95": 0.0131,
+     "pooled_p95": 0.0085,
+     "pooled_p95_cluster_ci95": [
+      -0.0031,
+      0.0209
+     ]
+    },
+    "conc": {
+     "p95_per_round": [
+      0.273,
+      0.0153,
+      -0.0188,
+      0.4679
+     ],
+     "p95_run_level_mean": 0.1844,
+     "p95_run_level_t95": [
+      -0.181,
+      0.5497
+     ],
+     "p50_per_round": [
+      0.2438,
+      0.1459,
+      0.0991,
+      0.2274
+     ],
+     "p50_run_level_mean": 0.1791,
+     "p50_run_level_t95": [
+      0.0702,
+      0.2879
+     ],
+     "median_of_run_p95": 0.2086,
+     "pooled_p95": 0.2231,
+     "pooled_p95_cluster_ci95": [
+      0.1373,
+      0.3127
+     ]
+    }
+   }
+  },
+  "recall_pooled_ms": {
+   "noobs": {
+    "seq": {
+     "n": 1600,
+     "p50_ms": 78.77,
+     "p95_ms": 265.25,
+     "p99_ms": 290.99,
+     "mean_ms": 103.3
+    },
+    "conc": {
+     "n": 800,
+     "p50_ms": 611.47,
+     "p95_ms": 776.81,
+     "p99_ms": 942.43,
+     "mean_ms": 583.85
+    }
+   },
+   "obs": {
+    "seq": {
+     "n": 1600,
+     "p50_ms": 77.64,
+     "p95_ms": 260.62,
+     "p99_ms": 291.19,
+     "mean_ms": 101.46
+    },
+    "conc": {
+     "n": 800,
+     "p50_ms": 597.29,
+     "p95_ms": 809.17,
+     "p99_ms": 938.44,
+     "mean_ms": 579.53
+    }
+   }
+  },
+  "official_suites_medium": {
+   "retain_items_per_s": [
+    119.04,
+    119.74,
+    119.34
+   ],
+   "consolidation_memories_per_s": [
+    21.58,
+    20.25,
+    20.03
+   ],
+   "retain_s": [
+    8.4,
+    8.352,
+    8.38
+   ],
+   "consolidation_s": [
+    4.634,
+    4.938,
+    4.993
+   ],
+   "git_sha": "2f4c7daae",
+   "scale": "medium",
+   "retain_items_per_s_median": 119.34,
+   "consolidation_memories_per_s_median": 20.25,
+   "retain_s_median": 8.38,
+   "consolidation_s_median": 4.938,
+   "retain_s_vs_B": 0.0036,
+   "consolidation_s_vs_B": 0.174
+  },
+  "obs_runs_consolidation_s": {
+   "per_round": [
+    7.203,
+    5.598,
+    5.687,
+    5.063
+   ],
+   "median": 5.6425
+  },
+  "storage_after_100_observations": {
+   "rows": {
+    "async_operations": {
+     "min": 1,
+     "max": 1
+    },
+    "banks": {
+     "min": 1,
+     "max": 1
+    },
+    "chunks": {
+     "min": 1000,
+     "max": 1000
+    },
+    "documents": {
+     "min": 2,
+     "max": 2
+    },
+    "entities": {
+     "min": 516,
+     "max": 520
+    },
+    "entity_cooccurrences": {
+     "min": 2170,
+     "max": 2172
+    },
+    "llm_requests": {
+     "min": 1022,
+     "max": 1022
+    },
+    "memory_links": {
+     "min": 30210,
+     "max": 30421
+    },
+    "memory_reinforcement_events": {
+     "min": 100,
+     "max": 100
+    },
+    "memory_retention_state": {
+     "min": 100,
+     "max": 100
+    },
+    "memory_units": {
+     "min": 1100,
+     "max": 1100
+    },
+    "unit_entities": {
+     "min": 2999,
+     "max": 2999
+    }
+   },
+   "bytes_round1": {
+    "async_operations": 319488,
+    "banks": 114688,
+    "chunks": 753664,
+    "documents": 139264,
+    "entities": 1261568,
+    "entity_cooccurrences": 901120,
+    "llm_requests": 1310203904,
+    "memory_links": 21757952,
+    "memory_reinforcement_events": 188416,
+    "memory_retention_state": 114688,
+    "memory_units": 7094272,
+    "unit_entities": 1351680
+   }
+  },
+  "phases_note": "feature phases p50 / p95 ms (noobs): adaptive_state_load 1.7 / 2.4 seq, 42.5 / 302 conc; lifecycle_claim_load 2.5 / 3.5 seq, 44.7 / 304 conc (eval/perf/REPORT.md); the perf banks hold no retired claims",
+  "verified_verdict": {
+   "verdict": "point estimate under the bar on the primary (noobs) scenario; not resolved once run-to-run variance is counted. With observations, the concurrent point estimate is over the bar and also unresolved at run level",
+   "noobs_seq": "pooled p95 +1.1% (cluster CI [-1.6, +2.6]); run-level t95 [-9.6, +10.6]; median of per-run p95 +3.8%",
+   "noobs_conc": "pooled p95 -3.0% (cluster CI [-11.4, +7.1]); run-level t95 [-13.9, +29.9]; median of per-run p95 +10.7%",
+   "obs_seq": "pooled p95 +0.9% (cluster CI [-0.3, +2.1]); run-level t95 [-6.6, +7.9]; median of per-run p95 +1.3%",
+   "obs_conc": "pooled p95 +22.3% (cluster CI [+13.7, +31.3]); run-level t95 [-18.1, +55.0]; median of per-run p95 +20.9%",
+   "robust": "obs conc p50 run-level +17.9% [+7.0, +28.8]; noobs seq p50 pooled +8.6% (+6.3 ms)"
+  },
+  "decision_rule_item_4": {
+   "mechanical": "holds: raw/analysis_plan.json (file mtime 2026-10-18T05:13:48Z, before the first analysed run's machine-state check at 05:13:53Z and after tiny smoke runs and one medium pilot of arm E, both excluded; its own written_at field says 05:20Z, which is not its write time) makes the noobs scenario on both shapes the decision cell and reads 'holds' as a point estimate under the bar; E vs B noobs p95 +1.1% seq, -3.0% conc",
+   "author_judgment": "not established: unresolved at run level on the primary scenario; over the bar at c=8 with observations (the recommended configuration); over the bar in DESIGN 11.4's median-of-per-run form (noobs conc +10.7%); and the p95 mostly measures GC pauses"
+  }
+ }
+}

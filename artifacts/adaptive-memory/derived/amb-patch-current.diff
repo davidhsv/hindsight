@@ -1,0 +1,3144 @@
+diff --git a/src/memory_bench/cli.py b/src/memory_bench/cli.py
+index 76d5d27..9445bf5 100644
+--- a/src/memory_bench/cli.py
++++ b/src/memory_bench/cli.py
+@@ -1,797 +1,800 @@
+ import json
+ import os
+ import threading
+ import webbrowser
+ from pathlib import Path
+ 
+ import typer
+ from dotenv import load_dotenv
+ from rich.console import Console
+ from rich.table import Table
+ 
+ load_dotenv(dotenv_path=Path(__file__).parents[2] / ".env", override=True)
+ 
+ from .dataset import REGISTRY as DATASET_REGISTRY, get_dataset
+ from .llm import REGISTRY as LLM_REGISTRY, get_llm, get_answer_llm
+ from .memory import REGISTRY as MEMORY_REGISTRY, get_memory_provider
+ from .modes import REGISTRY as MODE_REGISTRY, get_mode
+ from .runner import EvalRunner
+ 
+ 
+ app = typer.Typer(help="Open Memory Benchmark (OMB).")
+ console = Console()
+ 
+ 
+ def _resolve_gemini_key() -> None:
++    # Only a run that answers or judges with Gemini needs its key.
++    if "gemini" not in (os.environ.get("OMB_ANSWER_LLM", "groq"), os.environ.get("OMB_JUDGE_LLM", "gemini")):
++        return
+     key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+     if not key:
+         typer.echo("Error: GEMINI_API_KEY environment variable is not set.", err=True)
+         raise typer.Exit(1)
+     os.environ["GOOGLE_API_KEY"] = key
+ 
+ 
+ @app.command()
+ def run(
+     split: str = typer.Option(..., "--split", "-s"),
+     dataset: str = typer.Option("tempo", "--dataset", help=f"Dataset. Available: {', '.join(DATASET_REGISTRY)}"),
+     memory: str = typer.Option("bm25", "--memory", "-m", help=f"Memory provider. Available: {', '.join(MEMORY_REGISTRY)}"),
+     mode: str = typer.Option("rag", "--mode", help=f"Response mode. Available: {', '.join(MODE_REGISTRY)}"),
+     llm: str = typer.Option("gemini", "--llm", help=f"LLM for answer generation. Available: {', '.join(LLM_REGISTRY)}"),
+     category: str = typer.Option(None, "--category", "-c", help="Category filter(s), comma-separated (e.g. 'a,b,c'). With --query-limit, runs N queries per category."),
+     query_limit: int = typer.Option(None, "--query-limit", "-q", help="Max queries to evaluate. When combined with multiple --category values, applies per category."),
+     query_id: str = typer.Option(None, "--query-id", help="Run a single specific query by ID"),
+     unit: str = typer.Option(None, "--unit", help="Run only one isolation unit (by id) with all its questions — e.g. one conversation for beam"),
+     doc_limit: int = typer.Option(None, "--doc-limit", help="Max number of documents to ingest"),
+     oracle: bool = typer.Option(False, "--oracle", help="Ingest only gold documents (bypasses retrieval noise)"),
+     skip_ingestion: bool = typer.Option(False, "--skip-ingestion", help="Skip ingestion and query the existing memory state"),
+     skip_ingested: bool = typer.Option(False, "--skip-ingested", help="Skip units already present in a previous run's output (resume mode for unit-sequential datasets)"),
+     skip_retrieval: bool = typer.Option(False, "--skip-retrieval", help="Skip retrieval and re-run answer generation using cached contexts from the previous run"),
+     skip_answer: bool = typer.Option(False, "--skip-answer", help="Skip retrieval and answer generation entirely — re-judge cached answers from the previous run"),
+     only_failed: bool = typer.Option(False, "--only-failed", help="Restrict queries to those that failed in the previous run"),
+     show_raw: bool = typer.Option(False, "--show-raw", help="Print raw provider response after each query"),
+     output_dir: Path = typer.Option(Path("outputs"), "--output-dir", "-o"),
+     name: str = typer.Option(None, "--name", "-n", help="Run name used as output directory (defaults to memory provider name)"),
+     description: str = typer.Option(None, "--description", "-d", help="Optional description for this run (stored in the result JSON)"),
+ ) -> None:
+     """Run an evaluation on a single split (optionally filtered to a category)."""
+     _resolve_gemini_key()
+ 
+     ds = get_dataset(dataset)
+ 
+     if split not in ds.splits:
+         typer.echo(f"Error: unknown split '{split}'. Available: {', '.join(ds.splits)}", err=True)
+         raise typer.Exit(1)
+ 
+     summary = EvalRunner(output_dir=output_dir).run(
+         dataset=ds,
+         split=split,
+         memory=get_memory_provider(memory),
+         mode=get_mode(mode, llm=get_answer_llm()),
+         category=category,
+         query_limit=query_limit,
+         query_id=query_id,
+         unit=unit,
+         doc_limit=doc_limit,
+         oracle=oracle,
+         skip_ingestion=skip_ingestion,
+         skip_ingested=skip_ingested,
+         skip_retrieval=skip_retrieval,
+         skip_answer=skip_answer,
+         only_failed=only_failed,
+         show_raw=show_raw,
+         run_name=name,
+         description=description,
+     )
+ 
+     cat_label = f"/{category}" if category else ""
+     table = Table(title=f"Results — {dataset}/{split}{cat_label} | {memory} | {mode}")
+     table.add_column("Metric", style="bold")
+     table.add_column("Value", justify="right")
+     table.add_row("Total queries", str(summary.total_queries))
+     table.add_row("Correct", str(summary.correct))
+     table.add_row("Accuracy", f"{summary.accuracy:.1%}")
+     console.print(table)
+     ds.summarize_run(summary.results, console)
+ 
+ 
+ @app.command("dataset-stats")
+ def dataset_stats(
+     dataset: str = typer.Option("tempo", "--dataset", help=f"Dataset. Available: {', '.join(DATASET_REGISTRY)}"),
+     sample_size: int = typer.Option(200, "--sample", help="Docs sampled per split to estimate token density"),
+ ) -> None:
+     """Print dataset-specific statistics."""
+     ds = get_dataset(dataset)
+     ds.dataset_stats(console, sample_size=sample_size)
+ 
+ 
+ @app.command()
+ def splits(
+     dataset: str = typer.Option("tempo", "--dataset", help=f"Dataset. Available: {', '.join(DATASET_REGISTRY)}"),
+ ) -> None:
+     """List available splits for a dataset."""
+     ds = get_dataset(dataset)
+     for s in ds.splits:
+         cats = ds.categories(s)
+         if cats:
+             typer.echo(f"{s}  [{', '.join(cats)}]")
+         else:
+             typer.echo(s)
+ 
+ 
+ @app.command()
+ def providers() -> None:
+     """List all available memory providers and response modes."""
+     console.print("[bold]Datasets:[/bold]",         ", ".join(DATASET_REGISTRY))
+     console.print("[bold]Memory providers:[/bold]", ", ".join(MEMORY_REGISTRY))
+     console.print("[bold]Response modes:[/bold]",   ", ".join(MODE_REGISTRY))
+ 
+ 
+ @app.command("publish-results")
+ def publish_results(
+     result: Path = typer.Argument(..., help="Path to a result file (.json or .json.gz), e.g. outputs/personamem/mem0/rag/32k.json"),
+     push: bool = typer.Option(False, "--push", help="Upload compressed result to Vercel Blob"),
+     token: str = typer.Option(None, "--token", envvar="BLOB_READ_WRITE_TOKEN", help="Vercel Blob token (or set BLOB_READ_WRITE_TOKEN)"),
+     force: bool = typer.Option(False, "--force", "-f", help="Re-upload even if unchanged"),
+ ) -> None:
+     """Compress a single benchmark result and optionally upload to Vercel Blob.
+ 
+     Strips raw_response and gzips to .json.gz. Blob upload is checksum-based
+     so re-running is instant if nothing changed. Always regenerates
+     results-manifest.json from all local .json.gz files.
+ 
+     Workflow:
+         uv run amb publish-results outputs/personamem/mem0/rag/32k.json --push
+         git add outputs/ results-manifest.json && git commit -m 'results: ...' && git push
+     """
+     import gzip as _gzip
+     import hashlib
+     import urllib.request
+ 
+     root = Path(__file__).parents[2]
+     abs_result = (root / result).resolve() if not result.is_absolute() else result.resolve()
+ 
+     if not abs_result.exists():
+         console.print(f"[red]File not found: {abs_result}[/red]")
+         raise typer.Exit(1)
+ 
+     # ── Compress if needed ────────────────────────────────────────────────
+     if abs_result.suffix == ".json" and not abs_result.name.endswith(".json.gz"):
+         try:
+             data = json.loads(abs_result.read_text())
+             results = data.pop("results", [])
+             for r in results:
+                 r.pop("raw_response", None)
+             rec_times  = [r["retrieve_time_ms"] for r in results if r.get("retrieve_time_ms") is not None]
+             ctx_tokens = [r["context_tokens"]   for r in results if r.get("context_tokens")   is not None]
+             data["avg_retrieve_time_ms"] = round(sum(rec_times)  / len(rec_times),  1) if rec_times  else None
+             data["avg_context_tokens"]   = round(sum(ctx_tokens) / len(ctx_tokens), 1) if ctx_tokens else None
+             data["results"] = results
+             gz_path = abs_result.with_suffix(".json.gz")
+             with _gzip.open(gz_path, "wt", compresslevel=9) as fh:
+                 json.dump(data, fh)
+             abs_result.unlink()
+             abs_result = gz_path
+             console.print(f"  [green]✓[/green] compressed → {gz_path.name}")
+         except Exception as e:
+             console.print(f"  [red]✗[/red] compression failed: {e}")
+             raise typer.Exit(1)
+     elif not str(abs_result).endswith(".json.gz"):
+         console.print(f"[red]Expected a .json or .json.gz file, got: {abs_result.name}[/red]")
+         raise typer.Exit(1)
+     else:
+         console.print(f"  [dim]already compressed: {abs_result.name}[/dim]")
+ 
+     # ── Generate results-manifest.json ───────────────────────────────────
+     # Determine outputs dir as the 4-levels-up parent of the result file
+     # (outputs/<dataset>/<memory>/<mode>/<split>.json.gz → parts[-4:])
+     abs_output = abs_result
+     for _ in range(4):
+         abs_output = abs_output.parent
+ 
+     from .server import _list_results
+     import os as _os
+     _os.environ["OMB_OUTPUT_DIR"] = str(abs_output)
+     _os.environ["OMB_ROOT"] = str(root)
+     manifest_entries = _list_results(published_only=True)
+     manifest_out = root / "results-manifest.json"
+     manifest_out.write_text(json.dumps(manifest_entries, indent=2))
+     console.print(f"  [green]✓[/green] results-manifest.json ({len(manifest_entries)} entries)")
+ 
+     if not push:
+         console.print("[dim]Skipping Blob upload (use --push to upload).[/dim]")
+         return
+ 
+     # ── Upload to Vercel Blob ─────────────────────────────────────────────
+     if not token:
+         console.print("[red]BLOB_READ_WRITE_TOKEN not set. Pass --token or add it to .env.[/red]")
+         raise typer.Exit(1)
+ 
+     console.rule("Uploading result to Vercel Blob")
+     blob_manifest_paths = [root / ".blob_manifest.json", root / "blob-manifest.json"]
+     existing_blob_manifest = next((p for p in blob_manifest_paths if p.exists()), None)
+     blob_manifest: dict[str, str] = json.loads(existing_blob_manifest.read_text()) if existing_blob_manifest else {}
+ 
+     rel = str(abs_result.relative_to(root))
+     sha = hashlib.sha256(abs_result.read_bytes()).hexdigest()
+     if not force and blob_manifest.get(rel) == sha:
+         console.print(f"  [dim]unchanged, skipping upload: {rel}[/dim]")
+     else:
+         url = f"https://blob.vercel-storage.com/{rel}?access=public"
+         req = urllib.request.Request(url, data=abs_result.read_bytes(), method="PUT", headers={
+             "Authorization": f"Bearer {token}",
+             "x-api-version": "7",
+             "x-content-type": "application/octet-stream",
+             "Content-Type": "application/octet-stream",
+         })
+         try:
+             with urllib.request.urlopen(req) as resp:
+                 resp_data = json.loads(resp.read())
+             actual_url = resp_data.get("url", "")
+             blob_manifest[rel] = {"sha": sha, "url": actual_url}
+             blob_manifest_json = json.dumps(blob_manifest, indent=2)
+             for blob_manifest_path in blob_manifest_paths:
+                 blob_manifest_path.write_text(blob_manifest_json)
+             console.print(f"  [green]✓[/green] uploaded {rel}")
+         except Exception as e:
+             console.print(f"  [red]✗[/red] upload failed: {e}")
+             raise typer.Exit(1)
+ 
+ 
+ @app.command("unpublish-results")
+ def unpublish_results(
+     result: Path = typer.Argument(..., help="Path to a compressed result file (.json.gz), e.g. outputs/personamem/mem0/rag/32k.json.gz"),
+     push: bool = typer.Option(False, "--push", help="Delete from Vercel Blob as well"),
+     token: str = typer.Option(None, "--token", envvar="BLOB_READ_WRITE_TOKEN", help="Vercel Blob token (or set BLOB_READ_WRITE_TOKEN)"),
+ ) -> None:
+     """Decompress a result back to .json and optionally remove it from Vercel Blob.
+ 
+     Workflow:
+         uv run amb unpublish-results outputs/personamem/mem0/rag/32k.json.gz --push
+         git add outputs/ results-manifest.json && git commit -m 'results: remove ...' && git push
+     """
+     import gzip as _gzip
+     import urllib.request
+ 
+     root = Path(__file__).parents[2]
+     abs_result = (root / result).resolve() if not result.is_absolute() else result.resolve()
+ 
+     if not abs_result.exists():
+         console.print(f"[red]File not found: {abs_result}[/red]")
+         raise typer.Exit(1)
+ 
+     if not str(abs_result).endswith(".json.gz"):
+         console.print(f"[red]Expected a .json.gz file, got: {abs_result.name}[/red]")
+         raise typer.Exit(1)
+ 
+     # ── Decompress ────────────────────────────────────────────────────────
+     try:
+         with _gzip.open(abs_result, "rt") as fh:
+             data = json.load(fh)
+         json_path = abs_result.with_suffix("").with_suffix(".json") if abs_result.name.endswith(".json.gz") else abs_result.with_suffix(".json")
+         json_path.write_text(json.dumps(data, indent=2))
+         abs_result.unlink()
+         console.print(f"  [green]✓[/green] decompressed → {json_path.name}")
+     except Exception as e:
+         console.print(f"  [red]✗[/red] decompression failed: {e}")
+         raise typer.Exit(1)
+ 
+     # ── Regenerate results-manifest.json ─────────────────────────────────
+     abs_output = abs_result
+     for _ in range(4):
+         abs_output = abs_output.parent
+ 
+     from .server import _list_results
+     import os as _os
+     _os.environ["OMB_OUTPUT_DIR"] = str(abs_output)
+     _os.environ["OMB_ROOT"] = str(root)
+     manifest_entries = _list_results(published_only=True)
+     manifest_out = root / "results-manifest.json"
+     manifest_out.write_text(json.dumps(manifest_entries, indent=2))
+     console.print(f"  [green]✓[/green] results-manifest.json ({len(manifest_entries)} entries)")
+ 
+     if not push:
+         console.print("[dim]Skipping Blob deletion (use --push to delete from Blob).[/dim]")
+         return
+ 
+     # ── Delete from Vercel Blob ───────────────────────────────────────────
+     if not token:
+         console.print("[red]BLOB_READ_WRITE_TOKEN not set. Pass --token or add it to .env.[/red]")
+         raise typer.Exit(1)
+ 
+     rel = str(abs_result.relative_to(root))
+     url = f"https://blob.vercel-storage.com/{rel}"
+     req = urllib.request.Request(url, method="DELETE", headers={
+         "Authorization": f"Bearer {token}",
+         "x-api-version": "7",
+     })
+     try:
+         with urllib.request.urlopen(req):
+             pass
+         console.print(f"  [green]✓[/green] deleted from Blob: {rel}")
+     except Exception as e:
+         console.print(f"  [red]✗[/red] Blob deletion failed: {e}")
+         raise typer.Exit(1)
+ 
+     # Remove from local blob manifest
+     blob_manifest_paths = [root / ".blob_manifest.json", root / "blob-manifest.json"]
+     existing_blob_manifest = next((p for p in blob_manifest_paths if p.exists()), None)
+     if existing_blob_manifest:
+         blob_manifest = json.loads(existing_blob_manifest.read_text())
+         blob_manifest.pop(rel, None)
+         blob_manifest_json = json.dumps(blob_manifest, indent=2)
+         for blob_manifest_path in blob_manifest_paths:
+             blob_manifest_path.write_text(blob_manifest_json)
+ 
+ 
+ @app.command("publish-dataset")
+ def publish_dataset(
+     dataset: str = typer.Option(..., "--dataset", "-d", help=f"Dataset to publish. Available: {', '.join(DATASET_REGISTRY)}"),
+     data_dir: Path = typer.Option(Path("data"), "--data-dir"),
+     push: bool = typer.Option(False, "--push", help="Upload to Vercel Blob after export"),
+     token: str = typer.Option(None, "--token", envvar="BLOB_READ_WRITE_TOKEN", help="Vercel Blob token (or set BLOB_READ_WRITE_TOKEN)"),
+     force: bool = typer.Option(False, "--force", "-f", help="Re-export and re-upload even if unchanged"),
+ ) -> None:
+     """Export a dataset to data/ and optionally upload to Vercel Blob.
+ 
+     Idempotent: skips splits already exported unless --force is set.
+     Blob upload skips files whose content hasn't changed (checksum-based).
+ 
+     Workflow (first time or after dataset update):
+         uv run amb publish-dataset --dataset personamem --push
+         git add data/ && git commit -m 'data: export personamem' && git push
+     """
+     import gzip as _gzip
+     import hashlib
+     import urllib.request
+ 
+     root = Path(__file__).parents[2]
+     abs_data = (root / data_dir).resolve()
+ 
+     try:
+         ds = get_dataset(dataset)
+     except ValueError as e:
+         console.print(f"[red]{e}[/red]")
+         raise typer.Exit(1)
+ 
+     # ── Export ────────────────────────────────────────────────────────────
+     info_path = abs_data / dataset / "info.json.gz"
+     info_path.parent.mkdir(parents=True, exist_ok=True)
+     with _gzip.open(info_path, "wt", compresslevel=9) as fh:
+         json.dump({"links": ds.links}, fh)
+ 
+     for split in ds.splits:
+         split_dir = abs_data / dataset / split
+         split_dir.mkdir(parents=True, exist_ok=True)
+         required = ["stats.json.gz", "queries.json.gz", "documents.json.gz"]
+         if not force and all((split_dir / f).exists() for f in required):
+             console.print(f"[dim]{dataset}/{split} — already exported, skipping[/dim]")
+             continue
+ 
+         console.print(f"[bold]{dataset}/{split}[/bold]")
+         try:
+             with console.status("  computing stats…"):
+                 stats = ds.split_stats(split)
+             with _gzip.open(split_dir / "stats.json.gz", "wt", compresslevel=9) as fh:
+                 json.dump(stats, fh)
+             console.print("  [green]✓[/green] stats")
+         except Exception as e:
+             console.print(f"  [red]✗ stats: {e}[/red]")
+ 
+         try:
+             with console.status("  loading queries…"):
+                 queries = ds.load_queries(split)
+             qs = [{"id": q.id, "query": q.query, "gold_answers": q.gold_answers,
+                    "gold_ids": q.gold_ids, "user_id": q.user_id, "meta": q.meta}
+                   for q in queries]
+             with _gzip.open(split_dir / "queries.json.gz", "wt", compresslevel=9) as fh:
+                 json.dump(qs, fh)
+             cats = ds.categories(split)
+             if cats:
+                 with console.status("  building category index…"):
+                     cat_index = {cat: [q.id for q in ds.load_queries(split, category=cat)] for cat in cats}
+                 with _gzip.open(split_dir / "categories.json.gz", "wt", compresslevel=9) as fh:
+                     json.dump(cat_index, fh)
+             console.print(f"  [green]✓[/green] {len(qs)} queries" + (f" · {len(cats)} categories" if cats else ""))
+         except Exception as e:
+             console.print(f"  [red]✗ queries: {e}[/red]")
+ 
+         try:
+             with console.status("  loading documents…"):
+                 docs = ds.load_documents(split)
+             docs_list = [{"id": d.id, "content": d.content, "user_id": d.user_id, "timestamp": d.timestamp}
+                           for d in docs]
+             with _gzip.open(split_dir / "documents.json.gz", "wt", compresslevel=9) as fh:
+                 json.dump(docs_list, fh)
+             console.print(f"  [green]✓[/green] {len(docs_list)} documents")
+         except Exception as e:
+             console.print(f"  [red]✗ documents: {e}[/red]")
+ 
+     # ── Regenerate catalog.json ───────────────────────────────────────────
+     import os as _os
+     _os.environ.setdefault("OMB_DATA_DIR", str(abs_data))
+     _os.environ.setdefault("OMB_ROOT", str(root))
+     from .server import _generate_catalog
+     catalog_out = root / "catalog.json"
+     catalog_out.write_text(json.dumps(_generate_catalog(), indent=2))
+     console.print(f"  [green]✓[/green] catalog.json updated")
+ 
+     if not push:
+         console.print("\n[dim]Skipping Blob upload (use --push to upload).[/dim]")
+         return
+ 
+     # ── Upload to Vercel Blob ─────────────────────────────────────────────
+     console.rule("Uploading to Vercel Blob")
+     if not token:
+         console.print("[red]BLOB_READ_WRITE_TOKEN not set. Pass --token or add it to .env.[/red]")
+         raise typer.Exit(1)
+ 
+     manifest_path = root / ".blob_manifest.json"
+     manifest: dict[str, str] = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+ 
+     files = sorted((abs_data / dataset).rglob("*.json.gz"))
+     uploaded = skipped = errors = 0
+     for f in files:
+         rel = str(f.relative_to(root))
+         sha = hashlib.sha256(f.read_bytes()).hexdigest()
+         if not force and manifest.get(rel) == sha:
+             skipped += 1
+             continue
+         url = f"https://blob.vercel-storage.com/{rel}?access=public"
+         req = urllib.request.Request(url, data=f.read_bytes(), method="PUT", headers={
+             "Authorization": f"Bearer {token}",
+             "x-api-version": "7",
+             "x-content-type": "application/octet-stream",
+             "Content-Type": "application/octet-stream",
+         })
+         try:
+             with urllib.request.urlopen(req):
+                 pass
+             manifest[rel] = sha
+             console.print(f"  [green]✓[/green] {rel}")
+             uploaded += 1
+         except Exception as e:
+             console.print(f"  [red]✗[/red] {rel}: {e}")
+             errors += 1
+ 
+     manifest_path.write_text(json.dumps(manifest, indent=2))
+     console.print(f"\n[bold]{uploaded} uploaded, {skipped} unchanged, {errors} errors.[/bold]")
+ 
+ 
+ @app.command("unpublish-dataset")
+ def unpublish_dataset(
+     dataset: str = typer.Argument(..., help=f"Dataset to unpublish. Available: {', '.join(DATASET_REGISTRY)}"),
+     data_dir: Path = typer.Option(Path("data"), "--data-dir"),
+     push: bool = typer.Option(False, "--push", help="Delete from Vercel Blob as well"),
+     token: str = typer.Option(None, "--token", envvar="BLOB_READ_WRITE_TOKEN", help="Vercel Blob token (or set BLOB_READ_WRITE_TOKEN)"),
+ ) -> None:
+     """Remove a dataset's exported files from data/ and optionally from Vercel Blob.
+ 
+     Workflow:
+         uv run amb unpublish-dataset ama-bench --push
+         git add data/ && git commit -m 'data: remove ama-bench' && git push
+     """
+     import shutil
+     import urllib.request
+ 
+     root = Path(__file__).parents[2]
+     abs_data = (root / data_dir).resolve()
+     dataset_dir = abs_data / dataset
+ 
+     if not dataset_dir.exists():
+         console.print(f"[yellow]No local data found for {dataset!r} at {dataset_dir}[/yellow]")
+     else:
+         # Collect files before deleting so we can remove them from Blob
+         local_files = sorted(dataset_dir.rglob("*.json.gz"))
+         shutil.rmtree(dataset_dir)
+         console.print(f"  [green]✓[/green] removed {dataset_dir.relative_to(root)} ({len(local_files)} files)")
+ 
+         if push:
+             if not token:
+                 console.print("[red]BLOB_READ_WRITE_TOKEN not set. Pass --token or add it to .env.[/red]")
+                 raise typer.Exit(1)
+ 
+             console.rule("Deleting from Vercel Blob")
+             blob_manifest_path = root / ".blob_manifest.json"
+             blob_manifest: dict[str, str] = json.loads(blob_manifest_path.read_text()) if blob_manifest_path.exists() else {}
+ 
+             deleted = errors = 0
+             for f in local_files:
+                 rel = str(f.relative_to(root))
+                 url = f"https://blob.vercel-storage.com/{rel}"
+                 req = urllib.request.Request(url, method="DELETE", headers={
+                     "Authorization": f"Bearer {token}",
+                     "x-api-version": "7",
+                 })
+                 try:
+                     with urllib.request.urlopen(req):
+                         pass
+                     blob_manifest.pop(rel, None)
+                     console.print(f"  [green]✓[/green] deleted {rel}")
+                     deleted += 1
+                 except Exception as e:
+                     console.print(f"  [red]✗[/red] {rel}: {e}")
+                     errors += 1
+ 
+             blob_manifest_path.write_text(json.dumps(blob_manifest, indent=2))
+             console.print(f"\n[bold]{deleted} deleted, {errors} errors.[/bold]")
+         else:
+             console.print("[dim]Skipping Blob deletion (use --push to delete from Blob).[/dim]")
+ 
+     # ── Regenerate catalog.json ───────────────────────────────────────────
+     import os as _os
+     _os.environ["OMB_DATA_DIR"] = str(abs_data)
+     _os.environ["OMB_ROOT"] = str(root)
+     from .server import _generate_catalog
+     catalog_out = root / "catalog.json"
+     catalog_out.write_text(json.dumps(_generate_catalog(), indent=2))
+     console.print(f"  [green]✓[/green] catalog.json updated")
+ 
+ 
+ @app.command()
+ def compress(
+     output_dir: Path = typer.Option(Path("outputs"), "--output-dir", "-o"),
+     keep: bool = typer.Option(False, "--keep", help="Keep original .json files after compression"),
+ ) -> None:
+     """Compress result files for git: strips raw_response, gzips to .json.gz.
+ 
+     Run this before pushing results. The viewer transparently serves .json.gz
+     when the original .json is absent.
+     """
+     import gzip as _gzip
+ 
+     root = Path(__file__).parents[2]
+     abs_output = (root / output_dir).resolve()
+ 
+     if not abs_output.exists():
+         typer.echo(f"Output directory not found: {abs_output}", err=True)
+         raise typer.Exit(1)
+ 
+     files = sorted(f for f in abs_output.rglob("*.json")
+                    if len(f.relative_to(abs_output).parts) == 4
+                    and not f.name.endswith(".bak"))
+ 
+     if not files:
+         console.print("[yellow]No result files found.[/yellow]")
+         return
+ 
+     table = Table(title=f"Compressed results in {output_dir}")
+     table.add_column("File", style="dim")
+     table.add_column("Original", justify="right")
+     table.add_column("Compressed", justify="right")
+     table.add_column("Ratio", justify="right")
+ 
+     for f in files:
+         try:
+             data = json.loads(f.read_text())
+             results = data.pop("results", [])
+             for r in results:
+                 r.pop("raw_response", None)
+             # Inject/refresh top-level aggregate stats so the manifest scanner picks them up
+             # (written before 'results' so they appear in the first 512 bytes of the gz file)
+             rec_times  = [r["retrieve_time_ms"] for r in results if r.get("retrieve_time_ms") is not None]
+             ctx_tokens = [r["context_tokens"]   for r in results if r.get("context_tokens")   is not None]
+             data["avg_retrieve_time_ms"] = round(sum(rec_times)  / len(rec_times),  1) if rec_times  else None
+             data["avg_context_tokens"]   = round(sum(ctx_tokens) / len(ctx_tokens), 1) if ctx_tokens else None
+             data["results"] = results
+             gz_path = f.with_suffix(".json.gz")
+             with _gzip.open(gz_path, "wt", compresslevel=9) as fh:
+                 json.dump(data, fh)
+             orig_mb = f.stat().st_size / 1024 / 1024
+             gz_mb = gz_path.stat().st_size / 1024 / 1024
+             table.add_row(
+                 str(f.relative_to(abs_output)),
+                 f"{orig_mb:.1f} MB",
+                 f"{gz_mb:.1f} MB",
+                 f"{gz_mb / orig_mb:.1%}",
+             )
+             if not keep:
+                 f.unlink()
+         except Exception as e:
+             console.print(f"[red]Error compressing {f}: {e}[/red]")
+ 
+     console.print(table)
+     if not keep:
+         console.print("[dim]Original .json files removed. Run with --keep to retain them.[/dim]")
+ 
+ 
+ @app.command("export-data")
+ def export_data(
+     dataset: str = typer.Option(None, "--dataset", "-d", help=f"Dataset to export. Available: {', '.join(DATASET_REGISTRY)}. Default: all published."),
+     data_dir: Path = typer.Option(Path("data"), "--data-dir", help="Output directory for exported data files"),
+     force: bool = typer.Option(False, "--force", "-f", help="Re-export even if files already exist"),
+ ) -> None:
+     """Download and export published dataset files to gzipped JSON for deployment.
+ 
+     By default exports all datasets marked published=True and skips splits
+     that already have all files. Run with --force to re-export everything.
+     The generated files are committed to git alongside the result outputs.
+     """
+     import gzip as _gzip
+ 
+     root = Path(__file__).parents[2]
+     abs_data = (root / data_dir).resolve()
+ 
+     if dataset:
+         names = [dataset]
+     else:
+         names = [n for n, cls in DATASET_REGISTRY.items() if cls.published]
+ 
+     for ds_name in names:
+         try:
+             ds = get_dataset(ds_name)
+         except ValueError as e:
+             console.print(f"[red]{e}[/red]")
+             continue
+ 
+         # Dataset-level info (links)
+         info_path = abs_data / ds_name / "info.json.gz"
+         info_path.parent.mkdir(parents=True, exist_ok=True)
+         with _gzip.open(info_path, "wt", compresslevel=9) as fh:
+             json.dump({"links": ds.links}, fh)
+ 
+         for split in ds.splits:
+             split_dir = abs_data / ds_name / split
+             split_dir.mkdir(parents=True, exist_ok=True)
+ 
+             # Skip if all files already exist and --force not set
+             required = ["stats.json.gz", "queries.json.gz", "documents.json.gz"]
+             if not force and all((split_dir / f).exists() for f in required):
+                 console.print(f"[dim]{ds_name}/{split} — already exported, skipping[/dim]")
+                 continue
+ 
+             console.print(f"[bold]{ds_name}/{split}[/bold]")
+ 
+             # Stats
+             try:
+                 with console.status("  computing stats…"):
+                     stats = ds.split_stats(split)
+                 with _gzip.open(split_dir / "stats.json.gz", "wt", compresslevel=9) as fh:
+                     json.dump(stats, fh)
+                 console.print(f"  [green]✓[/green] stats")
+             except Exception as e:
+                 console.print(f"  [red]✗ stats: {e}[/red]")
+ 
+             # Queries (all + per-category index)
+             try:
+                 with console.status("  loading queries…"):
+                     queries = ds.load_queries(split)
+                 qs = [{"id": q.id, "query": q.query, "gold_answers": q.gold_answers,
+                        "gold_ids": q.gold_ids, "user_id": q.user_id, "meta": q.meta}
+                       for q in queries]
+                 with _gzip.open(split_dir / "queries.json.gz", "wt", compresslevel=9) as fh:
+                     json.dump(qs, fh)
+                 cats = ds.categories(split)
+                 if cats:
+                     with console.status("  building category index…"):
+                         cat_index = {cat: [q.id for q in ds.load_queries(split, category=cat)]
+                                      for cat in cats}
+                     with _gzip.open(split_dir / "categories.json.gz", "wt", compresslevel=9) as fh:
+                         json.dump(cat_index, fh)
+                 console.print(f"  [green]✓[/green] {len(qs)} queries" +
+                                (f" · {len(cats)} categories" if cats else ""))
+             except Exception as e:
+                 console.print(f"  [red]✗ queries: {e}[/red]")
+ 
+             # Documents
+             try:
+                 with console.status("  loading documents…"):
+                     docs = ds.load_documents(split)
+                 docs_list = [{"id": d.id, "content": d.content,
+                                "user_id": d.user_id, "timestamp": d.timestamp}
+                               for d in docs]
+                 with _gzip.open(split_dir / "documents.json.gz", "wt", compresslevel=9) as fh:
+                     json.dump(docs_list, fh)
+                 console.print(f"  [green]✓[/green] {len(docs_list)} documents")
+             except Exception as e:
+                 console.print(f"  [red]✗ documents: {e}[/red]")
+ 
+ 
+ @app.command("upload-blob")
+ def upload_blob(
+     data_dir: Path = typer.Option(Path("data"), "--data-dir", help="Local data directory to upload"),
+     dataset: str = typer.Option(None, "--dataset", "-d", help="Only upload a specific dataset"),
+     token: str = typer.Option(None, "--token", envvar="BLOB_READ_WRITE_TOKEN", help="Vercel Blob read-write token"),
+ ) -> None:
+     """Upload data/ files to Vercel Blob for public deployment.
+ 
+     Run this after 'amb export-data' to make dataset files available on Vercel.
+     Requires BLOB_READ_WRITE_TOKEN env var or --token option.
+     """
+     import urllib.request
+ 
+     if not token:
+         console.print("[red]Error: BLOB_READ_WRITE_TOKEN not set. Pass --token or set the env var.[/red]")
+         raise typer.Exit(1)
+ 
+     root = Path(__file__).parents[2]
+     abs_data = (root / data_dir).resolve()
+ 
+     if not abs_data.exists():
+         console.print(f"[red]Data directory not found: {abs_data}[/red]")
+         raise typer.Exit(1)
+ 
+     files = sorted(abs_data.rglob("*.json.gz"))
+     if dataset:
+         files = [f for f in files if f.relative_to(abs_data).parts[0] == dataset]
+ 
+     if not files:
+         console.print("[yellow]No .json.gz files found to upload.[/yellow]")
+         return
+ 
+     success = 0
+     for f in files:
+         rel = str(f.relative_to(root))  # e.g. data/personamem/32k/docs.json.gz
+         url = f"https://blob.vercel-storage.com/{rel}?access=public"
+         req = urllib.request.Request(
+             url,
+             data=f.read_bytes(),
+             method="PUT",
+             headers={
+                 "Authorization": f"Bearer {token}",
+                 "x-api-version": "7",
+                 "x-content-type": "application/octet-stream",
+                 "Content-Type": "application/octet-stream",
+             },
+         )
+         try:
+             with urllib.request.urlopen(req):
+                 pass
+             console.print(f"  [green]✓[/green] {rel}")
+             success += 1
+         except Exception as e:
+             console.print(f"  [red]✗[/red] {rel}: {e}")
+ 
+     console.print(f"\n[bold]{success}/{len(files)} files uploaded.[/bold]")
+ 
+ 
+ @app.command()
+ def view(
+     output_dir: Path = typer.Option(Path("outputs"), "--output-dir", "-o"),
+     port: int = typer.Option(7979, "--port", "-p"),
+     reload: bool = typer.Option(True, "--reload/--no-reload", help="Auto-reload server on code changes"),
+     dev: bool = typer.Option(False, "--dev", help="Start Vite dev server alongside the API (hot-reload UI)"),
+ ) -> None:
+     """Launch the result viewer in the browser. Watches for new results automatically."""
+     import subprocess
+     import uvicorn
+     root = Path(__file__).parents[2]
+     abs_output = (root / output_dir).resolve()
+ 
+     os.environ["OMB_OUTPUT_DIR"] = str(abs_output)
+     os.environ["OMB_ROOT"] = str(root)
+ 
+     vite_proc = None
+     if dev:
+         ui_dir = root / "ui"
+         if not ui_dir.exists():
+             console.print("[red]ui/ directory not found. Cannot start dev server.[/red]")
+             raise typer.Exit(1)
+         vite_proc = subprocess.Popen(
+             ["npm", "run", "dev"],
+             cwd=str(ui_dir),
+             stdout=subprocess.DEVNULL,
+             stderr=subprocess.DEVNULL,
+         )
+         url = "http://localhost:5173"
+         console.print(f"[green]Viewer → {url}[/green]  (Vite dev server + FastAPI on :{port})")
+         console.print("[dim]  Vite hot-reload enabled.[/dim]")
+     else:
+         url = f"http://localhost:{port}"
+         console.print(f"[green]Viewer → {url}[/green]  (Ctrl+C to stop)")
+         if reload:
+             console.print("[dim]  Hot-reload enabled.[/dim]")
+ 
+     threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+ 
+     try:
+         uvicorn.run(
+             "memory_bench.server:app",
+             host="0.0.0.0",
+             port=port,
+             reload=reload,
+             reload_dirs=[str(Path(__file__).parent)] if reload else None,
+             log_level="warning",
+         )
+     finally:
+         if vite_proc is not None:
+             vite_proc.terminate()
+diff --git a/src/memory_bench/dataset/base.py b/src/memory_bench/dataset/base.py
+index 94a4062..6bbbed3 100644
+--- a/src/memory_bench/dataset/base.py
++++ b/src/memory_bench/dataset/base.py
+@@ -1,208 +1,218 @@
+ from abc import ABC, abstractmethod
+ from typing import Literal
+ 
+ from ..models import Document, Query
+ from ..utils import count_tokens
+ 
+ _DEFAULT_OPEN_PROMPT = """\
+ You are a helpful assistant. Answer the following question based ONLY on the provided context.
+ 
+ Context:
+ {context}
+ 
+ Question: {query}
+ 
+ Think step by step about what the context says, then provide your answer.\
+ """
+ 
+ _DEFAULT_MCQ_PROMPT = """\
+ You are a helpful assistant. Based ONLY on the provided context, choose the best answer to the question below.
+ 
+ Important: wherever the context refers to "user", it refers to the same person named in the question.
+ 
+ Context:
+ {context}
+ 
+ Question and options:
+ {query}
+ 
+ Think step by step using the context. Focus on what is UNIQUELY true about this specific user — \
+ pay special attention to documented pain points, past frustrations, and explicit preferences, \
+ not just general background traits. The best option is the one most precisely grounded in the \
+ user's specific documented experiences, not the one that merely fits their general profile.\
+ """
+ 
+ 
+ class Dataset(ABC):
+     name: str
+     description: str
+     splits: list[str]
+     task_type: Literal["open", "mcq", "coding", "retrieval"] = "open"
+     isolation_unit: str | None = None
+     links: list[dict] = []
+     published: bool = False
+     """Named links for the dataset, e.g. [{"label": "Paper", "url": "https://arxiv.org/..."}]."""
+     """Semantic name of the storage isolation unit, e.g. 'episode' or 'session'.
+     When set, memory providers may create separate storage per unit (e.g. one bank
+     per episode). None means no meaningful isolation boundary exists."""
+ 
+     def get_isolation_id(self, doc: Document) -> str | None:
+         """Return the isolation unit ID for a document.
+ 
+         The runner uses this to collect all unit IDs before calling prepare(), so
+         providers can set up per-unit storage upfront. Also used to determine the
+         user_id passed to ingest/retrieve.
+ 
+         Default: doc.user_id. Override when the isolation key comes from elsewhere
+         (e.g. doc.id, or a field in doc.messages)."""
+         return doc.user_id
+ 
+     def categories(self, split: str) -> list[str] | None:
+         """Return the list of category names for a split, or None if not applicable."""
+         return None
+ 
+     def category_type(self, split: str, category: str) -> Literal["doc", "query"]:
+         """Return whether a category partitions documents ('doc') or is query-only ('query').
+ 
+         'doc'   — category partitions the document space; per-category doc/token counts are meaningful.
+         'query' — category is a query-level filter only; doc/token counts would equal the full split.
+         """
+         return "doc"
+ 
+     @abstractmethod
+     def load_queries(
+         self,
+         split: str,
+         category: str | None = None,
+         limit: int | None = None,
+     ) -> list[Query]:
+         """Load queries for a split. If category given, filter to that subset."""
+         ...
+ 
+     @abstractmethod
+     def load_documents(
+         self,
+         split: str,
+         category: str | None = None,
+         limit: int | None = None,
+         ids: set[str] | None = None,
+         user_ids: set[str] | None = None,
+     ) -> list[Document]:
+         """Load documents for a split. If ids is provided, return only those documents.
+         If user_ids is provided, return only documents belonging to those users/units."""
+         ...
+ 
+     def split_stats(self, split: str) -> dict:
+         """Return query/doc counts, token stats, and per-category breakdown."""
+         queries = self.load_queries(split)
+         docs = self.load_documents(split)
+         token_counts = [count_tokens(d.content) for d in docs]
+         total_tokens = sum(token_counts)
+         avg_tokens = total_tokens // len(token_counts) if token_counts else 0
+         stats: dict = {
+             "queries": len(queries),
+             "docs": len(docs),
+             "total_tokens": total_tokens,
+             "avg_tokens_per_doc": avg_tokens,
+         }
+         cats = self.categories(split)
+         if cats:
+             breakdown: dict[str, dict] = {}
+             for cat in cats:
+                 cat_queries = self.load_queries(split, category=cat)
+                 cat_type = self.category_type(split, cat)
+                 if cat_type == "query":
+                     breakdown[cat] = {
+                         "type": "query",
+                         "queries": len(cat_queries),
+                         "docs": None,
+                         "total_tokens": None,
+                         "avg_tokens_per_doc": None,
+                     }
+                 else:
+                     cat_docs = self.load_documents(split, ids={gid for q in cat_queries for gid in q.gold_ids})
+                     cat_tokens = [count_tokens(d.content) for d in cat_docs]
+                     total = sum(cat_tokens)
+                     breakdown[cat] = {
+                         "type": "doc",
+                         "queries": len(cat_queries),
+                         "docs": len(cat_docs),
+                         "total_tokens": total,
+                         "avg_tokens_per_doc": total // len(cat_tokens) if cat_tokens else 0,
+                     }
+             stats["categories"] = breakdown
+         return stats
+ 
+     def build_rag_prompt(
+         self,
+         query: str,
+         context: str,
+         task_type: str,
+         split: str,
+         category: str | None = None,
+         meta: dict | None = None,
+     ) -> str:
+         """Build the RAG answer prompt. Override per-dataset for custom prompting."""
+         if task_type == "mcq":
+             return _DEFAULT_MCQ_PROMPT.format(context=context, query=query)
+         return _DEFAULT_OPEN_PROMPT.format(context=context, query=query)
+ 
+     def build_judge_prompt(self, query: str, gold_answers: list[str], answer: str) -> str:
+         """Build the judge prompt for evaluating an answer. Override per-dataset for custom judging."""
+         return None  # None means use the default judge prompt in GeminiJudge
+ 
+     def default_judge_llm(self):
+         """Return the preferred LLM for judging this dataset, or None to use the global default."""
+         return None
+ 
+     def get_result_categories(self, meta: dict) -> dict[str, list[str]]:
+         """Return category axes for a result based on its meta dict.
+ 
+         Returns a dict mapping axis name → list of category values.
+         Used to annotate QueryResult.category_axes for breakdown and filtering.
+         Default: uses meta["category"] if present. Override per dataset.
+         """
+         c = meta.get("category")
+         return {"Category": [c]} if c else {}
+ 
+     def supports_oracle(self) -> bool:
+         """Return True if this dataset provides gold_ids for oracle mode."""
+         return True
+ 
+     def extraction_labels(self) -> list[dict] | None:
+         """Controlled vocabularies the memory provider should classify each fact against.
+ 
+         Provider-neutral shape, modelled on Hindsight's bank `entity_labels`:
+             [{"key": "state", "type": "value", "tag": True, "optional": False,
+               "description": "...", "values": [{"value": "...", "description": "..."}]}]
+         A provider that supports extraction-time classification turns these into filterable
+         labels; others ignore them. Returning None means no classification is requested."""
+         return None
+ 
++    def score_retrieval(self, query: "Query", docs: list) -> tuple[bool, str]:
++        """Default scorer for `--mode retrieval` on an answer-scored dataset: no LLM and no
++        judge, pass when a gold document is among the retrieved memories' sources. The full
++        ranked list is kept in the result's meta["retrieved"] for finer endpoints."""
++        gold = set(query.gold_ids or [])
++        if not gold:
++            return False, "no gold_ids for this query"
++        ranks = [i + 1 for i, d in enumerate(docs) if gold & set(getattr(d, "source_ids", None) or [])]
++        return bool(ranks), f"first gold rank={ranks[0] if ranks else None} of {len(docs)}"
++
+     def retrieval_filter(self, query: "Query") -> dict | None:
+         """Provider-neutral hard filter for this query, or None for no filtering.
+ 
+         Shape: {"all": [...], "any": [[...], [...]], "none": [...]} over ingest-time tags
+         (see Document.tags) — `all` tags must all be present, each `any` group needs at least
+         one match, and no `none` tag may be present. Only passed to providers that declare
+         supports_filters."""
+         return None
+ 
+     def summary_metrics(self, results: list) -> dict:
+         """Extra headline numbers for this dataset, stored alongside accuracy and shown by
+         the viewer. Default: none.
+ 
+         For datasets whose single accuracy figure hides the thing that matters — a retrieval
+         benchmark where returning everything scores well on recall and badly on precision —
+         this is where the honest pair goes."""
+         return {}
+ 
+     def summarize_run(self, results: list, console) -> None:
+         """Print a dataset-specific summary of a finished run. Default: nothing extra.
+ 
+         Datasets whose headline number needs more than accuracy (PrecisionMemBench's
+         active/structural pass split, say) override this."""
+ 
+     def dataset_stats(self, console) -> None:
+         """Print dataset-specific statistics. Implement per dataset."""
+         raise NotImplementedError(f"Dataset '{self.name}' does not implement dataset_stats()")
+diff --git a/src/memory_bench/llm/__init__.py b/src/memory_bench/llm/__init__.py
+index 99be8ec..f93f2b5 100644
+--- a/src/memory_bench/llm/__init__.py
++++ b/src/memory_bench/llm/__init__.py
+@@ -1,40 +1,48 @@
+ import os
+ 
++from .anthropic import AnthropicLLM
+ from .base import LLM, Schema
+ from .gemini import GeminiLLM
+ from .groq import GroqLLM
+ from .openai import OpenAILLM
+ 
+ REGISTRY: dict[str, type[LLM]] = {
+     "gemini": GeminiLLM,
+     "groq": GroqLLM,
+     "openai": OpenAILLM,
++    "anthropic": AnthropicLLM,
+ }
+ 
+ 
+ def get_llm(name: str = "gemini") -> LLM:
+     if name not in REGISTRY:
+         raise ValueError(f"Unknown LLM: '{name}'. Available: {list(REGISTRY)}")
+     return REGISTRY[name]()
+ 
+ 
+ def get_answer_llm() -> LLM:
+     """Return the LLM to use for RAG answer generation.
+     Configured via OMB_ANSWER_LLM (provider) and OMB_ANSWER_MODEL (optional model override)."""
+     provider = os.environ.get("OMB_ANSWER_LLM", "groq")
+     model = os.environ.get("OMB_ANSWER_MODEL")
+     cls = REGISTRY.get(provider)
+     if cls is None:
+         raise ValueError(f"Unknown OMB_ANSWER_LLM: '{provider}'. Available: {list(REGISTRY)}")
+-    return cls(model) if model else cls()
++    llm = cls(model) if model else cls()
++    if hasattr(llm, "configure"):
++        llm.configure("answer")
++    return llm
+ 
+ 
+ def get_judge_llm() -> LLM:
+     """Return the LLM to use for evaluation/judging.
+     Configured via OMB_JUDGE_LLM (provider) and OMB_JUDGE_MODEL (optional model override)."""
+     provider = os.environ.get("OMB_JUDGE_LLM", "gemini")
+     model = os.environ.get("OMB_JUDGE_MODEL")
+     cls = REGISTRY.get(provider)
+     if cls is None:
+         raise ValueError(f"Unknown OMB_JUDGE_LLM: '{provider}'. Available: {list(REGISTRY)}")
+-    return cls(model) if model else cls()
++    llm = cls(model) if model else cls()
++    if hasattr(llm, "configure"):
++        llm.configure("judge")
++    return llm
+diff --git a/src/memory_bench/llm/anthropic.py b/src/memory_bench/llm/anthropic.py
+new file mode 100644
+index 0000000..33321fa
+--- /dev/null
++++ b/src/memory_bench/llm/anthropic.py
+@@ -0,0 +1,102 @@
++import json
++import logging
++import os
++import threading
++import time
++
++from .base import LLM, Schema
++
++logger = logging.getLogger(__name__)
++
++#: Optional JSONL file every call's token usage is appended to, one line per call,
++#: so a run's answer and judge spend can be priced from its own record.
++_USAGE_LOG = os.environ.get("OMB_USAGE_LOG")
++_USAGE_LOCK = threading.Lock()
++
++_MAX_ATTEMPTS = 3
++
++
++class AnthropicLLM(LLM):
++    """Claude via the Anthropic Messages API, with structured JSON output.
++
++    Current Claude models reject non-default sampling parameters, so there is no
++    temperature=0 or seed here: repeated runs are not bit-reproducible, and repeats
++    have to be compared as rates. Thinking is the model's default (adaptive);
++    `OMB_<ROLE>_EFFORT` (low|medium|high|xhigh|max) sets its depth per role."""
++
++    def __init__(self, model: str = "claude-haiku-5-5"):
++        import anthropic
++
++        self._client = anthropic.Anthropic(max_retries=6)
++        self._model = model
++        self._role = "llm"
++        self._effort: str | None = None
++
++    def configure(self, role: str) -> None:
++        self._role = role
++        self._effort = os.environ.get(f"OMB_{role.upper()}_EFFORT") or None
++
++    @property
++    def model_id(self) -> str:
++        return f"anthropic:{self._model}" + (f"@{self._effort}" if self._effort else "")
++
++    def generate(self, prompt: str, schema: Schema) -> dict:
++        output_config: dict = {
++            "format": {
++                "type": "json_schema",
++                "schema": {
++                    "type": "object",
++                    "properties": schema.properties,
++                    "required": schema.required,
++                    "additionalProperties": False,
++                },
++            }
++        }
++        if self._effort:
++            output_config["effort"] = self._effort
++        last_problem = ""
++        for attempt in range(_MAX_ATTEMPTS):
++            response = self._client.messages.create(
++                model=self._model,
++                max_tokens=16000,
++                messages=[{"role": "user", "content": prompt}],
++                output_config=output_config,
++            )
++            self._log_usage(response)
++            if response.stop_reason == "refusal":
++                category = getattr(getattr(response, "stop_details", None), "category", None)
++                last_problem = f"refusal ({category})"
++                break  # a refusal repeats; retrying spends the same tokens again
++            text = "".join(b.text for b in response.content if b.type == "text")
++            try:
++                return json.loads(text)
++            except json.JSONDecodeError:
++                last_problem = f"unparseable output (stop_reason={response.stop_reason})"
++                logger.warning("[anthropic] %s, attempt %d/%d", last_problem, attempt + 1, _MAX_ATTEMPTS)
++                time.sleep(2)
++        # Typed placeholders, never a truthy string where a boolean is expected: a judge
++        # that could not answer must not count as a pass.
++        logger.error("[anthropic] %s for %s; returning a failing placeholder", last_problem, self._role)
++        filler = {"boolean": False, "integer": 0, "number": 0}
++        return {
++            name: filler.get(spec.get("type", "string"), f"[{self._role} unavailable: {last_problem}]")
++            for name, spec in schema.properties.items()
++        }
++
++    def _log_usage(self, response) -> None:
++        if not _USAGE_LOG:
++            return
++        u = response.usage
++        row = {
++            "ts": time.time(),
++            "role": self._role,
++            "model": self._model,
++            "effort": self._effort,
++            "input_tokens": u.input_tokens,
++            "output_tokens": u.output_tokens,
++            "cache_read_input_tokens": getattr(u, "cache_read_input_tokens", 0) or 0,
++            "cache_creation_input_tokens": getattr(u, "cache_creation_input_tokens", 0) or 0,
++            "stop_reason": response.stop_reason,
++        }
++        with _USAGE_LOCK, open(_USAGE_LOG, "a", encoding="utf-8") as f:
++            f.write(json.dumps(row) + "\n")
+diff --git a/src/memory_bench/memory/hindsight.py b/src/memory_bench/memory/hindsight.py
+index d6c81b9..649db53 100644
+--- a/src/memory_bench/memory/hindsight.py
++++ b/src/memory_bench/memory/hindsight.py
+@@ -1,1284 +1,1384 @@
+ import asyncio
+ import os
+ import time
+ from pathlib import Path
+ 
+ from ..models import Document
+ from .base import MemoryProvider
+ 
+ # Workaround: hindsight-client passes async_= but the model expects var_async=
+ # This monkey-patch fixes RetainRequest so async_=True actually works.
+ try:
+     from hindsight_client_api.models.retain_request import RetainRequest as _RR
+     _orig_init = _RR.__init__
+     def _patched_init(self, *args, **kwargs):
+         if "async_" in kwargs and "var_async" not in kwargs:
+             kwargs["var_async"] = kwargs.pop("async_")
+         _orig_init(self, *args, **kwargs)
+     _RR.__init__ = _patched_init
+ except Exception:
+     pass
+ 
+ 
+ # Workaround: hindsight-client 0.9.2 lazily imports RecallRequestTagGroupsInner from
+ # hindsight_client_api.models.recall_request_tag_groups_inner when a recall passes
+ # tag_groups, but codegen never emitted that module — RecallRequest.tag_groups is in fact
+ # typed as MentalModelTriggerInputTagGroupsInner, the identical generated union. Register
+ # the missing module as an alias so tag_groups recall works.
+ try:
+     import sys as _sys
+     import hindsight_client_api.models as _hs_models
+     if not hasattr(_hs_models, "recall_request_tag_groups_inner"):
+         import types as _types
+         from hindsight_client_api.models.mental_model_trigger_input_tag_groups_inner import (
+             MentalModelTriggerInputTagGroupsInner as _TagGroupsInner,
+         )
+         _mod = _types.ModuleType("hindsight_client_api.models.recall_request_tag_groups_inner")
+         _mod.RecallRequestTagGroupsInner = _TagGroupsInner
+         _sys.modules[_mod.__name__] = _mod
+ except Exception:
+     pass
+ 
+ 
++#: AMB_ENABLE_OBSERVATIONS=1 creates banks with observations on and waits, after ingest,
++#: until consolidation has drained, so no query runs against a half-consolidated bank.
++_OBSERVATIONS = os.environ.get("AMB_ENABLE_OBSERVATIONS", "").lower() in ("1", "true")
++#: Frozen banks: AMB_BANK_ARCHIVE_MODE=export writes each unit bank, once ingested, to
++#: AMB_BANK_ARCHIVE_DIR/<bank_id>.zip (Hindsight transfer export); =import restores it from
++#: there instead of retaining, so every arm reads the same extracted facts and no extraction
++#: LLM call is made.
++_ARCHIVE_MODE = os.environ.get("AMB_BANK_ARCHIVE_MODE", "")
++_ARCHIVE_DIR = Path(os.environ.get("AMB_BANK_ARCHIVE_DIR", "bank-archives"))
++_IMPORT_STAGING_BANK = "amb-import-staging"  # a restore is recorded against an existing bank
++
++
+ def _as_recall_response(payload: dict):
+     """Wrap a raw /memories/recall JSON body in the attribute shape the client returns.
+ 
+     Used for recall parameters the installed hindsight-client cannot express — it has
+     repeatedly lagged the API (tag_groups shipped broken in 0.9.2, query_tag_gate is newer
+     still), and a benchmark should not be blocked on client codegen."""
+     from types import SimpleNamespace
+ 
+     def result(d: dict) -> SimpleNamespace:
+         return SimpleNamespace(
+             id=d.get("id"), text=d.get("text") or "", type=d.get("type"),
+             entities=d.get("entities"), context=d.get("context"),
+             occurred_start=d.get("occurred_start"), occurred_end=d.get("occurred_end"),
+             mentioned_at=d.get("mentioned_at"), document_id=d.get("document_id"),
+             metadata=d.get("metadata"), chunk_id=d.get("chunk_id"),
+             tags=d.get("tags"), scores=d.get("scores"),
+         )
+ 
+     chunks = {k: SimpleNamespace(text=(v or {}).get("text", "")) for k, v in (payload.get("chunks") or {}).items()}
+     return SimpleNamespace(
+         results=[result(r) for r in (payload.get("results") or [])],
+         chunks=chunks,
+         model_dump=lambda: payload,
+     )
+ 
+ 
+ def _deduplicate_results(results):
+     """Drop the same memory returned twice, by id.
+ 
+     This keyed on chunk_id, which is not an identity. A chunk is a passage of the source
+     conversation and the extractor draws several distinct facts from one passage, so keying
+     on it kept the best-ranked fact per passage and silently discarded every other fact
+     from it: 36 of 117 retrieved facts on one BEAM recall, 31%.
+ 
+     What it threw away was load-bearing. contradiction_resolution asks "have I ever done X"
+     and its rubric wants both the "I did X" and the "I never did X" statement; the two are
+     made in the same breath, so they share a chunk, and the lower-ranked one never reached
+     the context. Fixing this is worth +0.070 per question on BEAM 100k (SE 0.018, paired
+     over 100 questions, 40 better / 12 worse), concentrated in exactly the categories that
+     turn on several facts from one passage: contradiction_resolution +0.239, summarization
+     +0.108, information_extraction +0.101, knowledge_update +0.100.
+ 
+     Repeated chunk TEXT, which is presumably what this was meant to prevent, is already
+     handled where it belongs — seen_chunk_ids in _format_result inlines a chunk once.
+     """
+     seen = set()
+     out = []
+     for r in results:
+         if r.id not in seen:
+             seen.add(r.id)
+             out.append(r)
+     return out
+ 
+ 
+ def _format_result(r, chunks: dict | None = None, seen_chunk_ids: set | None = None) -> str:
+     lines = []
+     if r.type:
+         lines.append(f"**[{r.type}]** {r.text}")
+     else:
+         lines.append(r.text)
+ 
+     meta = []
+     date_start = r.occurred_start
+     date_end = r.occurred_end
+     if date_start and date_end and date_start != date_end:
+         meta.append(f"occurred: {date_start} – {date_end}")
+     elif date_start:
+         meta.append(f"occurred: {date_start}")
+     if r.mentioned_at:
+         meta.append(f"mentioned: {r.mentioned_at}")
+     if r.chunk_id:
+         meta.append(f"chunk: {r.chunk_id}")
+     if meta:
+         lines.append("_" + " · ".join(meta) + "_")
+ 
+     if chunks and r.chunk_id and r.chunk_id in chunks:
+         if seen_chunk_ids is None or r.chunk_id not in seen_chunk_ids:
+             lines.append(f"> {chunks[r.chunk_id].text}")
+             if seen_chunk_ids is not None:
+                 seen_chunk_ids.add(r.chunk_id)
+ 
+     return "\n".join(lines)
+ 
+ 
+ def _format_results(results, chunks: dict | None = None) -> list[str]:
+     """Format a list of results, inlining each chunk_id's text only on first appearance."""
+     seen_chunk_ids: set = set()
+     return [_format_result(r, chunks, seen_chunk_ids) for r in results]
+ 
+ 
+ def _build_docs(results, chunks: dict | None = None) -> "list[Document]":
+     """Build Document list from recall results, inlining chunk text only on first chunk_id."""
+     return [
+         Document(id=r.id, content=c, source_ids=_source_ids(r))
+         for r, c in zip(results, _format_results(results, chunks))
+     ]
+ 
+ 
+ def _source_ids(r) -> list[str] | None:
+     """The ingested Document.id(s) a recall result came from.
+ 
+     Ingestion stamps every item with `document_id` and `metadata.doc_id` (see
+     _doc_to_items), so recall results can usually be traced back to the benchmark
+     document that produced them. Datasets scored on retrieved document identity
+     (PrecisionMemBench) need this; answer-based datasets ignore it."""
+     ids = []
+     meta_doc_id = (getattr(r, "metadata", None) or {}).get("doc_id")
+     if meta_doc_id:
+         ids.append(meta_doc_id)
+     if r.document_id and r.document_id not in ids:
+         ids.append(r.document_id)
+     return ids or None
+ 
+ 
+ def _bank_id_from_store_dir(store_dir: Path) -> tuple[str, str | None, str | None]:
+     """Return (bank_id, dataset_name, category) from the store_dir path."""
+     parts = store_dir.parts
+     try:
+         idx = parts.index("_store")
+         dataset = parts[idx - 2]
+         split = parts[idx + 1]
+         category = parts[idx + 2] if idx + 2 < len(parts) else None
+         if category == "all":
+             category = None
+         return f"{dataset}-{split}", dataset, category
+     except (ValueError, IndexError):
+         return "bench", None, None
+ 
+ 
+ class _HindsightBase(MemoryProvider):
+     """Shared logic for Hindsight memory providers."""
+ 
+     supports_filters = True
+ 
+     def __init__(self):
+         self._bank_id = "bench"
+         self._dataset: str | None = None
+         self._category: str | None = None
+         self._default_user_id = "omb-bench-default"
+         self._client = None  # set by subclass
+         self._async_client = None  # lazily created (cloud only)
+         self._per_unit = False
+         self._resume = os.environ.get("AMB_RESUME", "").lower() in ("1", "true")
+         self._stale_failed_ops: dict[str, set] = {}
+         self._extraction_labels: list[dict] | None = None
+         self._recall_fields_supported: set[str] = set()
+ 
+     def _bank_id_for(self, user_id: str | None) -> str:
+         if self._per_unit and user_id is not None:
+             return f"{self._bank_id}-u{user_id}"
+         return self._bank_id
+ 
+     def prepare(self, store_dir: Path, unit_ids: set[str] | None = None, reset: bool = True) -> None:
+         self._bank_id, self._dataset, self._category = _bank_id_from_store_dir(store_dir)
+         self._per_unit = unit_ids is not None
+ 
+     def set_extraction_labels(self, labels: list[dict] | None) -> None:
+         """Controlled vocabularies the extraction LLM should classify each fact against.
+ 
+         Applied to the bank as `entity_labels`; entries with tag=True have their chosen value
+         written onto the fact as a tag, which recall can then hard-filter on (a SQL WHERE
+         across all four retrieval strategies rather than a post-filter)."""
+         self._extraction_labels = labels
+ 
+     # ── Bank creation (sync) ──────────────────────────────────────────────────
+ 
+     # BEAM conversations are a user working with an assistant. Keep both sides: what the user
+     # says, decided and measured, and what the assistant proposed or built at the level of the
+     # approach. Example values inside the assistant's code (sample batch sizes, TTLs, ports) are
+     # left out — stored, they outvote the user's actual settings on "what value do I use?".
+     _BEAM_RETAIN_MISSION = (
+         "This is a conversation between a user and an AI assistant about the user's work. Extract what "
+         "the user says about themselves, their project, decisions, problems, results and plans — "
+         "including negative statements ('I have never done X') and statements that contradict earlier "
+         "ones, each as its own fact. Settings, versions and numbers the user states they use, chose, "
+         "changed or measured are the most important facts: keep them exactly. ALSO extract what the "
+         "assistant proposed, explained, designed or built in reply, at the level of the approach: which "
+         "technique, component, tool or design it recommended and for what (e.g. 'Assistant suggested "
+         "batching the import job and adding an index on created_at'). Do NOT record example values from "
+         "the assistant's code or illustrations (sample batch sizes, TTLs, ports, thresholds) — those are "
+         "not the user's settings. Do not restate the user profile given as context."
+     )
+ 
+     # PrecisionMemBench seeds one belief per document and scores which beliefs come
+     # back. Default extraction fans a belief out into 2-3 facts (each an independent
+     # retrieval unit, so a split belief occupies several budget slots) and drops the
+     # alias/shorthand tokens the benchmark queries by (k8s, GHA, moongoose).
+     _PMB_RETAIN_MISSION = (
+         "Each input document is ONE belief record about the user, written as: canonical "
+         "name, then its alias and shorthand forms, then the statement, then why it matters. "
+         "Extract EXACTLY ONE fact per input document — never split a document into several "
+         "facts, even when it states more than one thing; keep them together in a single fact. "
+         "Preserve the canonical name and EVERY alias and shorthand form VERBATIM in the fact "
+         "text, including abbreviations, acronyms, short forms and misspellings (for example "
+         "k8s, kube, GHA, TS, Mongo, moongoose) — these are how the user refers to the concept "
+         "and the fact must stay findable by those exact strings. Do not generalise, do not "
+         "merge records, and do not add framing such as 'Involving: user'."
+     )
+ 
+     def _bank_kwargs(self, bank_id: str | None = None) -> dict:
+-        kwargs: dict = dict(enable_observations=False)
++        # Observations stay off unless asked for: consolidation is real LLM spend, and the
++        # published numbers are measured without it.
++        kwargs: dict = dict(enable_observations=_OBSERVATIONS)
+         if self._dataset == "beam":
+             kwargs["retain_mission"] = self._BEAM_RETAIN_MISSION
+         elif self._dataset == "precisionmembench":
+             kwargs["retain_mission"] = self._PMB_RETAIN_MISSION
+         # Explicit override always wins (mission A/B experiments).
+         env_mission = os.environ.get("AMB_RETAIN_MISSION")
+         if env_mission:
+             kwargs["retain_mission"] = env_mission
+         # Optional override of the retain extraction strategy, e.g.
+         # AMB_RETAIN_EXTRACTION_MODE=chunks to store raw chunks instead of
+         # extracting concise facts ('concise' is the server default).
+         extraction_mode = os.environ.get("AMB_RETAIN_EXTRACTION_MODE")
+         if extraction_mode:
+             kwargs["retain_extraction_mode"] = extraction_mode
+         return kwargs
+ 
+     def _create_bank(self, bank_id: str, force_reset: bool = True) -> None:
+         kwargs = self._bank_kwargs(bank_id=bank_id)
+         if force_reset:
+             try:
+                 self._client.banks.delete(bank_id=bank_id)
+             except Exception:
+                 pass
+         self._client.create_bank(bank_id=bank_id, name=f"Benchmark Bank ({bank_id})", **kwargs)
+         self._apply_extraction_labels(bank_id)
+ 
+     def _apply_extraction_labels(self, bank_id: str) -> None:
+         """Push the dataset's controlled vocabularies onto the bank as `entity_labels`.
+ 
+         Labels with tag=True make the extraction LLM stamp its chosen value onto each fact as
+         a tag, so recall can hard-filter on a classification the LLM produced at retain time."""
+         if not self._extraction_labels:
+             return
+         import logging
+         from hindsight_client_api.api.banks_api import BanksApi
+         from hindsight_client_api.models.bank_config_update import BankConfigUpdate
+         from hindsight_client.hindsight_client import _run_async
+         try:
+             api = BanksApi(self._client._api_client)
+             _run_async(api.update_bank_config(
+                 bank_id=bank_id,
+                 bank_config_update=BankConfigUpdate(updates={"entity_labels": self._extraction_labels}),
+             ))
+             logging.getLogger(__name__).info(
+                 f"Bank {bank_id}: applied {len(self._extraction_labels)} entity label group(s)")
+         except Exception as e:
+             raise RuntimeError(
+                 f"Bank {bank_id}: failed to apply entity_labels — the run would silently score "
+                 f"without the classification tags it depends on: {e}"
+             ) from e
+ 
+     # Server-side ingestion bookkeeping. The async path used to wait per-operation with a
+     # 5-minute cap and then continue regardless — on a large split (10M: ~560 docs/bank) that
+     # means answering questions against a half-filled bank. These wait on the whole bank and
+     # refuse to proceed unless every queued operation actually completed.
+ 
+     # Retry budget for server-side operation failures. Retries are spaced out: the backend
+     # tends to be unavailable for minutes, so firing every attempt within one 15s poll cycle
+     # burns the whole budget on a single outage.
+     _OP_RETRY_LIMIT = int(os.environ.get("AMB_OP_RETRY_LIMIT", 5))
+     _OP_RETRY_COOLDOWN_S = int(os.environ.get("AMB_OP_RETRY_COOLDOWN_S", 180))
+ 
+     @staticmethod
+     def _ops_api(client):
+         from hindsight_client_api.api.operations_api import OperationsApi
+         return OperationsApi(client._api_client)
+ 
+     async def _count_ops(self, client, bank_id: str, status: str | None = None) -> int:
+         kwargs = dict(bank_id=bank_id, limit=1)
+         if status:
+             kwargs["status"] = status
+         resp = await asyncio.wait_for(self._ops_api(client).list_operations(**kwargs), timeout=60)
+         return resp.total or 0
+ 
+     async def _in_flight_ops(self, client, bank_id: str) -> tuple[int, int]:
+         """Return (in_flight, failed). in_flight covers pending AND processing, which a
+         status filter cannot express — derive it from the totals instead."""
+         total     = await self._count_ops(client, bank_id)
+         completed = await self._count_ops(client, bank_id, "completed")
+         failed    = await self._count_ops(client, bank_id, "failed")
+         return max(0, total - completed - failed), failed
+ 
+     async def _retry_failed_ops(self, client, bank_id: str, retried: dict) -> tuple[int, int, int]:
+         """Re-queue failed operations server-side. Returns (requeued, unrecoverable, cooling)."""
+         ops_api = self._ops_api(client)
+         requeued = unrecoverable = cooling = 0
+         offset = 0
+         while True:
+             resp = await asyncio.wait_for(
+                 ops_api.list_operations(bank_id=bank_id, status="failed", limit=100, offset=offset),
+                 timeout=60,
+             )
+             ops = resp.operations or []
+             if not ops:
+                 break
+             now = time.monotonic()
+             for op in ops:
+                 if op.id in self._stale_failed_ops.get(bank_id, ()):
+                     continue
+                 attempts, last = retried.get(op.id, (0, 0.0))
+                 if attempts >= self._OP_RETRY_LIMIT:
+                     unrecoverable += 1
+                     continue
+                 if attempts and now - last < self._OP_RETRY_COOLDOWN_S:
+                     cooling += 1  # wait out the outage before spending another attempt
+                     continue
+                 try:
+                     await asyncio.wait_for(
+                         ops_api.retry_operation(bank_id=bank_id, operation_id=op.id), timeout=60)
+                     retried[op.id] = (attempts + 1, now)
+                     requeued += 1
+                 except Exception:
+                     retried[op.id] = (attempts + 1, now)
+                     cooling += 1
+             offset += len(ops)
+             if offset >= (resp.total or 0):
+                 break
+         return requeued, unrecoverable, cooling
+ 
+     async def _throttle_submissions(self, client, bank_id: str, max_in_flight: int) -> None:
+         """Hold off submitting more batches while the server's queue is deep.
+ 
+         Firing every batch at once is what made the backend start refusing connections;
+         the client cannot go faster than the worker drains anyway."""
+         import logging
+         _log = logging.getLogger(__name__)
+         while True:
+             try:
+                 in_flight, _ = await self._in_flight_ops(client, bank_id)
+             except Exception:
+                 return  # bookkeeping must never block ingestion
+             if in_flight <= max_in_flight:
+                 return
+             _log.info(f"Bank {bank_id}: {in_flight} ops in flight (cap {max_in_flight}) — pausing submissions")
+             await asyncio.sleep(15)
+ 
+     async def _await_bank_ingest(self, client, bank_id: str) -> None:
+         """Block until every operation queued for this bank has completed.
+ 
+         Retries server-side failures, and raises rather than letting the run score a
+         partially-ingested bank."""
+         import logging
+         _log = logging.getLogger(__name__)
+         max_wait_s = int(os.environ.get("AMB_INGEST_MAX_WAIT_S", 8 * 3600))
+         poll = 15
+         retried: dict = {}
+         start = time.monotonic()
+         while time.monotonic() - start < max_wait_s:
+             in_flight, failed = await self._in_flight_ops(client, bank_id)
+             if failed:
+                 requeued, unrecoverable, cooling = await self._retry_failed_ops(
+                     client, bank_id, retried)
+                 _log.warning(f"Bank {bank_id}: {failed} failed op(s) — re-queued {requeued}, "
+                              f"cooling off {cooling}, unrecoverable {unrecoverable}")
+                 if unrecoverable:
+                     raise RuntimeError(
+                         f"Bank {bank_id}: {unrecoverable} operation(s) still failing after "
+                         f"{self._OP_RETRY_LIMIT} retries. Aborting to avoid scoring with "
+                         f"incomplete ingestion."
+                     )
+                 if requeued or cooling:
+                     await asyncio.sleep(poll if requeued else self._OP_RETRY_COOLDOWN_S // 4)
+                     continue
+                 # every failure predates this ingest — its documents were re-sent
+             if in_flight == 0:
+                 stored = await self._count_ops(client, bank_id, "completed")
+                 _log.info(f"Bank {bank_id}: ingestion complete "
+                           f"({stored} ops, {time.monotonic() - start:.0f}s)")
+                 return
+             _log.info(f"Bank {bank_id}: {in_flight} ops in flight "
+                       f"({time.monotonic() - start:.0f}s elapsed)")
+             await asyncio.sleep(poll)
+         raise RuntimeError(
+             f"Bank {bank_id}: timed out after {max_wait_s}s waiting for ingestion "
+             f"(raise AMB_INGEST_MAX_WAIT_S). Aborting to avoid scoring with incomplete ingestion."
+         )
+ 
+     async def _await_operation(self, client, bank_id: str, operation_id: str, max_wait_s: int = 300) -> None:
+         """Poll until an async retain operation completes (5-minute timeout)."""
+         from hindsight_client_api.api.operations_api import OperationsApi
+         ops_api = OperationsApi(client._api_client)
+         waited = 0
+         last_status = None
+         while waited < max_wait_s:
+             try:
+                 resp = await asyncio.wait_for(
+                     ops_api.get_operation_status(bank_id=bank_id, operation_id=operation_id),
+                     timeout=30,
+                 )
+                 last_status = resp.status
+                 if last_status in ("completed", "failed"):
+                     break
+             except asyncio.TimeoutError:
+                 pass
+             await asyncio.sleep(1)
+             waited += 1
+         if waited >= max_wait_s:
+             import logging
+             logging.getLogger(__name__).warning(
+                 f"_await_operation timed out after {max_wait_s}s for bank={bank_id} op={operation_id} "
+                 f"last_status={last_status!r}; continuing anyway."
+             )
+ 
+     # ── Bank creation (async) ─────────────────────────────────────────────────
+ 
+     async def _acreate_bank(self, client, bank_id: str) -> None:
+         kwargs = self._bank_kwargs(bank_id=bank_id)
+         if not self._resume:
+             try:
+                 await client.adelete_bank(bank_id=bank_id)
+             except Exception:
+                 pass
+         try:
+             await client.acreate_bank(bank_id=bank_id, name=f"Benchmark Bank ({bank_id})", **kwargs)
+         except Exception:
+             if not self._resume:
+                 raise  # under AMB_RESUME the bank usually already exists
+         await self._aapply_extraction_labels(client, bank_id)
+ 
+     async def _aapply_extraction_labels(self, client, bank_id: str) -> None:
+         """Async twin of _apply_extraction_labels."""
+         if not self._extraction_labels:
+             return
+         import logging
+         from hindsight_client_api.api.banks_api import BanksApi
+         from hindsight_client_api.models.bank_config_update import BankConfigUpdate
+         try:
+             api = BanksApi(client._api_client)
+             await api.update_bank_config(
+                 bank_id=bank_id,
+                 bank_config_update=BankConfigUpdate(updates={"entity_labels": self._extraction_labels}),
+             )
+             logging.getLogger(__name__).info(
+                 f"Bank {bank_id}: applied {len(self._extraction_labels)} entity label group(s)")
+         except Exception as e:
+             raise RuntimeError(
+                 f"Bank {bank_id}: failed to apply entity_labels — the run would silently score "
+                 f"without the classification tags it depends on: {e}"
+             ) from e
+ 
+     async def _snapshot_failed_ops(self, client, bank_id: str) -> set:
+         """Ids of ops already marked failed BEFORE this ingest started.
+ 
+         Their documents get re-sent, so charging these stale records against this run's
+         retry budget would abort a perfectly healthy resume."""
+         stale: set = set()
+         offset = 0
+         try:
+             while True:
+                 resp = await asyncio.wait_for(
+                     self._ops_api(client).list_operations(
+                         bank_id=bank_id, status="failed", limit=100, offset=offset),
+                     timeout=60,
+                 )
+                 ops = resp.operations or []
+                 if not ops:
+                     break
+                 stale.update(o.id for o in ops)
+                 offset += len(ops)
+                 if offset >= (resp.total or 0):
+                     break
+         except Exception:
+             return set()
+         return stale
+ 
+     async def _retained_document_ids(self, client, bank_id: str) -> set:
+         """Document ids the server has already retained for this bank (AMB_RESUME).
+ 
+         A crash mid-ingest otherwise means re-sending an entire 10M conversation."""
+         done: set = set()
+         offset = 0
+         try:
+             while True:
+                 resp = await asyncio.wait_for(
+                     self._ops_api(client).list_operations(
+                         bank_id=bank_id, status="completed", limit=100, offset=offset),
+                     timeout=60,
+                 )
+                 ops = resp.operations or []
+                 if not ops:
+                     break
+                 done.update(o.document_id for o in ops if o.document_id)
+                 offset += len(ops)
+                 if offset >= (resp.total or 0):
+                     break
+         except Exception:
+             return set()  # bank absent or listing failed — ingest everything
+         return done
+ 
+     # ── Item builders ─────────────────────────────────────────────────────────
+ 
+     def _doc_to_items(self, doc: Document) -> list[dict]:
+         """Convert a Document to a list of retain items."""
+         content = doc.content.replace("\x00", "")
+         base: dict = {}
+         tags: list[str] = []
+         if not self._per_unit:
+             tags.append(f"user:{doc.user_id or self._default_user_id}")
+         # Dataset-supplied labels (Document.tags) become filterable tags alongside the
+         # user scoping tag — recall can then hard-filter on them via tag_groups.
+         for t in (doc.tags or []):
+             if t not in tags:
+                 tags.append(t)
+         if tags:
+             base["tags"] = tags
+         if doc.timestamp:
+             base["timestamp"] = doc.timestamp
+         if doc.context:
+             base["context"] = doc.context
+ 
+         return [{**base, "content": content, "document_id": doc.id,
+                  "metadata": {"doc_id": doc.id}}]
+ 
+     # ── Sync ingest (embedded) ────────────────────────────────────────────────
+ 
+     def ingest(self, documents: list[Document]) -> None:
+         from hindsight_client.hindsight_client import _run_async
+         from hindsight_client_api.api.operations_api import OperationsApi
+         import logging as _logging
+         _log = _logging.getLogger(__name__)
+ 
+         if not self._per_unit:
+             self._create_bank(self._bank_id, force_reset=not self._resume)
+ 
+         _BATCH_SIZE = 20
+         # Cap how deep the server-side queue is allowed to get. Submitting all batches at
+         # once made the backend start refusing connections on large splits.
+         _MAX_IN_FLIGHT = int(os.environ.get("AMB_MAX_IN_FLIGHT_OPS", 60))
+         created: set[str] = set()
+         operation_ids: list[tuple[str, str]] = []
+ 
+         # Collect all items across all documents first, grouped by bank_id,
+         # then batch across documents so fewer (larger) operations are created.
+         # This makes each operation durable in async_operations and resumable on restart.
+         items_by_bank: dict[str, list[dict]] = {}
+         for doc in documents:
+             bank_id = self._bank_id_for(doc.user_id)
+             if self._per_unit and bank_id not in created:
+                 self._create_bank(bank_id, force_reset=not self._resume)
+                 created.add(bank_id)
+             items_by_bank.setdefault(bank_id, []).extend(self._doc_to_items(doc))
+ 
+         for bank_id, all_items in items_by_bank.items():
+             # Deduplicate by document_id — the dataset may have sessions with identical IDs.
+             seen_doc_ids: set[str] = set()
+             unique_items: list[dict] = []
+             for item in all_items:
+                 did = item.get("document_id")
+                 if did is None or did not in seen_doc_ids:
+                     unique_items.append(item)
+                     if did is not None:
+                         seen_doc_ids.add(did)
+             all_items = unique_items
+ 
+             _use_async = True
+             for i in range(0, len(all_items), _BATCH_SIZE):
+                 batch = all_items[i:i + _BATCH_SIZE]
+                 doc_label = batch[0].get("document_id", "?") if len(batch) == 1 else f"batch {i // _BATCH_SIZE + 1}"
+                 for attempt in range(5):
+                     try:
+                         resp = self._client.retain_batch(
+                             bank_id=bank_id,
+                             items=batch,
+                             retain_async=_use_async,
+                         )
+                         if _use_async and resp is not None and getattr(resp, "var_async", False):
+                             op_id = getattr(resp, "operation_id", None)
+                             if op_id:
+                                 operation_ids.append((bank_id, op_id))
+                         if not _use_async:
+                             _log.info(f"[retain] {doc_label} done ({i+1}/{len(all_items)})")
+                         break
+                     except Exception as e:
+                         err = str(e)
+                         etype = type(e).__name__
+                         if ("duplicate key" in err or "duplicate document_ids" in err
+                                 or "violates foreign key constraint" in err
+                                 or "empty response" in err):
+                             # Skip: already ingested / duplicate / FK race.
+                             break
+                         if "Cannot connect" in err:
+                             # Daemon down — wait longer before retrying.
+                             if attempt < 4:
+                                 time.sleep(30)
+                             else:
+                                 _log.warning(f"retain_batch: daemon down after 5 attempts, skipping: {err[:200]}")
+                                 break
+                         elif "Timeout" in etype or "Timeout" in err or "CancelledError" in err:
+                             # Transient LLM/server timeout — retry with backoff.
+                             if attempt < 3:
+                                 _log.warning(f"retain_batch timeout (attempt {attempt+1}/4), retrying in 30s: {err[:100]}")
+                                 time.sleep(30)
+                             else:
+                                 _log.warning(f"retain_batch: timeout after 4 attempts, skipping batch: {err[:200]}")
+                                 break
+                         elif attempt < 4:
+                             time.sleep(10)
+                         else:
+                             # Last resort: skip any unrecognised transient error rather than killing the run.
+                             _log.warning(f"retain_batch unhandled error (skipping batch): {etype}: {err[:200]}")
+                             break
+ 
+         # Wait for async extraction to finish before returning.
+         # Critical for large documents: retain_async=True returns immediately but
+         # the daemon extracts facts in the background. Without waiting, retrieval
+         # right after ingest finds an empty bank.
+         if operation_ids or items_by_bank:
+             banks_to_check = list(items_by_bank.keys())
+             max_wait_s = 28800  # 8 hours max (10m docs have 17K+ chunks per doc)
+             poll_interval = 10
+             start = time.monotonic()
+             _log.info(f"Waiting for extraction to complete on {len(banks_to_check)} bank(s)…")
+             for bank_id in banks_to_check:
+                 deadline = start + max_wait_s
+                 while time.monotonic() < deadline:
+                     try:
+                         import httpx as _httpx
+                         base_url = self._client._api_client.configuration.host
+                         # Check for failed operations first
+                         r_failed = _httpx.get(f"{base_url}/v1/default/banks/{bank_id}/operations?status=failed&limit=1", timeout=15)
+                         if r_failed.status_code == 200 and r_failed.json().get("total", 0) > 0:
+                             failed_count = r_failed.json()["total"]
+                             raise RuntimeError(
+                                 f"Bank {bank_id}: {failed_count} failed operation(s) detected. "
+                                 f"Aborting to avoid scoring with incomplete ingestion."
+                             )
+                         # Use lightweight operations query instead of full stats (which JOINs millions of links)
+                         r = _httpx.get(f"{base_url}/v1/default/banks/{bank_id}/operations?status=pending&limit=1", timeout=15)
+                         if r.status_code == 200:
+                             pending = r.json().get("total", 0)
+                         else:
+                             pending = -1  # unknown
+                         if pending == 0:
+                             r2 = _httpx.get(f"{base_url}/v1/default/banks/{bank_id}/memories/list?limit=1", timeout=15)
+                             total = r2.json().get("total", 0) if r2.status_code == 200 else 0
+                             _log.info(f"Bank {bank_id}: extraction complete ({total} facts, 0 pending)")
+                             break
+                         elapsed = time.monotonic() - start
+                         _log.info(f"Bank {bank_id}: {pending} pending ops ({elapsed:.0f}s)")
+                     except RuntimeError:
+                         raise
+                     except Exception as e:
+                         elapsed = time.monotonic() - start
+                         _log.info(f"Bank {bank_id}: still extracting… ({elapsed:.0f}s, {e.__class__.__name__})")
+                     time.sleep(poll_interval)
+                 else:
+                     raise RuntimeError(
+                         f"Bank {bank_id}: timed out waiting for extraction after {max_wait_s}s. "
+                         f"Aborting to avoid scoring with incomplete ingestion."
+                     )
+ 
+     # ── Recall kwargs ─────────────────────────────────────────────────────────
+ 
+     @staticmethod
+     def _to_tag_groups(filters: dict | None, user_tag: str | None) -> list | None:
+         """Provider-neutral filter -> Hindsight `tag_groups` (groups are AND-ed).
+ 
+         {"all": [t]}   -> {"tags": [t], "match": "all_strict"}
+         {"any": [[..]]}-> one {"tags": [...], "match": "any_strict"} leaf per group (OR within)
+         {"none": [t]}  -> {"not": {"tags": [t], "match": "any_strict"}}
+         Everything lands as a SQL WHERE across all four retrieval strategies rather than a
+         post-filter, so excluded memories never enter ranking."""
+         if not filters:
+             return None
+         groups: list = []
+         if user_tag:
+             groups.append({"tags": [user_tag], "match": "any_strict"})
+         if filters.get("narrow_any"):
+             # OR of alternative narrowings — each its own leaf, so they can resolve
+             # differently (an exact leaf and a fuzzy one over the same query).
+             leaves = [
+                 {"tags": list(spec["tags"]), "match": "any_strict",
+                  **({"resolve": spec["resolve"]} if spec.get("resolve") else {})}
+                 for spec in filters["narrow_any"] if spec.get("tags")
+             ]
+             if leaves:
+                 groups.append(leaves[0] if len(leaves) == 1 else {"or": leaves})
+         if filters.get("narrow"):
+             groups.append({"tags": list(filters["narrow"]), "match": "any_strict"})
+         if filters.get("all"):
+             groups.append({"tags": list(filters["all"]), "match": "all_strict"})
+         for grp in filters.get("any") or []:
+             if grp:
+                 groups.append({"tags": list(grp), "match": "any_strict"})
+         if filters.get("none"):
+             groups.append({"not": {"tags": list(filters["none"]), "match": "any_strict"}})
+         return groups or None
+ 
+     def _recall_kwargs(self, query: str, user_id: str | None, query_timestamp: str | None, include_chunks: bool = True, max_chunk_tokens: int | None = None, filters: dict | None = None) -> dict:
+         is_lifebench = self._dataset == "lifebench"
+         is_personamem = self._dataset == "personamem"
+         is_beam = self._dataset == "beam"
+         if max_chunk_tokens is None:
+             if is_personamem:
+                 max_chunk_tokens = 10240
+             elif is_beam:
+                 max_chunk_tokens = 8192
+             elif is_lifebench:
+                 max_chunk_tokens = 16384
+             else:
+                 max_chunk_tokens = 16384
+         if is_personamem:
+             max_tokens = 4096
+         elif is_lifebench:
+             max_tokens = 16384
+         elif is_beam:
+             max_tokens = 12288
+         else:
+             max_tokens = 32768
+         # Generic overrides — a dataset scored on *which* memories come back rather
+         # than on answer quality (precisionmembench) needs a much tighter recall
+         # budget than the answer-generation defaults above.
+         env_max = os.environ.get("AMB_RECALL_MAX_TOKENS")
+         if env_max:
+             max_tokens = int(env_max)
+         env_chunk = os.environ.get("AMB_RECALL_MAX_CHUNK_TOKENS")
+         if env_chunk:
+             max_chunk_tokens = int(env_chunk)
+         if max_chunk_tokens == 0:
+             include_chunks = False
+         kwargs: dict = {
+             "bank_id": self._bank_id_for(user_id),
+             "query": query[:1900],
+             "budget": "high",
+             "max_tokens": max_tokens,
+             "include_chunks": include_chunks,
+             "include_entities": False,
+         }
+         if include_chunks:
+             kwargs["max_chunk_tokens"] = max_chunk_tokens
+         if query_timestamp:
+             kwargs["query_timestamp"] = query_timestamp
+         gate = (filters or {}).get("query_gate")
+         if gate:
+             # Server-side: restrict recall to the identities the query names, and abstain
+             # when it names none. Nothing to compute here — the bank owns the vocabulary.
+             self._require_recall_field("query_tag_gate")
+             kwargs["query_tag_gate"] = dict(gate)
+         user_tag = f"user:{user_id}" if (user_id is not None and not self._per_unit) else None
+         tag_groups = self._to_tag_groups(filters, user_tag)
+         if tag_groups is not None:
+             # tag_groups supersedes tags/tags_match: it can express the AND-of-OR-and-NOT that
+             # a single flat tag list cannot.
+             kwargs["tag_groups"] = tag_groups
+         elif user_tag:
+             kwargs["tags"] = [user_tag]
+             kwargs["tags_match"] = "any_strict"
+         return kwargs
+ 
+     def _reflect_kwargs(self, query: str, user_id: str | None, query_timestamp: str | None) -> dict:
+         uid = user_id or self._default_user_id
+         kwargs: dict = {
+             "bank_id": self._bank_id_for(user_id),
+             "query": query[:1900],
+         }
+         if query_timestamp:
+             kwargs["query_timestamp"] = query_timestamp
+         if user_id is not None and not self._per_unit:
+             kwargs["tags"] = [f"user:{uid}"]
+             kwargs["tags_match"] = "any_strict"
+         return kwargs
+ 
+     def _require_recall_field(self, field: str) -> None:
+         """Fail loudly when the server predates a recall parameter the dataset needs.
+ 
+         An unknown field is accepted and ignored (HTTP 200), so without this check the run
+         would quietly score as if the filter had been applied when it never was — the worst
+         kind of benchmark result. Checked once per process against the live schema."""
+         if field in self._recall_fields_supported:
+             return
+         import httpx
+ 
+         base, headers = self._recall_endpoint()
+         try:
+             spec = httpx.get(f"{base}/openapi.json", headers=headers, timeout=30).json()
+             props = spec["components"]["schemas"]["RecallRequest"]["properties"]
+         except Exception as e:
+             raise RuntimeError(
+                 f"{self.name}: cannot verify that {base} supports recall field {field!r}: {e}"
+             ) from e
+         if field not in props:
+             raise RuntimeError(
+                 f"{self.name}: the server at {base} does not support the recall field "
+                 f"{field!r}, and ignores unknown fields silently — this run would score as "
+                 f"though the filter applied when it did not. Point HINDSIGHT_CLOUD_URL at a "
+                 f"server that has it."
+             )
+         self._recall_fields_supported.add(field)
+ 
+     # Recall parameters the installed hindsight-client has no argument for. When one is
+     # present the request goes out over raw HTTP instead of the typed client.
+     _CLIENT_UNSUPPORTED_RECALL_KEYS = ("query_tag_gate",)
+ 
+     def _needs_http_recall(self, kwargs: dict) -> bool:
+         if any(k in kwargs for k in self._CLIENT_UNSUPPORTED_RECALL_KEYS):
+             return True
+         # `resolve` on a tag_groups leaf postdates the installed client's model, which drops
+         # unknown fields silently — the request would go out as an exact match and the run
+         # would score as though fuzzy resolution had been applied.
+         def _uses_resolve(g):
+             if not isinstance(g, dict):
+                 return False
+             if "resolve" in g:
+                 return True
+             return any(_uses_resolve(x) for x in (g.get("or") or g.get("and") or []))
+         return any(_uses_resolve(g) for g in (kwargs.get("tag_groups") or []))
+ 
+     def _recall_endpoint(self) -> tuple[str, dict]:
+         """(url, headers) for the bank-agnostic recall endpoint. Cloud/HTTP providers only."""
+         base = getattr(self, "_cloud_base_url", None)
+         if not base:
+             raise RuntimeError(
+                 f"{self.name} cannot issue raw recall requests — no base URL. The dataset asked "
+                 f"for a recall parameter the installed hindsight-client cannot express."
+             )
+         key = getattr(self, "_cloud_api_key", None)
+         return base.rstrip("/"), ({"Authorization": f"Bearer {key}"} if key else {})
+ 
+     def _recall_http(self, kwargs: dict):
+         import httpx
+ 
+         base, headers = self._recall_endpoint()
+         body = {k: v for k, v in kwargs.items() if k != "bank_id"}
+         r = httpx.post(
+             f"{base}/v1/default/banks/{kwargs['bank_id']}/memories/recall",
+             headers=headers, json=body, timeout=120,
+         )
+         r.raise_for_status()
+         return _as_recall_response(r.json())
+ 
+     async def _arecall_http(self, kwargs: dict):
+         import httpx
+ 
+         base, headers = self._recall_endpoint()
+         body = {k: v for k, v in kwargs.items() if k != "bank_id"}
+         async with httpx.AsyncClient(timeout=120) as client:
+             r = await client.post(
+                 f"{base}/v1/default/banks/{kwargs['bank_id']}/memories/recall",
+                 headers=headers, json=body,
+             )
+             r.raise_for_status()
+             return _as_recall_response(r.json())
+ 
+     # ── Sync retrieve ─────────────────────────────────────────────────────────
+ 
+     def retrieve(self, query: str, k: int = 10, user_id: str | None = None, query_timestamp: str | None = None, filters: dict | None = None) -> tuple[list[Document], dict | None]:
+         import logging
+         _log = logging.getLogger(__name__)
+         for attempt in range(3):
+             try:
+                 _kw = self._recall_kwargs(query, user_id, query_timestamp, filters=filters)
+                 response = self._recall_http(_kw) if self._needs_http_recall(_kw) else self._client.recall(**_kw)
+                 break
+             except Exception as e:
+                 if attempt < 2:
+                     _log.warning(f"recall failed (attempt {attempt+1}/3, retrying in 10s): {e}")
+                     time.sleep(10)
+                 else:
+                     _log.warning(f"recall failed after 3 attempts (returning empty): {e}")
+                     return [], None
+         chunks = response.chunks or {}
+         docs = _build_docs(_deduplicate_results(response.results), chunks)
+         raw = response.model_dump() if hasattr(response, "model_dump") else None
+         return docs, raw
+ 
+     def retrieve_by_steps(self, steps: list[int], query: str, k: int = 10, user_id: str | None = None, query_timestamp: str | None = None, compact: bool | None = None) -> tuple[list[Document], dict | None]:
+         # Legacy: For small step sets include chunks; for large ranges rely on entity tags.
+         include_chunks = len(steps) <= 6
+         kwargs = self._recall_kwargs(query, user_id, query_timestamp, include_chunks=include_chunks, max_chunk_tokens=16384)
+         if steps:
+             kwargs["tags"] = [f"step_number:{s}" for s in steps]
+             kwargs["tags_match"] = "any_strict"
+         response = self._client.recall(**kwargs)
+         chunks = response.chunks or {}
+         results = _deduplicate_results(response.results)
+         if not self._per_unit and user_id is not None and steps:
+             uid_filter = f"user:{user_id}"
+             results = [r for r in results if uid_filter in (r.tags or [])]
+         docs = _build_docs(results, chunks)
+         raw = response.model_dump() if hasattr(response, "model_dump") else None
+         return docs, raw
+ 
+     def direct_answer(self, query: str, user_id: str | None = None, query_timestamp: str | None = None) -> tuple[str, str, dict | None]:
+         response = self._client.reflect(**self._reflect_kwargs(query, user_id, query_timestamp))
+         answer = response.text or ""
+         raw = response.model_dump() if hasattr(response, "model_dump") else None
+         return answer, answer, raw
+ 
+     def retrieve_by_tag(self, tag: str, query: str = "", user_id: str | None = None) -> tuple[list[Document], dict | None]:
+         kwargs = self._recall_kwargs(query or "relevant information", user_id, None)
+         kwargs["tags"] = [tag]
+         kwargs["tags_match"] = "any_strict"
+         response = self._client.recall(**kwargs)
+         chunks = response.chunks or {}
+         docs = _build_docs(_deduplicate_results(response.results), chunks)
+         raw = response.model_dump() if hasattr(response, "model_dump") else None
+         return docs, raw
+ 
+ 
+ # ── Embedded provider ─────────────────────────────────────────────────────────
+ 
+ class HindsightMemoryProvider(_HindsightBase):
+     name = "hindsight"
+     description = "Embedded Hindsight fact store using gemini-2.5-flash-lite as the extraction model. Recall uses all memory types (world + experience + observation) with no type filter applied."
+     kind = "local"
+     provider = "hindsight"
+     variant = "local"
+     link = "https://hindsight.vectorize.io"
+     logo = "https://www.google.com/s2/favicons?sz=32&domain=hindsight.vectorize.io"
+     concurrency = 4
+ 
+     def __init__(self):
+         super().__init__()
+         self._api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+ 
+     def prepare(self, store_dir: Path, unit_ids: set[str] | None = None, reset: bool = True) -> None:
+         super().prepare(store_dir, unit_ids)
+         # Allow overriding the hindsight-api binary with a local project path
+         # e.g. HINDSIGHT_API_PATH=/path/to/hindsight-api
+         custom_api_path = os.environ.get("HINDSIGHT_API_PATH")
+         if custom_api_path:
+             from hindsight_embed.daemon_embed_manager import DaemonEmbedManager
+             _custom = custom_api_path
+             DaemonEmbedManager._find_api_command = lambda self: ["uv", "run", "--project", _custom, "hindsight-api"]
+         from hindsight import HindsightEmbedded
+         self._client = HindsightEmbedded(
+             profile=f"omb-{self._bank_id}",
+             llm_provider="gemini",
+             llm_model="gemini-2.5-flash-lite",
+             llm_api_key=self._api_key,
+             idle_timeout=0,  # Disable idle timeout to prevent daemon from shutting down during long runs
+         )
+         try:
+             self._client.banks.list()
+         except Exception:
+             pass
+ 
+     def ingest(self, documents: list[Document]) -> None:
+         super().ingest(documents)
+         # After sync ingest, _run_async in the hindsight client creates a temporary event loop
+         # that may leave an aiohttp session bound to it. Reset so the next async_retrieve
+         # (called from asyncio.run()) creates a fresh session on the correct loop.
+         try:
+             rc = self._client._memory_api.api_client.rest_client
+             rc._pool_manager = None
+             rc._retry_client = None
+         except Exception:
+             pass
+ 
+     async def async_ingest(self, documents: list[Document]) -> None:
+         # Close any existing aiohttp session BEFORE running ingest in a thread.
+         # ingest → retain_batch → _run_async creates a fresh event loop in the thread;
+         # if an open session bound to the main loop exists, its TimerContext.__enter__
+         # calls asyncio.current_task(loop=main_loop) from the thread → None → RuntimeError.
+         try:
+             rc = self._client._memory_api.api_client.rest_client
+             if rc._pool_manager is not None:
+                 await rc._pool_manager.close()
+             if rc._retry_client is not None:
+                 await rc._retry_client.close()
+             rc._pool_manager = None
+             rc._retry_client = None
+         except Exception:
+             pass
+         await asyncio.to_thread(self.ingest, documents)
+         # Reset again after ingest so the next arecall creates a fresh session
+         # in the correct (main) event loop rather than reusing the thread's session.
+         try:
+             rc = self._client._memory_api.api_client.rest_client
+             rc._pool_manager = None
+             rc._retry_client = None
+         except Exception:
+             pass
+ 
+     async def async_retrieve(self, query: str, k: int = 10, user_id: str | None = None, query_timestamp: str | None = None, filters: dict | None = None):
+         import logging
+         _log = logging.getLogger(__name__)
+         kwargs = self._recall_kwargs(query, user_id, query_timestamp, filters=filters)
+         for attempt in range(3):
+             try:
+                 response = await self._client.arecall(**kwargs)
+                 break
+             except Exception as e:
+                 if attempt < 2:
+                     _log.warning(f"async_recall failed (attempt {attempt+1}/3, retrying in 10s): {e}")
+                     await asyncio.sleep(10)
+                 else:
+                     _log.warning(f"async_recall failed after 3 attempts (returning empty): {e}")
+                     return [], None
+         chunks = response.chunks or {}
+         docs = _build_docs(_deduplicate_results(response.results), chunks)
+         raw = response.model_dump() if hasattr(response, "model_dump") else None
+         return docs, raw
+ 
+     async def async_retrieve_by_steps(self, steps: list[int], query: str, k: int = 10, user_id: str | None = None, query_timestamp: str | None = None, compact: bool | None = None):
+         return await asyncio.to_thread(self.retrieve_by_steps, steps, query, k, user_id, query_timestamp, compact)
+ 
+     async def async_retrieve_by_tag(self, tag: str, query: str = "", user_id: str | None = None):
+         return await asyncio.to_thread(self.retrieve_by_tag, tag, query, user_id)
+ 
+     async def async_direct_answer(self, query: str, user_id: str | None = None, query_timestamp: str | None = None):
+         return await asyncio.to_thread(self.direct_answer, query, user_id=user_id, query_timestamp=query_timestamp)
+ 
+ 
+ # ── Cloud provider ────────────────────────────────────────────────────────────
+ 
+ class HindsightCloudMemoryProvider(_HindsightBase):
+     name = "hindsight-cloud"
+     description = "Hindsight hosted cloud API. Recall uses all memory types (world + experience + observation) with no type filter applied."
+     kind = "cloud"
+     provider = "hindsight"
+     variant = "cloud"
+ 
+     def __init__(self):
+         super().__init__()
+         from hindsight import HindsightClient
+         self._cloud_api_key = os.environ["HINDSIGHT_CLOUD_KEY"]
+         self._cloud_base_url = os.environ.get("HINDSIGHT_CLOUD_URL", "https://api.hindsight.vectorize.io")
+         self._client = HindsightClient(base_url=self._cloud_base_url, api_key=self._cloud_api_key)
+ 
+     def ingest(self, documents: list[Document]) -> None:
+         """Sync entry point used by the runner's batch (non-isolated) path.
+ 
+         _HindsightBase.ingest polls the bank's operations endpoint with a bare httpx
+         call that carries no API key — harmless against a local daemon, but against
+         the cloud API every poll 401s, is swallowed as "still extracting", and the
+         run hangs until the 8-hour deadline. Delegate to the authenticated async path
+         instead, dropping the cached async client afterwards because it is bound to
+         the event loop this call is about to close."""
+         try:
+             asyncio.run(self.async_ingest(documents))
+         finally:
+             self._async_client = None
+ 
+     def _get_async_client(self):
+         """Return the shared async client, creating it lazily inside the running event loop."""
+         if self._async_client is None:
+             from hindsight_client import Hindsight
+             self._async_client = Hindsight(base_url=self._cloud_base_url, api_key=self._cloud_api_key)
+         return self._async_client
+ 
+     async def async_ingest(self, documents: list[Document]) -> None:
+         client = self._get_async_client()
++        banks = list(dict.fromkeys(self._bank_id_for(d.user_id) for d in documents))
++        if _ARCHIVE_MODE == "import":
++            for bank_id in banks:
++                await self._import_bank(client, bank_id)
++                await self._await_consolidation(client, bank_id)
++            return
+ 
+         if not self._per_unit:
+             await self._acreate_bank(client, self._bank_id)
+ 
+         _BATCH_SIZE = 20
+         # Cap how deep the server-side queue is allowed to get. Submitting all batches at
+         # once made the backend start refusing connections on large splits.
+         _MAX_IN_FLIGHT = int(os.environ.get("AMB_MAX_IN_FLIGHT_OPS", 60))
+         created: set[str] = set()
+         operation_ids: list[tuple[str, str]] = []
+ 
+         _SUBMIT_ATTEMPTS = int(os.environ.get("AMB_SUBMIT_ATTEMPTS", 8))
+ 
+         async def _submit(bank_id: str, batch: list[dict]) -> None:
+             """Send one retain batch, retrying transient failures.
+ 
+             The backend can be unavailable for minutes at a time, so keep trying for
+             ~5 minutes rather than giving up after a couple of quick retries."""
+             for attempt in range(_SUBMIT_ATTEMPTS):
+                 try:
+                     resp = await asyncio.wait_for(
+                         client.aretain_batch(
+                             bank_id=bank_id,
+                             items=batch,
+                             retain_async=True,
+                         ),
+                         timeout=600,
+                     )
+                     break
+                 except Exception:
+                     if attempt < _SUBMIT_ATTEMPTS - 1:
+                         await asyncio.sleep(min(60, 10 * (attempt + 1)))
+                     else:
+                         raise
+ 
+             if resp.var_async:
+                 if not resp.operation_id:
+                     raise RuntimeError(
+                         f"Server processed retain asynchronously but returned no operation_id "
+                         f"for bank={bank_id}. Cannot wait for extraction to complete."
+                     )
+                 operation_ids.append((bank_id, resp.operation_id))
+ 
+         # Accumulate items ACROSS documents so each request carries a full batch —
+         # a document yields a single item, so batching within one document never
+         # groups anything (561 docs used to mean 561 single-item requests).
+         pending: dict[str, list[dict]] = {}
+ 
+         import logging
+         _log = logging.getLogger(__name__)
+         already: dict[str, set] = {}
++        seen_ids: dict[str, set] = {}
+ 
+         for doc in documents:
+             bank_id = self._bank_id_for(doc.user_id)
+             if self._per_unit and bank_id not in created:
+                 await self._acreate_bank(client, bank_id)
+                 created.add(bank_id)
+                 if self._resume:
+                     self._stale_failed_ops[bank_id] = await self._snapshot_failed_ops(client, bank_id)
+                     if self._stale_failed_ops[bank_id]:
+                         _log.info(f"Bank {bank_id}: ignoring {len(self._stale_failed_ops[bank_id])} "
+                                   f"pre-existing failed op(s) from an earlier attempt")
+                     already[bank_id] = await self._retained_document_ids(client, bank_id)
+                     if already[bank_id]:
+                         _log.info(f"Bank {bank_id}: resuming — {len(already[bank_id])} document(s) "
+                                   f"already retained, skipping them")
+ 
+             if doc.id in already.get(bank_id, ()):
+                 continue
++            # A haystack can repeat a session id; the sync path above dedups the same way.
++            if doc.id in seen_ids.setdefault(bank_id, set()):
++                continue
++            seen_ids[bank_id].add(doc.id)
+ 
+             batch = pending.setdefault(bank_id, [])
+             batch.extend(self._doc_to_items(doc))
+             while len(batch) >= _BATCH_SIZE:
+                 await self._throttle_submissions(client, bank_id, _MAX_IN_FLIGHT)
+                 await _submit(bank_id, batch[:_BATCH_SIZE])
+                 del batch[:_BATCH_SIZE]
+ 
+         for bank_id, batch in pending.items():
+             if batch:
+                 await _submit(bank_id, batch)
+ 
+         # Wait per bank until the server has drained everything we queued.
+         for bank_id in dict.fromkeys(b for b, _ in operation_ids):
+             await self._await_bank_ingest(client, bank_id)
++        for bank_id in banks:
++            await self._await_consolidation(client, bank_id)
++            if _ARCHIVE_MODE == "export":
++                await self._export_bank(bank_id)
++
++    # ── Observations and frozen banks ─────────────────────────────────────────
++
++    async def _http(self, method: str, path: str, **kw):
++        import httpx
++
++        base, headers = self._recall_endpoint()
++        async with httpx.AsyncClient(timeout=600) as h:
++            r = await h.request(method, f"{base}{path}", headers=headers, **kw)
++        r.raise_for_status()
++        return r
++
++    async def _await_op(self, bank_id: str, op_id: str, what: str) -> dict:
++        start = time.monotonic()
++        while time.monotonic() - start < int(os.environ.get("AMB_TRANSFER_MAX_WAIT_S", 3600)):
++            op = (await self._http("GET", f"/v1/default/banks/{bank_id}/operations/{op_id}")).json()
++            if op.get("status") == "completed":
++                return op
++            if op.get("status") == "failed":
++                raise RuntimeError(f"Bank {bank_id}: {what} failed: {op.get('error_message') or op}")
++            await asyncio.sleep(2)
++        raise RuntimeError(f"Bank {bank_id}: {what} did not finish (raise AMB_TRANSFER_MAX_WAIT_S)")
++
++    async def _export_bank(self, bank_id: str) -> None:
++        op_id = (await self._http(
++            "POST", f"/v1/default/banks/{bank_id}/transfer/export",
++            params={"include_data": "true", "include_bank_config": "true", "include_history": "false"},
++        )).json()["operation_id"]
++        meta = (await self._await_op(bank_id, op_id, "export")).get("result_metadata") or {}
++        _ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
++        (_ARCHIVE_DIR / f"{bank_id}.zip").write_bytes((await self._http("GET", meta["download_url"])).content)
++
++    async def _import_bank(self, client, bank_id: str) -> None:
++        archive = _ARCHIVE_DIR / f"{bank_id}.zip"
++        if not archive.exists():
++            raise RuntimeError(f"Bank {bank_id}: no frozen archive at {archive} — run once with AMB_BANK_ARCHIVE_MODE=export")
++        try:
++            await client.acreate_bank(bank_id=_IMPORT_STAGING_BANK, name="AMB import staging")
++        except Exception:
++            pass  # already exists
++        try:
++            await client.adelete_bank(bank_id=bank_id)
++        except Exception:
++            pass  # absent
++        op_id = (await self._http(
++            "POST", f"/v1/default/banks/{_IMPORT_STAGING_BANK}/transfer/import",
++            params={"mode": "restore", "target_bank_id": bank_id},
++            files={"file": (archive.name, archive.read_bytes(), "application/zip")},
++        )).json()["operation_id"]
++        await self._await_op(_IMPORT_STAGING_BANK, op_id, "import")
++        if _OBSERVATIONS:  # the archive carries the producer's config, observations off
++            await self._http("PATCH", f"/v1/default/banks/{bank_id}/config",
++                             json={"updates": {"enable_observations": True}})
++
++    async def _await_consolidation(self, client, bank_id: str) -> None:
++        if not _OBSERVATIONS:
++            return
++        import logging
++        _log = logging.getLogger(__name__)
++        await self._http("POST", f"/v1/default/banks/{bank_id}/consolidate", json={})
++        start = time.monotonic()
++        while time.monotonic() - start < int(os.environ.get("AMB_CONSOLIDATION_MAX_WAIT_S", 4 * 3600)):
++            stats = (await self._http("GET", f"/v1/default/banks/{bank_id}/stats")).json()
++            in_flight, _ = await self._in_flight_ops(client, bank_id)
++            if in_flight == 0 and stats.get("pending_consolidation", 0) == 0:
++                _log.info(f"Bank {bank_id}: consolidation complete ({stats.get('total_observations')} observations, "
++                          f"{stats.get('failed_consolidation')} failed, {time.monotonic() - start:.0f}s)")
++                return
++            await asyncio.sleep(5)
++        raise RuntimeError(f"Bank {bank_id}: consolidation did not drain (raise AMB_CONSOLIDATION_MAX_WAIT_S)")
+ 
+     async def async_retrieve(self, query: str, k: int = 10, user_id: str | None = None, query_timestamp: str | None = None, filters: dict | None = None) -> tuple[list[Document], dict | None]:
+         import logging
+         _log = logging.getLogger(__name__)
+         client = self._get_async_client()
+         # Retry transient server errors (500/503/504 from an overloaded backend):
+         # without this a single blip aborts the whole run mid-sweep.
+         delay = 2
+         for attempt in range(5):
+             try:
+                 _kw = self._recall_kwargs(query, user_id, query_timestamp, filters=filters)
+                 _call = self._arecall_http(_kw) if self._needs_http_recall(_kw) else client.arecall(**_kw)
+                 response = await asyncio.wait_for(_call, timeout=300)
+                 # Narrow-then-widen: the narrowing group asked for memories the query names.
+                 # If nothing carries those names the query may still be about something the
+                 # ranking can find (a misspelled name), so retry without the restriction and
+                 # let a score floor decide between "here it is" and "nothing relevant".
+                 _fb = (filters or {}).get("fallback")
+                 if _fb and not (response.results or []):
+                     _wide = {k: v for k, v in (filters or {}).items() if k != "narrow"}
+                     _kw2 = self._recall_kwargs(query, user_id, query_timestamp, filters=_wide)
+                     if _fb.get("min_final") is not None:
+                         _kw2["min_scores"] = {"final": _fb["min_final"]}
+                     _call2 = self._arecall_http(_kw2) if self._needs_http_recall(_kw2) else client.arecall(**_kw2)
+                     response = await asyncio.wait_for(_call2, timeout=300)
+                 break
+             except asyncio.TimeoutError:
+                 _log.warning(f"async_retrieve timed out for query={query[:60]!r}")
+                 return [], None
+             except Exception as e:
+                 if attempt == 4:
+                     _log.error(f"async_retrieve failed after 5 attempts ({e.__class__.__name__}) "
+                                f"for query={query[:60]!r} — returning empty context")
+                     return [], None
+                 _log.warning(f"async_retrieve {e.__class__.__name__} (attempt {attempt + 1}/5), "
+                              f"retrying in {delay}s")
+                 await asyncio.sleep(delay)
+                 delay *= 2
+         chunks = response.chunks or {}
+         docs = _build_docs(_deduplicate_results(response.results), chunks)
+         raw = response.model_dump() if hasattr(response, "model_dump") else None
+         return docs, raw
+ 
+     async def async_retrieve_by_steps(self, steps: list[int], query: str, k: int = 10, user_id: str | None = None, query_timestamp: str | None = None, compact: bool | None = None) -> tuple[list[Document], dict | None]:
+         # Legacy path: include_chunks for small sets, facts-only for large ranges
+         include_chunks = len(steps) <= 6
+         kwargs = self._recall_kwargs(query, user_id, query_timestamp, include_chunks=include_chunks, max_chunk_tokens=16384)
+         if steps:
+             kwargs["tags"] = [f"step_number:{s}" for s in steps]
+             kwargs["tags_match"] = "any_strict"
+         client = self._get_async_client()
+         try:
+             response = await asyncio.wait_for(client.arecall(**kwargs), timeout=120)
+         except asyncio.TimeoutError:
+             import logging
+             logging.getLogger(__name__).warning(f"async_retrieve_by_steps timed out for query={query[:60]!r}")
+             return [], None
+         chunks = response.chunks or {}
+         results = _deduplicate_results(response.results)
+         if not self._per_unit and user_id is not None and steps:
+             uid_filter = f"user:{user_id}"
+             results = [r for r in results if uid_filter in (r.tags or [])]
+         docs = _build_docs(results, chunks)
+         raw = response.model_dump() if hasattr(response, "model_dump") else None
+         return docs, raw
+ 
+     async def async_direct_answer(self, query: str, user_id: str | None = None, query_timestamp: str | None = None) -> tuple[str, str, dict | None]:
+         client = self._get_async_client()
+         try:
+             response = await asyncio.wait_for(
+                 client.areflect(**self._reflect_kwargs(query, user_id, query_timestamp)),
+                 timeout=300,
+             )
+         except asyncio.TimeoutError:
+             import logging
+             logging.getLogger(__name__).warning(f"async_direct_answer timed out for query={query[:60]!r}")
+             return "", "", None
+         answer = response.text or ""
+         raw = response.model_dump() if hasattr(response, "model_dump") else None
+         return answer, answer, raw
+ 
+     async def async_retrieve_by_tag(self, tag: str, query: str = "", user_id: str | None = None) -> tuple[list[Document], dict | None]:
+         client = self._get_async_client()
+         kwargs = self._recall_kwargs(query or "relevant information", user_id, None)
+         kwargs["tags"] = [tag]
+         kwargs["tags_match"] = "any_strict"
+         response = await client.arecall(**kwargs)
+         chunks = response.chunks or {}
+         docs = _build_docs(_deduplicate_results(response.results), chunks)
+         raw = response.model_dump() if hasattr(response, "model_dump") else None
+         return docs, raw
+ 
+ 
+ # ── HTTP provider (local server) ──────────────────────────────────────────────
+ 
+ class HindsightHTTPMemoryProvider(HindsightCloudMemoryProvider):
+     name = "hindsight-http"
+     description = "Hindsight via a self-hosted HTTP endpoint. Recall uses all memory types (world + experience + observation) with no type filter applied."
+     kind = "cloud"
+     provider = "hindsight"
+     variant = "http"
++    unit_concurrency = int(os.environ.get("AMB_UNIT_CONCURRENCY", "1"))  # isolation units ingested at once
+ 
+     def __init__(self):
+         # Bypass HindsightCloudMemoryProvider.__init__ — no API key required.
+         _HindsightBase.__init__(self)
+         from hindsight import HindsightClient
+         self._cloud_api_key = os.environ.get("HINDSIGHT_HTTP_KEY", "")
+         self._cloud_base_url = os.environ.get("HINDSIGHT_HTTP_URL", "http://localhost:8888")
+         self._client = HindsightClient(base_url=self._cloud_base_url, api_key=self._cloud_api_key)
+ 
+     def _bank_id_for(self, user_id: str | None) -> str:
+         if self._per_unit and user_id is not None:
+             return f"{self._bank_id}-u{user_id}"
+         return self._bank_id
+diff --git a/src/memory_bench/runner.py b/src/memory_bench/runner.py
+index 4b80b2e..e86b5a0 100644
+--- a/src/memory_bench/runner.py
++++ b/src/memory_bench/runner.py
+@@ -1,541 +1,556 @@
+ import asyncio
+ import json
+ import logging
++import os
+ import time
+ from dataclasses import asdict
+ from pathlib import Path
+ 
+ from .utils import count_tokens
+ 
+ from rich.console import Console
+ from rich.progress import Progress, SpinnerColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
+ 
+ _CONCURRENCY = 4
+ 
+ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+ logger = logging.getLogger(__name__)
+ 
+ from .dataset.base import Dataset
+ from .judge import GeminiJudge
+ from .memory.base import MemoryProvider
+ from .modes.base import ResponseMode
+ from .models import EvalSummary, QueryResult
+ 
+ console = Console()
+ 
+ 
+ def _score_mcq(answer: str, gold_answers: list[str]) -> tuple[bool, str]:
+     """Exact letter match — no LLM needed for multiple-choice questions."""
+     def norm(s: str) -> str:
+         return s.strip().lower().strip("(). ")[:1]
+ 
+     answer_letter = norm(answer)
+     for gold in gold_answers:
+         if norm(gold) == answer_letter:
+             return True, "letter match"
+     return False, f"expected one of {gold_answers!r}, got {answer!r}"
+ 
+ 
+ class EvalRunner:
+     def __init__(self, output_dir: Path = Path("outputs")):
+         self.output_dir = output_dir
+         self._judge = GeminiJudge()
+         self._dataset_metrics: dict = {}
+ 
+     def _get_judge(self, dataset: Dataset) -> "GeminiJudge":
+         dataset_llm = dataset.default_judge_llm() if hasattr(dataset, "default_judge_llm") else None
+         if dataset_llm is not None:
+             return GeminiJudge(llm=dataset_llm)
+         return self._judge
+ 
+     def run(
+         self,
+         dataset: Dataset,
+         split: str,
+         memory: MemoryProvider,
+         mode: ResponseMode,
+         category: str | None = None,
+         query_limit: int | None = None,
+         query_id: str | None = None,
+         unit: str | None = None,
+         doc_limit: int | None = None,
+         oracle: bool = False,
+         skip_ingestion: bool = False,
+         skip_ingested: bool = False,
+         skip_retrieval: bool = False,
+         skip_answer: bool = False,
+         only_failed: bool = False,
+         show_raw: bool = False,
+         run_name: str | None = None,
+         description: str | None = None,
+     ) -> EvalSummary:
+         effective_name = run_name or memory.name
+         cat_label = f"  [bold]Category:[/bold] {category}" if category else ""
+         name_label = f"  [bold]Run:[/bold] {effective_name}" if run_name else ""
+         console.print(f"\n[bold]Dataset:[/bold] {dataset.name}  [bold]Split:[/bold] {split}{cat_label}  [bold]Memory:[/bold] {memory.name}{name_label}  [bold]Mode:[/bold] {mode.name}\n")
+ 
+         task_type = dataset.task_type
+         if task_type == "mcq":
+             console.print("[dim]Task type: multiple-choice (exact letter match scoring)[/dim]")
+ 
+         if oracle and not dataset.supports_oracle():
+             raise ValueError(f"Dataset '{dataset.name}' does not support oracle mode (no gold_ids)")
+ 
+         memory.initialize()
+         store_dir = self.output_dir / dataset.name / effective_name / "_store" / split / (category or "all")
+ 
+         # Parse comma-separated categories; load query_limit queries per category
+         cats: list[str | None] = (
+             [c.strip() for c in category.split(",") if c.strip()]
+             if category else [None]
+         )
+ 
+         console.print("[dim]Loading queries...[/dim]")
+         if len(cats) > 1:
+             seen_ids: set[str] = set()
+             queries = []
+             for cat in cats:
+                 for q in dataset.load_queries(split, category=cat, limit=query_limit):
+                     if q.id not in seen_ids:
+                         seen_ids.add(q.id)
+                         queries.append(q)
+             # doc loading must not be filtered by category when combining multiple
+             doc_category: str | None = None
+         else:
+             queries = dataset.load_queries(split, category=cats[0], limit=query_limit)
+             doc_category = cats[0]
+ 
+         if query_id:
+             queries = [q for q in queries if q.id == query_id]
+             console.print(f"  1 query loaded [dim](--query-id)[/dim]")
+         elif only_failed:
+             prev = self._load_previous(dataset.name, split, effective_name, mode.name)
+             failed_ids = {r["query_id"] for r in prev.get("results", []) if not r.get("correct")}
+             queries = [q for q in queries if q.id in failed_ids]
+             console.print(f"  {len(queries)} failed queries loaded [dim](--only-failed)[/dim]")
+         else:
+             console.print(f"  {len(queries)} queries loaded")
+ 
++        # AMB_QUERY_IDS_FILE: run only the listed query ids (one per line), loading only their units.
++        ids_file = os.environ.get("AMB_QUERY_IDS_FILE")
++        if ids_file:
++            wanted = {line.strip() for line in Path(ids_file).read_text().splitlines() if line.strip()}
++            queries = [q for q in queries if q.id in wanted]
++            console.print(f"  filtered to {len(queries)} queries [dim](AMB_QUERY_IDS_FILE)[/dim]")
++
+         if unit:
+             queries = [q for q in queries if str(q.user_id) == str(unit)]
+             console.print(f"  filtered to unit {unit}: {len(queries)} queries [dim](--unit)[/dim]")
+ 
+         console.print("[dim]Loading documents...[/dim]")
+         if oracle:
+             gold_ids = {gid for q in queries for gid in q.gold_ids}
+             if not gold_ids:
+                 raise ValueError("Oracle mode requested but no gold_ids found in queries")
+             documents = dataset.load_documents(split, category=doc_category, ids=gold_ids)
+             console.print(f"  {len(documents)} gold documents loaded [dim](oracle mode)[/dim]")
+-        elif dataset.isolation_unit is not None and (query_limit is not None or unit is not None or query_id):
++        elif dataset.isolation_unit is not None and (query_limit is not None or unit is not None or query_id or ids_file):
+             # For isolated datasets narrowed to some queries (--query-limit, --unit, --query-id), load
+             # only the queried units' documents. --query-id used to fall through to the full load,
+             # so prepare() reset every unit's storage (on hindsight-coding: deleted every bank) to
+             # run one query.
+             query_user_ids = {q.user_id for q in queries if q.user_id}
+             documents = dataset.load_documents(split, category=doc_category, limit=doc_limit, user_ids=query_user_ids)
+             console.print(f"  {len(documents)} documents loaded")
+         else:
+             documents = dataset.load_documents(split, category=doc_category, limit=doc_limit)
+             console.print(f"  {len(documents)} documents loaded")
+ 
+         # Pass isolation unit IDs to prepare() so providers can set up per-unit storage
+         # (e.g. one bank per episode) before ingestion begins.
+         unit_ids: set[str] | None = None
+         if dataset.isolation_unit is not None:
+             unit_ids = {uid for doc in documents if (uid := dataset.get_isolation_id(doc)) is not None}
+ 
+         # Controlled vocabularies the provider's extractor should classify facts against —
+         # must be set before prepare/ingest so the bank carries them at retain time.
+         labels = dataset.extraction_labels()
+         if labels and hasattr(memory, "set_extraction_labels"):
+             memory.set_extraction_labels(labels)
+             console.print(f"[dim]Extraction labels: {', '.join(l['key'] for l in labels)}[/dim]")
+ 
+         memory.prepare(store_dir, unit_ids=unit_ids, reset=not skip_ingestion)
+ 
+         stored_contexts: dict[str, str] = {}
+         stored_answers: dict[str, str] = {}
+         if skip_retrieval or skip_answer:
+             prev = self._load_previous(dataset.name, split, effective_name, mode.name)
+             stored_contexts = {r["query_id"]: r["context"] for r in prev.get("results", []) if r.get("context")}
+             if skip_answer:
+                 stored_answers = {r["query_id"]: r["answer"] for r in prev.get("results", []) if r.get("answer")}
+                 console.print(f"[dim]Skipping retrieval+answer — re-judging {len(stored_answers)} cached answers.[/dim]\n")
+             else:
+                 console.print(f"[dim]Skipping retrieval — using {len(stored_contexts)} cached contexts.[/dim]\n")
+ 
+         def _prompt_fn(query, context, meta=None):
+             return dataset.build_rag_prompt(query, context, task_type, split, category, meta)
+ 
+         async def _process_one(q) -> QueryResult:
+             for _attempt in range(4):
+                 try:
+                     return await _process_one_attempt(q)
+                 except Exception as exc:
+                     msg = str(exc)
+                     if _attempt < 3 and any(code in msg for code in ("502", "503", "529", "429", "overloaded", "quota")):
+                         wait = 15 * (2 ** _attempt)
+                         logger.warning("[query:%s] transient error (attempt %d/4), retrying in %ds: %s", q.id, _attempt + 1, wait, msg[:120])
+                         await asyncio.sleep(wait)
+                     else:
+                         raise
+             raise RuntimeError("unreachable")
+ 
+         async def _process_one_attempt(q) -> QueryResult:
+             t_start = time.perf_counter()
+             logger.info("[query:%s] start — %s", q.id, q.query[:80])
+             meta = {**q.meta, "_prompt_fn": _prompt_fn}
+             rf = dataset.retrieval_filter(q)
+             if rf is not None:
+                 meta["retrieval_filter"] = rf
+             if skip_answer:
+                 from .models import AnswerResult
+                 ctx = stored_contexts.get(q.id, "")
+                 ans = stored_answers.get(q.id, "")
+                 answer_result = AnswerResult(answer=ans, reasoning="", context=ctx, retrieve_time_ms=0.0)
+             elif skip_retrieval:
+                 ctx = stored_contexts.get(q.id, "")
+                 answer_result = await asyncio.to_thread(mode.answer_from_context, q.query, ctx, task_type, meta)
+             else:
+                 answer_result = await mode.async_answer(q.query, memory, task_type=task_type, user_id=q.user_id, meta=meta)
+             logger.info("[query:%s] answer done in %.1fs (retrieve=%.0fms)", q.id, time.perf_counter() - t_start, answer_result.retrieve_time_ms)
++            raw = answer_result.raw_response
++            if isinstance(raw, dict) and isinstance(raw.get("provider_raw"), dict):
++                raw = raw["provider_raw"]  # retrieval mode wraps the provider's response
++            if isinstance(raw, dict) and isinstance(raw.get("results"), list):
++                # Ranked (memory id, document id, type, mentioned_at) — the raw response itself is not stored.
++                q.meta["retrieved"] = [[r.get("id"), r.get("document_id"), r.get("type"), str(r.get("mentioned_at") or "")]
++                                       for r in raw["results"] if isinstance(r, dict)]
+ 
+             score: float | None = None
+             coding_trajectory = coding_git_history = None
+             if task_type == "coding":
+                 # The CodingMode already built the repo, ran the agent (with interventions), and graded
+                 # by pytest. Correctness is solve-ness, not a judged answer; carry the metrics through.
+                 raw = answer_result.raw_response or {}
+                 correct = bool(raw.get("solved"))
+                 judge_reason = f"interventions={raw.get('interventions')} pytest={(raw.get('final_pytest') or '')[:80]}"
+                 q.meta.update({k: raw.get(k) for k in
+                                ("solved", "interventions", "capped", "cost_usd", "turns", "wall_s",
+                                 "final_pytest", "tokens", "agent", "model", "credited", "hindsight_calls",
+                                 "reflect_attempts", "credited_reply")
+                                if raw.get(k) is not None})
+                 # Agent-view payload: the patch is the "answer", injected memory the "context",
+                 # and the step trace + repo history land as row fields (view: "agent" in _save).
+                 if raw.get("final_patch"):
+                     answer_result.answer = raw["final_patch"]
+                 if raw.get("memory_context"):
+                     answer_result.context = raw["memory_context"]
+                 coding_trajectory = raw.get("trajectory")
+                 coding_git_history = raw.get("git_history")
+-            elif task_type == "retrieval":
++            elif task_type == "retrieval" or mode.name == "retrieval":
+                 # Belief-ID-scored datasets (PrecisionMemBench): the retrieved document
+                 # set IS the answer — no LLM, no judge, and an empty result can be a
+                 # legitimate pass, so this must run before the empty-context guard.
+                 docs = (answer_result.raw_response or {}).get("documents") or []
+                 correct, judge_reason = dataset.score_retrieval(q, docs)
+             elif not answer_result.context:
+                 correct, judge_reason = False, "empty context — no memories retrieved"
+             elif task_type == "mcq":
+                 correct, judge_reason = _score_mcq(answer_result.answer, q.gold_answers)
+             elif hasattr(dataset, "score_result"):
+                 # Dataset provides continuous scoring (e.g. BEAM paper methodology).
+                 # Build a temporary QueryResult to pass to score_result().
+                 tmp_result = QueryResult(
+                     query_id=q.id, query=q.query, answer=answer_result.answer,
+                     reasoning="", context=answer_result.context,
+                     context_tokens=0, retrieve_time_ms=0.0,
+                     gold_answers=q.gold_answers, correct=False, judge_reason="",
+                     meta=q.meta,
+                 )
+                 judge_llm = self._get_judge(dataset)._llm
+                 score = await asyncio.to_thread(dataset.score_result, tmp_result, judge_llm)
+                 score = float(score)
+                 correct = score >= 0.5
+                 judge_reason = f"score={score:.3f}"
+             else:
+                 # Use per-query judge if dataset supports it (e.g. LongMemEval has per-category prompts)
+                 if hasattr(dataset, "get_judge_prompt_fn"):
+                     judge_prompt_fn = dataset.get_judge_prompt_fn(
+                         q.meta.get("question_type") or q.meta.get("category"),
+                         meta=q.meta,
+                     )
+                 else:
+                     judge_prompt_fn = dataset.build_judge_prompt
+                 judge = await asyncio.to_thread(self._get_judge(dataset).score, q.query, answer_result.answer, q.gold_answers, judge_prompt_fn)
+                 correct, judge_reason = judge.correct, judge.reason
+             logger.info("[query:%s] done in %.1fs — correct=%s score=%s", q.id, time.perf_counter() - t_start, correct, score)
+ 
+             return QueryResult(
+                 query_id=q.id,
+                 query=q.query,
+                 answer=answer_result.answer,
+                 reasoning=answer_result.reasoning,
+                 context=answer_result.context,
+                 context_tokens=count_tokens(answer_result.context),
+                 retrieve_time_ms=answer_result.retrieve_time_ms,
+                 gold_answers=q.gold_answers,
+                 correct=correct,
+                 judge_reason=judge_reason,
+                 score=score,
+                 meta=q.meta,
+                 raw_response=None,  # skip storing to conserve disk space
+                 trajectory=coding_trajectory,
+                 git_history=coding_git_history,
+                 category_axes=dataset.get_result_categories(q.meta),
+             )
+ 
+         ingestion_ms = 0.0
+         ingested_docs_count = 0
+ 
+         if dataset.isolation_unit is not None:
+             # Unit-sequential mode: ingest one unit's document then answer all its queries
+             # before moving to the next unit. This matches the original AMA-bench setup and
+             # gives natural per-unit isolation without shared-bank tag scoping.
+             queries_by_unit: dict[str, list] = {}
+             for q in queries:
+                 if q.user_id:
+                     queries_by_unit.setdefault(q.user_id, []).append(q)
+ 
+             # Group all docs by unit, keeping only units that have at least one query
+             docs_by_unit: dict[str, list] = {}
+             for doc in documents:
+                 uid = dataset.get_isolation_id(doc)
+                 if uid is not None and uid in queries_by_unit:
+                     docs_by_unit.setdefault(uid, []).append(doc)
+ 
+             # Determine which units are already done (have results in previous run)
+             already_done_units: set[str] = set()
+             if skip_ingested:
+                 prev = self._load_previous(dataset.name, split, effective_name, mode.name)
+                 for r in prev.get("results", []):
+                     uid = (r.get("meta", {}).get("sample_id")
+                            or r.get("meta", {}).get("user_id")
+                            or r.get("meta", {}).get("conversation_id")
+                            or r.get("query_id"))
+                     if uid:
+                         already_done_units.add(uid)
+                 if already_done_units:
+                     console.print(f"[dim]Skipping {len(already_done_units)} already-ingested units: {', '.join(sorted(already_done_units))}[/dim]")
+ 
+             if skip_ingestion:
+                 console.print(f"[dim]Skipping ingestion (--skip-ingestion).[/dim]\n")
+                 ingestion_ms = self._load_previous_ingestion_ms(dataset.name, split, effective_name, mode.name)
+                 ingested_docs_count = self._load_previous_ingested_docs(dataset.name, split, effective_name, mode.name)
+             else:
+                 pending_units = len(docs_by_unit) - len(already_done_units)
+                 console.print(f"[dim]Ingesting {pending_units} units into {memory.name} ({getattr(memory, 'unit_concurrency', 1)} at a time)...[/dim]")
+ 
+             # Pre-load previous results for skip-ingested fast-path
+             _prev_by_unit: dict[str, list[QueryResult]] = {}
+             if already_done_units:
+                 prev_data = self._load_previous(dataset.name, split, effective_name, mode.name)
+                 import dataclasses
+                 _qr_fields = {f.name for f in dataclasses.fields(QueryResult)}
+                 for r in prev_data.get("results", []):
+                     uid = (r.get("meta", {}).get("sample_id")
+                            or r.get("meta", {}).get("user_id")
+                            or r.get("meta", {}).get("conversation_id")
+                            or r.get("query_id"))
+                     if uid in already_done_units:
+                         _prev_by_unit.setdefault(uid, []).append(
+                             QueryResult(**{k: v for k, v in r.items() if k in _qr_fields})
+                         )
+ 
+             async def _run_unit_sequential(progress, task_id):
+                 nonlocal ingestion_ms, ingested_docs_count
+                 concurrency = getattr(memory, "concurrency", _CONCURRENCY)
+                 sem = asyncio.Semaphore(concurrency)
+                 # Units are independent (that is what an isolation unit is), so a provider that can
+                 # ingest several at once says so with `unit_concurrency`. Within a unit the order
+                 # stays ingest -> answer. Default 1: units run one after another, as before.
+                 unit_sem = asyncio.Semaphore(max(1, int(getattr(memory, "unit_concurrency", 1))))
+                 results_by_unit: dict[str, list] = {}
+ 
+                 def _save_partial() -> None:
+                     done = [r for uid in docs_by_unit for r in results_by_unit.get(uid, []) if r]
+                     self._save(EvalSummary(
+                         dataset=dataset.name, split=split, category=category,
+                         memory_provider=memory.name, run_name=effective_name,
+                         mode=mode.name, oracle=oracle,
+                         total_queries=len(done),
+                         correct=sum(1 for r in done if r.correct),
+                         accuracy=0.0, ingestion_time_ms=round(ingestion_ms, 1),
+                         ingested_docs=ingested_docs_count,
+                         description=description, answer_llm=mode.llm_id,
+                         judge_llm=(None if dataset.task_type in ("coding", "retrieval") else self._get_judge(dataset)._llm.model_id),
+                         results=done,
+                     ))
+ 
+                 async def run_unit(unit_id, unit_docs):
+                     nonlocal ingestion_ms, ingested_docs_count
+                     if unit_id in already_done_units:
+                         unit_prev = _prev_by_unit.get(unit_id, [])
+                         results_by_unit[unit_id] = unit_prev
+                         progress.advance(task_id, len(unit_prev))
+                         return
+                     async with unit_sem:
+                         if not skip_ingestion:
+                             t0 = time.perf_counter()
+                             await memory.async_ingest(unit_docs)
+                             ingestion_ms += (time.perf_counter() - t0) * 1000
+                             ingested_docs_count += len(unit_docs)
+ 
+                         unit_queries = queries_by_unit.get(unit_id, [])
+                         unit_results = [None] * len(unit_queries)
+ 
+                         async def bounded(i, q):
+                             async with sem:
+                                 unit_results[i] = await _process_one(q)
+                                 progress.advance(task_id)
+ 
+                         await asyncio.gather(*[bounded(i, q) for i, q in enumerate(unit_queries)])
+                         results_by_unit[unit_id] = unit_results
+                     # Save incrementally after each unit to survive crashes
+                     _save_partial()
+ 
+                 await asyncio.gather(*[run_unit(uid, docs) for uid, docs in docs_by_unit.items()])
+                 # Same order as the units, whatever order they finished in.
+                 return [r for uid in docs_by_unit for r in results_by_unit.get(uid, [])]
+ 
+             with Progress(SpinnerColumn(), "[progress.description]{task.description}", BarColumn(),
+                           TaskProgressColumn(), TimeElapsedColumn(), console=console) as progress:
+                 task_id = progress.add_task("Evaluating", total=len(queries))
+                 results = asyncio.run(_run_unit_sequential(progress, task_id))
+ 
+         else:
+             # Batch mode: ingest all documents upfront, then answer all queries.
+             if skip_ingestion:
+                 console.print(f"[dim]Skipping ingestion (--skip-ingestion).[/dim]\n")
+                 ingestion_ms = self._load_previous_ingestion_ms(dataset.name, split, effective_name, mode.name)
+                 ingested_docs_count = self._load_previous_ingested_docs(dataset.name, split, effective_name, mode.name)
+             else:
+                 console.print(f"[dim]Ingesting into {memory.name}...[/dim]")
+                 t0 = time.perf_counter()
+                 memory.ingest(documents)
+                 ingestion_ms = (time.perf_counter() - t0) * 1000
+                 ingested_docs_count = len(documents)
+                 avg = f" ({ingestion_ms / len(documents):.1f}ms/doc avg)" if documents else ""
+                 console.print(f"  ingested in {ingestion_ms:.0f}ms{avg}\n")
+ 
+             async def _run_all(progress, task_id):
+                 concurrency = getattr(memory, "concurrency", _CONCURRENCY)
+                 sem = asyncio.Semaphore(concurrency)
+                 results = [None] * len(queries)
+ 
+                 async def bounded(i, q):
+                     async with sem:
+                         results[i] = await _process_one(q)
+                         progress.advance(task_id)
+ 
+                 await asyncio.gather(*[bounded(i, q) for i, q in enumerate(queries)])
+                 return results
+ 
+             with Progress(SpinnerColumn(), "[progress.description]{task.description}", BarColumn(),
+                           TaskProgressColumn(), TimeElapsedColumn(), console=console) as progress:
+                 task_id = progress.add_task("Evaluating", total=len(queries))
+                 results = asyncio.run(_run_all(progress, task_id))
+ 
+         if show_raw:
+             for r in results:
+                 if r.raw_response is not None:
+                     console.rule(f"[dim]raw response — query {r.query_id}[/dim]")
+                     console.print_json(json.dumps(r.raw_response))
+ 
+         if only_failed:
+             results = self._merge(results, dataset.name, split, effective_name, mode.name)
+ 
+         correct_count = sum(1 for r in results if r.correct)
+         has_scores = any(r.score is not None for r in results)
+         if has_scores:
+             scored = [r.score for r in results if r.score is not None]
+             accuracy = sum(scored) / len(scored) if scored else 0.0
+         else:
+             accuracy = correct_count / len(results) if results else 0.0
+         summary = EvalSummary(
+             dataset=dataset.name,
+             split=split,
+             category=category,
+             memory_provider=memory.name,
+             run_name=effective_name,
+             mode=mode.name,
+             oracle=oracle,
+             total_queries=len(results),
+             correct=correct_count,
+             accuracy=accuracy,
+             ingestion_time_ms=round(ingestion_ms, 1),
+             ingested_docs=ingested_docs_count,
+             description=description,
+             answer_llm=mode.llm_id,
+             judge_llm=(None if dataset.task_type in ("coding", "retrieval") else self._get_judge(dataset)._llm.model_id),
+             results=results,
+         )
+         # Final save truncates to THIS run's query set: without it, a later smaller run (e.g. -q 6)
+         # keeps stale rows from an earlier larger run under the same run name, and the output file
+         # silently reads as a bigger run than actually happened. Partial saves (mid-run, above)
+         # deliberately do NOT truncate — they accumulate units as they complete.
+         self._dataset_metrics = dataset.summary_metrics(results) or {}
+         self._save(summary, query_ids={q.id for q in queries})
+         memory.cleanup()
+         return summary
+ 
+     def _merge(self, new_results: list[QueryResult], dataset: str, split: str, memory: str, mode: str) -> list[QueryResult]:
+         """Merge new results into existing ones — new entries win by query_id."""
+         prev = self._load_previous(dataset, split, memory, mode)
+         old_by_id = {r["query_id"]: r for r in prev.get("results", [])}
+         new_by_id = {r.query_id: r for r in new_results}
+         old_by_id.update(new_by_id)  # new results win
+         return [
+             new_by_id.get(qid) or QueryResult(**r)
+             for qid, r in old_by_id.items()
+         ]
+ 
+     def _output_path(self, dataset: str, split: str, run_name: str, mode: str) -> Path:
+         return self.output_dir / dataset / run_name / mode / f"{split}.json"
+ 
+     def _load_previous(self, dataset: str, split: str, memory: str, mode: str) -> dict:
+         path = self._output_path(dataset, split, memory, mode)
+         if path.exists():
+             try:
+                 return json.loads(path.read_text())
+             except Exception:
+                 pass
+         return {}
+ 
+     def _load_previous_ingestion_ms(self, dataset: str, split: str, memory: str, mode: str) -> float:
+         return self._load_previous(dataset, split, memory, mode).get("ingestion_time_ms", 0.0)
+ 
+     def _load_previous_ingested_docs(self, dataset: str, split: str, memory: str, mode: str) -> int:
+         return self._load_previous(dataset, split, memory, mode).get("ingested_docs", 0)
+ 
+     def _save(self, summary: EvalSummary, query_ids: set | None = None) -> None:
+         path = self._output_path(summary.dataset, summary.split, summary.run_name, summary.mode)
+         path.parent.mkdir(parents=True, exist_ok=True)
+         # Always merge: new results overwrite existing ones by query_id, old ones are kept —
+         # except that a final save (query_ids given) drops rows outside this run's query set.
+         merged = self._merge(summary.results, summary.dataset, summary.split, summary.run_name, summary.mode)
+         if query_ids is not None:
+             merged = [r for r in merged if r.query_id in query_ids]
+         d = asdict(summary)
+         # Dataset-specific headline metrics, inserted next to accuracy: the manifest reader
+         # regexes only the first 512 bytes of the file, so they have to land early.
+         extra = self._dataset_metrics or {}
+         if extra:
+             reordered = {}
+             for key, value in d.items():
+                 reordered[key] = value
+                 if key == "accuracy":
+                     reordered.update(extra)
+             d = reordered
+         if summary.mode == "coding":
+             d["view"] = "agent"   # the UI's multi-turn agent renderer
+         results_dicts      = [asdict(r) for r in merged]
+         d["total_queries"] = len(merged)
+         d["correct"]       = sum(1 for r in merged if r.correct)
+         has_scores = any(r.score is not None for r in merged)
+         if has_scores:
+             scored = [r.score for r in merged if r.score is not None]
+             d["accuracy"] = sum(scored) / len(scored) if scored else 0.0
+         else:
+             d["accuracy"] = d["correct"] / d["total_queries"] if merged else 0.0
+         rec_times  = [r["retrieve_time_ms"] for r in results_dicts if r.get("retrieve_time_ms") is not None]
+         ctx_tokens = [r["context_tokens"]   for r in results_dicts if r.get("context_tokens")   is not None]
+         d["avg_retrieve_time_ms"] = round(sum(rec_times)  / len(rec_times),  1) if rec_times  else None
+         d["avg_context_tokens"]   = round(sum(ctx_tokens) / len(ctx_tokens), 1) if ctx_tokens else None
+         d["results"]       = results_dicts
+         path.write_text(json.dumps(d, indent=2))
+         console.print(f"\n[green]Saved → {path}[/green]")

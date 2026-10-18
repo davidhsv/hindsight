@@ -1,0 +1,466 @@
+{
+ "B-obs": {
+  "knowledge-update:earlier@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@5": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 0.875,
+   "ref_only": 0,
+   "arm_only": 5,
+   "p_mcnemar": 0.0625
+  },
+  "knowledge-update:latest@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@5": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest_first": {
+   "n": 40,
+   "rate": 0.225,
+   "ref_rate": 0.825,
+   "ref_only": 24,
+   "arm_only": 0,
+   "p_mcnemar": 1.1920928955078125e-07
+  }
+ },
+ "D-obs": {
+  "knowledge-update:earlier@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@5": {
+   "n": 40,
+   "rate": 0.975,
+   "ref_rate": 0.875,
+   "ref_only": 0,
+   "arm_only": 4,
+   "p_mcnemar": 0.125
+  },
+  "knowledge-update:latest@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@5": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest_first": {
+   "n": 40,
+   "rate": 0.175,
+   "ref_rate": 0.825,
+   "ref_only": 26,
+   "arm_only": 0,
+   "p_mcnemar": 2.9802322387695312e-08
+  }
+ },
+ "P-obs": {
+  "knowledge-update:earlier@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@5": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 0.875,
+   "ref_only": 0,
+   "arm_only": 5,
+   "p_mcnemar": 0.0625
+  },
+  "knowledge-update:latest@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@5": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest_first": {
+   "n": 40,
+   "rate": 0.15,
+   "ref_rate": 0.825,
+   "ref_only": 27,
+   "arm_only": 0,
+   "p_mcnemar": 1.4901161193847656e-08
+  }
+ },
+ "T-obs": {
+  "knowledge-update:earlier@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@5": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 0.875,
+   "ref_only": 0,
+   "arm_only": 5,
+   "p_mcnemar": 0.0625
+  },
+  "knowledge-update:latest@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@5": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest_first": {
+   "n": 40,
+   "rate": 0.15,
+   "ref_rate": 0.825,
+   "ref_only": 27,
+   "arm_only": 0,
+   "p_mcnemar": 1.4901161193847656e-08
+  }
+ },
+ "E-obs": {
+  "knowledge-update:earlier@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@5": {
+   "n": 40,
+   "rate": 0.875,
+   "ref_rate": 0.875,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@5": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest_first": {
+   "n": 40,
+   "rate": 0.825,
+   "ref_rate": 0.825,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  }
+ },
+ "E-obs-hist": {
+  "knowledge-update:earlier@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@5": {
+   "n": 40,
+   "rate": 0.925,
+   "ref_rate": 0.875,
+   "ref_only": 1,
+   "arm_only": 3,
+   "p_mcnemar": 0.625
+  },
+  "knowledge-update:latest@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@5": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest_first": {
+   "n": 40,
+   "rate": 0.8,
+   "ref_rate": 0.825,
+   "ref_only": 1,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  }
+ },
+ "E-obs-nodecay": {
+  "knowledge-update:earlier@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@5": {
+   "n": 40,
+   "rate": 0.925,
+   "ref_rate": 0.875,
+   "ref_only": 0,
+   "arm_only": 2,
+   "p_mcnemar": 0.5
+  },
+  "knowledge-update:latest@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@5": {
+   "n": 40,
+   "rate": 0.975,
+   "ref_rate": 1.0,
+   "ref_only": 1,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest_first": {
+   "n": 40,
+   "rate": 0.825,
+   "ref_rate": 0.825,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  }
+ },
+ "E-obs-off": {
+  "knowledge-update:earlier@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:earlier@5": {
+   "n": 40,
+   "rate": 0.975,
+   "ref_rate": 0.875,
+   "ref_only": 1,
+   "arm_only": 5,
+   "p_mcnemar": 0.21875
+  },
+  "knowledge-update:latest@10": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@20": {
+   "n": 40,
+   "rate": 1.0,
+   "ref_rate": 1.0,
+   "ref_only": 0,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest@5": {
+   "n": 40,
+   "rate": 0.975,
+   "ref_rate": 1.0,
+   "ref_only": 1,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  },
+  "knowledge-update:latest_first": {
+   "n": 40,
+   "rate": 0.8,
+   "ref_rate": 0.825,
+   "ref_only": 1,
+   "arm_only": 0,
+   "p_mcnemar": 1.0
+  }
+ }
+}
