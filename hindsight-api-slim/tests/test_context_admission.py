@@ -4,6 +4,7 @@ replay. No database and no model: the decision model is a fake that records its 
 
 import math
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,8 +41,13 @@ from hindsight_api.engine.search.types import ArmScores, MergedCandidate, Retrie
 REPO = "github.com/acme/payments"
 
 
+#: A server with ``HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL`` on: filter, strict and the
+#: decision-model scorers are experimental, and these tests exercise them.
+EXPERIMENTAL = SimpleNamespace(context_admission_experimental=True)
+
+
 def _settings(**overrides) -> ContextAdmissionSettings:
-    base = ContextAdmissionSettings.resolve({"context_admission_mode": "filter"}, None)
+    base = ContextAdmissionSettings.resolve({"context_admission_mode": "filter"}, EXPERIMENTAL)
     return replace(base, **overrides)
 
 

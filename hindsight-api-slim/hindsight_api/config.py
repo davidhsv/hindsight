@@ -1170,6 +1170,7 @@ ENV_CONTEXT_ADMISSION_SCOPE_KEYS = "HINDSIGHT_API_CONTEXT_ADMISSION_SCOPE_KEYS"
 ENV_CONTEXT_ADMISSION_HARD_SCOPE_KEYS = "HINDSIGHT_API_CONTEXT_ADMISSION_HARD_SCOPE_KEYS"
 ENV_CONTEXT_ADMISSION_UNCERTAIN_MARGIN = "HINDSIGHT_API_CONTEXT_ADMISSION_UNCERTAIN_MARGIN"
 ENV_CONTEXT_ADMISSION_JEV_WEIGHT = "HINDSIGHT_API_CONTEXT_ADMISSION_JEV_WEIGHT"
+ENV_CONTEXT_ADMISSION_EXPERIMENTAL = "HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL"
 
 # Audit log settings
 # AUDIT_LOG_ENABLED is the deployment-wide default and is overridable per bank
@@ -1541,6 +1542,13 @@ CONTEXT_ADMISSION_MODES = ("off", "observe", "filter", "strict")
 DEFAULT_CONTEXT_ADMISSION_MODE = "off"
 CONTEXT_ADMISSION_SCORERS = ("deterministic", "jev", "hybrid")
 DEFAULT_CONTEXT_ADMISSION_SCORER = "deterministic"
+# The modes that change what recall returns, and the scorers that ask a decision model on every
+# gated recall. None met its benchmark bar, so they are accepted only while the server-level
+# experimental switch is on; without it a bank runs off or observe, and observe always scores
+# deterministically (it never calls the decision model, whatever the switch says).
+CONTEXT_ADMISSION_EXPERIMENTAL_MODES = ("filter", "strict")
+CONTEXT_ADMISSION_EXPERIMENTAL_SCORERS = ("jev", "hybrid")
+DEFAULT_CONTEXT_ADMISSION_EXPERIMENTAL = False
 # Admission-score thresholds per request purpose. Automatic injection favours precision
 # (a wrong memory in an unrequested context costs more than a missing one); an explicit
 # search favours recall. historical_search uses the explicit threshold.
@@ -2780,11 +2788,15 @@ CONTEXT_ADMISSION_CONSTRAINED_FIELDS = frozenset(
 )
 
 
-def normalize_context_admission_value(field_name: str, value: Any, *, name: str | None = None) -> Any:
+def normalize_context_admission_value(
+    field_name: str, value: Any, *, experimental: bool, name: str | None = None
+) -> Any:
     """Validate one hierarchical context-admission value and return its normalized form.
 
     One rule set for both doors, like :func:`normalize_adaptive_memory_value`: the env
     (``HindsightConfig.validate``, reported by env name) and the bank-config API (by field name).
+    ``experimental`` is the server's ``context_admission_experimental``: without it the modes that
+    change recall results (filter, strict) are rejected.
     """
     label = name or field_name
     choices = _CONTEXT_ADMISSION_CHOICE_FIELDS.get(field_name)
@@ -2792,6 +2804,12 @@ def normalize_context_admission_value(field_name: str, value: Any, *, name: str 
         normalized = value.strip().lower() if isinstance(value, str) else value
         if normalized not in choices:
             raise ValueError(f"{label} must be one of {', '.join(choices)}, got {value!r}")
+        if normalized in CONTEXT_ADMISSION_EXPERIMENTAL_MODES and not experimental:
+            raise ValueError(
+                f"{label}={normalized!r} is experimental: it changes what recall returns. Set "
+                f"{ENV_CONTEXT_ADMISSION_EXPERIMENTAL}=true on the server to allow filter and strict; "
+                f"without it the modes are off and observe"
+            )
         return normalized
     if field_name in _CONTEXT_ADMISSION_UNIT_INTERVAL_FIELDS:
         _require_number_in_range(label, value, minimum=0.0, maximum=1.0)
@@ -3853,6 +3871,7 @@ class HindsightConfig:
     context_admission_hard_scope_keys: list[str]
     context_admission_uncertain_margin: float
     context_admission_jev_weight: float
+    context_admission_experimental: bool
     reranker_cohere_api_key: str | None
     reranker_cohere_model: str
     reranker_cohere_base_url: str | None
@@ -4847,12 +4866,16 @@ class HindsightConfig:
         Per-bank values are held to the same rules by ``normalize_context_admission_value`` in
         the bank-config API.
         """
+        experimental = bool(self.context_admission_experimental)
         for field_name in sorted(CONTEXT_ADMISSION_CONSTRAINED_FIELDS):
             setattr(
                 self,
                 field_name,
                 normalize_context_admission_value(
-                    field_name, getattr(self, field_name), name=f"HINDSIGHT_API_{field_name.upper()}"
+                    field_name,
+                    getattr(self, field_name),
+                    experimental=experimental,
+                    name=f"HINDSIGHT_API_{field_name.upper()}",
                 ),
             )
         scorer = (self.context_admission_scorer or "").strip().lower()
@@ -4860,6 +4883,12 @@ class HindsightConfig:
             raise ValueError(
                 f"{ENV_CONTEXT_ADMISSION_SCORER} must be one of {', '.join(CONTEXT_ADMISSION_SCORERS)}, "
                 f"got {self.context_admission_scorer!r}"
+            )
+        if scorer in CONTEXT_ADMISSION_EXPERIMENTAL_SCORERS and not experimental:
+            raise ValueError(
+                f"{ENV_CONTEXT_ADMISSION_SCORER}={scorer!r} is experimental: it asks the decision model on every "
+                f"gated recall. Set {ENV_CONTEXT_ADMISSION_EXPERIMENTAL}=true to allow jev and hybrid (used by filter "
+                f"and strict only; observe always scores deterministically); without it the scorer is deterministic"
             )
         self.context_admission_scorer = scorer
         for env_name, value in (
@@ -5666,6 +5695,9 @@ class HindsightConfig:
                 ENV_CONTEXT_ADMISSION_JEV_WEIGHT,
                 os.getenv(ENV_CONTEXT_ADMISSION_JEV_WEIGHT),
                 DEFAULT_CONTEXT_ADMISSION_JEV_WEIGHT,
+            ),
+            context_admission_experimental=_parse_boolean_env(
+                ENV_CONTEXT_ADMISSION_EXPERIMENTAL, DEFAULT_CONTEXT_ADMISSION_EXPERIMENTAL
             ),
             # Cohere reranker (with backward-compatible fallback to shared API key)
             reranker_cohere_api_key=os.getenv(ENV_RERANKER_COHERE_API_KEY) or os.getenv(ENV_COHERE_API_KEY),

@@ -26,6 +26,7 @@ from hindsight_api.config import (
     RECALL_BUDGET_FUNCTIONS,
     HindsightConfig,
     _get_raw_config,
+    get_config,
     normalize_adaptive_memory_value,
     normalize_config_dict,
     normalize_context_admission_value,
@@ -1057,10 +1058,12 @@ def _validate_adaptive_memory_updates(updates: dict[str, Any]) -> None:
 
 def _validate_context_admission_updates(updates: dict[str, Any]) -> None:
     """Validate context-admission config updates in place (same rules as the env); the mode is
-    lower-cased before it is persisted."""
+    lower-cased before it is persisted. Filter and strict are refused unless the server runs with
+    ``context_admission_experimental``."""
+    experimental = get_config().context_admission_experimental
     for key in CONTEXT_ADMISSION_CONSTRAINED_FIELDS & updates.keys():
         if updates[key] is not None:
-            updates[key] = normalize_context_admission_value(key, updates[key])
+            updates[key] = normalize_context_admission_value(key, updates[key], experimental=experimental)
 
 
 # Stored values of these choice fields that are no longer (or never were) valid fall
@@ -1074,17 +1077,22 @@ _STORED_CHOICE_FALLBACKS: dict[str, str] = {
 
 
 def _coerce_stored_choice(bank_id: str, key: str, value: Any) -> Any:
-    """Normalize a stored choice override, or fall back to the safe value when it is unknown."""
-    normalize = (
-        normalize_context_admission_value if key.startswith("context_admission_") else normalize_adaptive_memory_value
-    )
+    """Normalize a stored choice override, or fall back to the safe value when it is unknown.
+
+    A stored filter or strict admission mode on a server without the experimental switch is
+    treated like an unknown value: the bank runs with admission off.
+    """
     try:
-        return normalize(key, value)
+        if key.startswith("context_admission_"):
+            return normalize_context_admission_value(
+                key, value, experimental=get_config().context_admission_experimental
+            )
+        return normalize_adaptive_memory_value(key, value)
     except ValueError:
         fallback = _STORED_CHOICE_FALLBACKS[key]
         logger.warning(
-            f"Bank {bank_id} config field '{key}' holds the unknown value {value!r}; using {fallback!r}. "
-            f"Re-save this field to silence this warning."
+            f"Bank {bank_id} config field '{key}' holds the value {value!r}, which this server does not accept; "
+            f"using {fallback!r}. Re-save this field to silence this warning."
         )
         return fallback
 

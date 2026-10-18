@@ -3501,9 +3501,11 @@ class Hindsight:
                 that name no view and answer them from the historical view (or as of the date).
                 Lifecycle mode only.
             context_admission_mode: Context admission for external recalls: 'off' (default;
-                recall is unchanged), 'observe' (decisions go to traces and metrics only), 'filter'
-                (rejected memories are dropped and recall may return none) or 'strict' (filter plus
-                hard scope, near-duplicate suppression and the memory/token budget).
+                recall is unchanged) or 'observe' (decisions go to traces and metrics only). The
+                experimental 'filter' (rejected memories are dropped and recall may return none) and
+                'strict' (filter plus hard scope, near-duplicate suppression and the memory/token
+                budget) are accepted only when the server sets
+                HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL.
             context_admission_threshold_auto: Admission score a memory needs when the recall's
                 purpose is 'auto_context', in [0, 1].
             context_admission_threshold_explicit: Admission score a memory needs when the purpose is

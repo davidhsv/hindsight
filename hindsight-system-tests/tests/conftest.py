@@ -173,6 +173,24 @@ def scoped_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iter
 
 
 @pytest.fixture(scope="session")
+def experimental_admission_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iterator[object]:
+    """A server that allows the experimental context-admission modes (filter, strict).
+
+    The switch (``HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL``) is server-level, hence a process.
+    HTTP only, like ``typesafe_server``: both servers share one database, and the default server's
+    worker runs this one's queued work (retain, consolidation), which no admission setting touches,
+    since the gate never runs on internal recalls.
+    """
+    server = start_hindsight_server(
+        stub_url=stub_server.url,
+        log_path=tmp_path_factory.mktemp("experimental-admission-server") / "server.log",
+        extra_env={"HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL": "true", "HINDSIGHT_API_WORKER_ENABLED": "false"},
+    )
+    yield server
+    server.stop()
+
+
+@pytest.fixture(scope="session")
 def retrying_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iterator[object]:
     """A server that will actually re-ask the extraction model once.
 
@@ -297,6 +315,13 @@ def archiving_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> I
 @pytest.fixture
 async def archiving_client(archiving_server) -> AsyncIterator[Hindsight]:
     client = Hindsight(base_url=archiving_server.url)
+    yield client
+    await client.aclose()
+
+
+@pytest.fixture
+async def experimental_admission_client(experimental_admission_server) -> AsyncIterator[Hindsight]:
+    client = Hindsight(base_url=experimental_admission_server.url)
     yield client
     await client.aclose()
 

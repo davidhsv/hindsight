@@ -127,6 +127,21 @@ def _reset_config_cache():
     clear_config_cache()
 
 
+@pytest.fixture
+def context_admission_experimental(monkeypatch):
+    """A server with ``HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL`` on.
+
+    Filter, strict and the decision-model scorers are refused without it; a test that exercises
+    them asks for this fixture. The cache is cleared after the env changes, so an engine built
+    before the test body still reads the switch on its next ``get_config()``.
+    """
+    from hindsight_api.config import clear_config_cache
+
+    monkeypatch.setenv("HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL", "true")
+    clear_config_cache()
+    return monkeypatch
+
+
 @pytest.fixture(autouse=True)
 def _cleanup_leaked_span_recorders():
     """Fail-safe for the process-global LLM-trace recorder registry (#2229).

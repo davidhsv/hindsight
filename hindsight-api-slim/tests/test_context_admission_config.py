@@ -39,6 +39,7 @@ _STATIC = {
     "context_admission_hard_scope_keys": ["repository"],
     "context_admission_uncertain_margin": 0.1,
     "context_admission_jev_weight": 0.5,
+    "context_admission_experimental": False,
 }
 _DECISION_MODEL = (
     "context_admission_decision_model_provider",
@@ -101,6 +102,7 @@ def test_static_proxy_hides_per_bank_fields(clean_env):
 
 
 def test_env_values_are_read_and_weights_merge_over_the_defaults(clean_env):
+    clean_env.setenv("HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL", "true")
     clean_env.setenv("HINDSIGHT_API_CONTEXT_ADMISSION_MODE", " Filter ")
     clean_env.setenv("HINDSIGHT_API_CONTEXT_ADMISSION_SCORER", "HYBRID")
     clean_env.setenv("HINDSIGHT_API_CONTEXT_ADMISSION_CANDIDATES", "12")
@@ -110,6 +112,7 @@ def test_env_values_are_read_and_weights_merge_over_the_defaults(clean_env):
     clean_env.setenv("HINDSIGHT_API_CONTEXT_ADMISSION_HARD_SCOPE_KEYS", "repository, workspace")
     config = HindsightConfig.from_env()
     config.validate()
+    assert config.context_admission_experimental is True
     assert config.context_admission_mode == "filter"
     assert config.context_admission_scorer == "hybrid"
     assert config.context_admission_candidates == 12
@@ -179,7 +182,7 @@ def test_decision_model_override_for_context_admission(clean_env):
 
 
 @pytest.mark.asyncio
-async def test_bank_override_is_validated_and_normalized():
+async def test_bank_override_is_validated_and_normalized(context_admission_experimental):
     resolver = ConfigResolver(backend=FakeBankConfigBackend())
     validated = await resolver.validate_bank_config_updates(
         _bank(),
@@ -236,6 +239,7 @@ def test_unknown_stored_mode_is_coerced_to_off(stored, expected):
 
 def test_settings_resolve_leniently(clean_env):
     """A stored or tenant value out of range falls back to its default instead of failing recall."""
+    clean_env.setenv("HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL", "true")
     config = HindsightConfig.from_env()
     settings = ContextAdmissionSettings.resolve(
         {
@@ -255,3 +259,82 @@ def test_settings_resolve_leniently(clean_env):
     assert settings.scorer is ScorerKind.DETERMINISTIC
     assert settings.hard_scope_keys == ("repository",)
     assert ContextAdmissionSettings.resolve({"context_admission_mode": "turbo"}, config).mode is AdmissionMode.OFF
+
+
+# --------------------------------------------------------------------------- the experimental switch
+
+
+@pytest.mark.parametrize(
+    ("env", "named"),
+    [
+        ({"HINDSIGHT_API_CONTEXT_ADMISSION_MODE": "filter"}, "HINDSIGHT_API_CONTEXT_ADMISSION_MODE='filter'"),
+        ({"HINDSIGHT_API_CONTEXT_ADMISSION_MODE": " STRICT "}, "HINDSIGHT_API_CONTEXT_ADMISSION_MODE='strict'"),
+        ({"HINDSIGHT_API_CONTEXT_ADMISSION_SCORER": "jev"}, "HINDSIGHT_API_CONTEXT_ADMISSION_SCORER='jev'"),
+        ({"HINDSIGHT_API_CONTEXT_ADMISSION_SCORER": "Hybrid"}, "HINDSIGHT_API_CONTEXT_ADMISSION_SCORER='hybrid'"),
+    ],
+)
+def test_without_the_experimental_switch_gating_modes_and_model_scorers_fail_startup(clean_env, env, named):
+    for name, value in env.items():
+        clean_env.setenv(name, value)
+    with pytest.raises(ValueError, match="is experimental") as error:
+        HindsightConfig.from_env().validate()
+    assert named in str(error.value)
+    assert "HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL=true" in str(error.value)
+
+
+@pytest.mark.parametrize("mode", ["off", "observe"])
+def test_off_and_observe_need_no_switch(clean_env, mode):
+    clean_env.setenv("HINDSIGHT_API_CONTEXT_ADMISSION_MODE", mode)
+    config = HindsightConfig.from_env()
+    config.validate()
+    assert config.context_admission_mode == mode
+    assert config.context_admission_experimental is False
+
+
+def test_the_switch_is_server_level_and_strictly_parsed(clean_env):
+    assert "context_admission_experimental" not in HindsightConfig.get_configurable_fields()
+    clean_env.setenv("HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL", "yes")
+    with pytest.raises(ValueError, match="HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL"):
+        HindsightConfig.from_env()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["filter", " Strict "])
+async def test_without_the_switch_a_bank_cannot_be_set_to_filter_or_strict(clean_env, mode):
+    resolver = ConfigResolver(backend=FakeBankConfigBackend())
+    with pytest.raises(ValueError, match=r"context_admission_mode='(filter|strict)' is experimental"):
+        await resolver.validate_bank_config_updates(_bank(), {"context_admission_mode": mode})
+    validated = await resolver.validate_bank_config_updates(_bank(), {"context_admission_mode": "Observe"})
+    assert validated.updates == {"context_admission_mode": "observe"}
+
+
+@pytest.mark.parametrize("stored", ["filter", "strict"])
+def test_without_the_switch_a_stored_gating_mode_reads_as_off(clean_env, stored):
+    assert _coerce_stored_bank_overrides("bank", {"context_admission_mode": stored}) == {
+        "context_admission_mode": "off"
+    }
+
+
+def test_with_the_switch_a_stored_gating_mode_is_kept(context_admission_experimental):
+    assert _coerce_stored_bank_overrides("bank", {"context_admission_mode": "Strict"}) == {
+        "context_admission_mode": "strict"
+    }
+
+
+@pytest.mark.parametrize("stored", ["filter", "strict"])
+def test_without_the_switch_settings_resolve_a_tenant_gating_mode_as_off(clean_env, stored):
+    """A tenant override is never validated; the engine still reads it as off, not as a gate."""
+    config = HindsightConfig.from_env()
+    assert ContextAdmissionSettings.resolve({"context_admission_mode": stored}, config).mode is AdmissionMode.OFF
+
+
+@pytest.mark.parametrize("scorer", ["jev", "hybrid"])
+def test_observe_scores_deterministically_whatever_the_scorer(clean_env, scorer):
+    clean_env.setenv("HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL", "true")
+    clean_env.setenv("HINDSIGHT_API_CONTEXT_ADMISSION_SCORER", scorer)
+    config = HindsightConfig.from_env()
+    config.validate()
+    observe = ContextAdmissionSettings.resolve({"context_admission_mode": "observe"}, config)
+    assert (observe.mode, observe.scorer) == (AdmissionMode.OBSERVE, ScorerKind.DETERMINISTIC)
+    strict = ContextAdmissionSettings.resolve({"context_admission_mode": "strict"}, config)
+    assert (strict.mode, strict.scorer) == (AdmissionMode.STRICT, ScorerKind(scorer))

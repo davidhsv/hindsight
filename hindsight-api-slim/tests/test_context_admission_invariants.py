@@ -29,7 +29,8 @@ from hindsight_api.engine.memory_engine import Budget, count_tokens
 from tests.test_adaptive_lifecycle_recall import QUERY as JAVA_QUERY
 from tests.test_adaptive_lifecycle_recall import _seed, java_upgrade  # noqa: F401 — fixture
 
-pytestmark = pytest.mark.memory_backend_incompatible
+#: Every invariant here is about a gate that filters (filter, strict), which is experimental.
+pytestmark = [pytest.mark.memory_backend_incompatible, pytest.mark.usefixtures("context_admission_experimental")]
 
 QDATE = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
 

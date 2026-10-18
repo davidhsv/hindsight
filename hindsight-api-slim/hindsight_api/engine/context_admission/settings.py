@@ -98,9 +98,18 @@ class ContextAdmissionSettings:
     @classmethod
     def resolve(cls, bank_config: Mapping[str, Any], static_config: Any) -> "ContextAdmissionSettings":
         """Per-bank fields from ``bank_config`` (a resolved bank config dict), server-level ones
-        from ``static_config``; anything missing or out of range takes its default."""
+        from ``static_config``; anything missing or out of range takes its default.
+
+        Without the server's ``context_admission_experimental`` a filter or strict mode (a tenant
+        override or a legacy row the config API never validated) reads as off. Only those two modes
+        use the configured scorer: observe always scores deterministically, so it never sends a
+        memory to the decision model.
+        """
+        mode = mode_of(bank_config.get("context_admission_mode"))
+        if mode.changes_results and getattr(static_config, "context_admission_experimental", False) is not True:
+            mode = AdmissionMode.OFF
         return cls(
-            mode=mode_of(bank_config.get("context_admission_mode")),
+            mode=mode,
             threshold_auto=_number(
                 bank_config.get("context_admission_threshold_auto"),
                 DEFAULT_CONTEXT_ADMISSION_THRESHOLD_AUTO,
@@ -133,7 +142,11 @@ class ContextAdmissionSettings:
                 low=0,
                 high=1,
             ),
-            scorer=_scorer(getattr(static_config, "context_admission_scorer", None)),
+            scorer=(
+                _scorer(getattr(static_config, "context_admission_scorer", None))
+                if mode.changes_results
+                else ScorerKind.DETERMINISTIC
+            ),
             weights=_weights(getattr(static_config, "context_admission_weights", None)),
             scope_keys=_keys(
                 getattr(static_config, "context_admission_scope_keys", None), DEFAULT_CONTEXT_ADMISSION_SCOPE_KEYS

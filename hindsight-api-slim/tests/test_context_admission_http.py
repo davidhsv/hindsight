@@ -100,7 +100,9 @@ async def test_bad_values_are_a_422_before_the_engine_runs(api_client, captured_
     assert captured_recall == {}
 
 
-async def test_the_admission_summary_is_in_the_response_only_while_the_gate_filters(api_client):
+async def test_the_admission_summary_is_in_the_response_only_while_the_gate_filters(
+    api_client, context_admission_experimental
+):
     bank_id = await _new_bank(api_client)
     url = f"/v1/default/banks/{bank_id}/memories/recall"
     body = {"query": "How is the payments API deployed?", "purpose": "auto_context"}
@@ -122,3 +124,22 @@ async def test_the_admission_summary_is_in_the_response_only_while_the_gate_filt
             assert payload["context_admission"] == {"abstained": False, "candidates": 0, "admitted": 0}
         else:
             assert "context_admission" not in payload
+
+
+async def test_without_the_experimental_switch_a_bank_takes_only_off_and_observe(api_client):
+    bank_id = await _new_bank(api_client)
+    config_url = f"/v1/default/banks/{bank_id}/config"
+
+    for mode in ("filter", "strict"):
+        refused = await api_client.patch(config_url, json={"updates": {"context_admission_mode": mode}})
+        assert refused.status_code == 400, refused.text
+        assert f"context_admission_mode='{mode}' is experimental" in refused.text
+        assert "HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL=true" in refused.text
+
+    accepted = await api_client.patch(config_url, json={"updates": {"context_admission_mode": "observe"}})
+    assert accepted.status_code == 200, accepted.text
+    response = await api_client.post(
+        f"/v1/default/banks/{bank_id}/memories/recall", json={"query": "How is the payments API deployed?"}
+    )
+    assert response.status_code == 200, response.text
+    assert "context_admission" not in response.json(), "observe never changes the payload"

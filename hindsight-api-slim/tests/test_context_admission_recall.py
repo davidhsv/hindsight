@@ -21,7 +21,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from hindsight_api.config import _get_raw_config
+from hindsight_api.config import _get_raw_config, clear_config_cache
+from hindsight_api.engine import memory_engine as memory_engine_module
 from hindsight_api.engine.memory_engine import Budget
 from hindsight_api.engine.retain import embedding_utils
 from hindsight_api.extensions.operation_validator import OperationValidationError
@@ -187,6 +188,44 @@ async def test_observe_changes_nothing_visible_and_reports_the_shadow(memory, re
         await memory.delete_bank(bank_id, request_context=request_context)
 
 
+@pytest.mark.parametrize("scorer", ["jev", "hybrid"])
+async def test_observe_never_asks_the_decision_model_even_with_a_model_scorer_configured(
+    memory, request_context, context_admission_experimental, monkeypatch, scorer
+):
+    """Observe is telemetry: it scores deterministically, so no memory text leaves the server and
+    no recall waits on a decision model. The same server's strict recall does ask (the spy works)."""
+    context_admission_experimental.setenv("HINDSIGHT_API_CONTEXT_ADMISSION_SCORER", scorer)
+    clear_config_cache()
+    asked: list[str] = []
+
+    def spy_jev_client():
+        asked.append("jev_client")
+        return None  # not configured: strict then falls back to the deterministic score
+
+    monkeypatch.setattr(memory_engine_module, "jev_client", spy_jev_client)
+    bank_id = _bank()
+    try:
+        await _seed(memory, request_context, bank_id)
+        off = await _recall(memory, request_context, bank_id, purpose="auto_context")
+        await _configure(memory, bank_id, context_admission_mode="observe")
+        observed = await _recall(memory, request_context, bank_id, purpose="auto_context", enable_trace=True)
+        assert asked == []
+        assert _ids(observed) == _ids(off)
+        trace = observed.trace["context_admission"]
+        assert (trace["mode"], trace["scorer"]) == ("observe", "deterministic")
+        assert "jev_error" not in trace
+
+        await _configure(memory, bank_id, context_admission_mode="strict")
+        gated = await _recall(memory, request_context, bank_id, purpose="auto_context", enable_trace=True)
+        assert asked == ["jev_client"]
+        assert (gated.trace["context_admission"]["scorer"], gated.trace["context_admission"]["jev_error"]) == (
+            scorer,
+            "not_configured",
+        )
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
 async def test_observe_changes_nothing_visible_with_observations_and_adaptive_scoring(memory, request_context):
     """The shadow's observations ride on the prefer-observations dedup read and adaptive scoring
     runs beside the gate; neither may change a byte of what the caller gets."""
@@ -214,7 +253,9 @@ async def test_observe_changes_nothing_visible_with_observations_and_adaptive_sc
         await memory.delete_bank(bank_id, request_context=request_context)
 
 
-async def test_strict_rejects_another_repositorys_observation_on_automatic_recall(memory, request_context):
+async def test_strict_rejects_another_repositorys_observation_on_automatic_recall(
+    memory, request_context, context_admission_experimental
+):
     """The coding-agents default: observations only, purpose auto_context. Observations carry no
     metadata, so their scope comes from the facts they were consolidated from."""
     bank_id = _bank()
@@ -241,7 +282,9 @@ async def test_strict_rejects_another_repositorys_observation_on_automatic_recal
         await memory.delete_bank(bank_id, request_context=request_context)
 
 
-async def test_a_gated_recall_is_never_offered_to_the_store_whole(memory, request_context, monkeypatch):
+async def test_a_gated_recall_is_never_offered_to_the_store_whole(
+    memory, request_context, monkeypatch, context_admission_experimental
+):
     """A store answering ``full_recall`` would skip the gate, so the engine does not ask it."""
     from hindsight_api.engine.memories import get_memories
 
@@ -268,7 +311,9 @@ async def test_a_gated_recall_is_never_offered_to_the_store_whole(memory, reques
         await memory.delete_bank(bank_id, request_context=request_context)
 
 
-async def test_a_passthrough_reranker_is_scored_on_semantic_similarity(memory, request_context):
+async def test_a_passthrough_reranker_is_scored_on_semantic_similarity(
+    memory, request_context, context_admission_experimental
+):
     bank_id = _bank()
     try:
         await _seed(memory, request_context, bank_id)
@@ -284,7 +329,7 @@ async def test_a_passthrough_reranker_is_scored_on_semantic_similarity(memory, r
         await memory.delete_bank(bank_id, request_context=request_context)
 
 
-async def test_filter_can_answer_with_no_memories(memory, request_context):
+async def test_filter_can_answer_with_no_memories(memory, request_context, context_admission_experimental):
     bank_id = _bank()
     try:
         await _seed(memory, request_context, bank_id)
@@ -308,7 +353,9 @@ async def test_filter_can_answer_with_no_memories(memory, request_context):
         await memory.delete_bank(bank_id, request_context=request_context)
 
 
-async def test_strict_enforces_the_hard_scope_and_suppresses_the_stored_duplicate(memory, request_context):
+async def test_strict_enforces_the_hard_scope_and_suppresses_the_stored_duplicate(
+    memory, request_context, context_admission_experimental
+):
     bank_id = _bank()
     try:
         ids = await _seed(memory, request_context, bank_id)
@@ -330,7 +377,9 @@ async def test_strict_enforces_the_hard_scope_and_suppresses_the_stored_duplicat
         await memory.delete_bank(bank_id, request_context=request_context)
 
 
-async def test_recall_reinforcement_is_forced_off_while_the_gate_filters(memory, request_context):
+async def test_recall_reinforcement_is_forced_off_while_the_gate_filters(
+    memory, request_context, context_admission_experimental
+):
     bank_id = _bank()
     config = _get_raw_config()
     original = config.adaptive_memory_recall_reinforcement_enabled

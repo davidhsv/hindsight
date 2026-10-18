@@ -68,7 +68,13 @@ LOCAL_MODEL_ENV = {
 #: ``none`` forces chunks-mode retain and disables observations server-wide (config.py), so
 #: every retained document becomes exactly one memory with the text we wrote, and nothing
 #: needs an LLM. ``UV_NO_SYNC`` keeps ``uv run`` from re-syncing the checkout's venv.
-BASE_ENV = {"HINDSIGHT_API_LLM_PROVIDER": "none", "UV_NO_SYNC": "1"}
+#: Bench servers run the experimental admission arms (filter, strict, the jev and hybrid scorers),
+#: which a server refuses without the experimental switch; a base checkout ignores the variable.
+BASE_ENV = {
+    "HINDSIGHT_API_LLM_PROVIDER": "none",
+    "UV_NO_SYNC": "1",
+    "HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL": "true",
+}
 
 TYPESAFE_UPSTREAM = "https://api.typesafe.ai"
 #: The context-admission decision model (the Jev scorer), configured like the other operations'.

@@ -11,7 +11,8 @@ class AdmissionMode(str, Enum):
     ``off``: nothing runs. ``observe``: decisions and the would-be admitted set are computed and
     reported (trace, metrics), the results are untouched. ``filter``: rejected candidates are
     dropped and the result may be empty. ``strict``: filter plus the hard scope gate, redundancy
-    suppression and the admission budget.
+    suppression and the admission budget. Filter and strict are experimental: they run only while
+    the server's ``context_admission_experimental`` is on (see ``ContextAdmissionSettings.resolve``).
     """
 
     OFF = "off"
@@ -44,7 +45,8 @@ PURPOSES: tuple[str, ...] = tuple(p.value for p in Purpose)
 class ScorerKind(str, Enum):
     """``deterministic``: the logistic feature score. ``jev``: one decision-model probability per
     candidate, asked in one batch. ``hybrid``: the two blended. The gates (currentness, hard scope)
-    are deterministic under every scorer."""
+    are deterministic under every scorer. Jev and hybrid are experimental and score only filter and
+    strict recalls; observe is always deterministic."""
 
     DETERMINISTIC = "deterministic"
     JEV = "jev"

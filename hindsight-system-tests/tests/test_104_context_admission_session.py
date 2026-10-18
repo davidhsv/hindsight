@@ -5,11 +5,15 @@ Five sessions in one bank, each retained with the repository, module and branch 
 metadata the coding-agents integration stamps): an auth token-refresh bug and its fix, a joke, a
 frontend change, a database migration, and a near-twin of the auth bug from ANOTHER repository.
 Session 5 is back on the auth bug, and its automatic first-prompt recall asks with
-``purpose: "auto_context"`` and its own context. Three things only the composition shows:
+``purpose: "auto_context"`` and its own context. What only the composition shows:
 
-- in ``strict`` mode the injected set is exactly session 1's memories: the joke, the frontend and
-  the migration do not clear the auto threshold, and the other repository's twin, which shares
-  most of the vocabulary, is rejected on hard scope;
+- on a default server the gate only observes: ``strict`` is refused, and in ``observe`` the
+  session-5 recall returns exactly what an ungated one does while its trace says what ``strict``
+  would have injected (session 1's memories) and why the rest would have been dropped;
+- in ``strict`` mode (experimental, so on a server started with the experimental switch) the
+  injected set is exactly session 1's memories: the joke, the frontend and the migration do not
+  clear the auto threshold, and the other repository's twin, which shares most of the vocabulary,
+  is rejected on hard scope;
 - a task none of the memories helps with gets nothing at all, where an ungated recall hands back
   the least bad memory it has;
 - the integration's default automatic recall asks for observations only, and consolidation writes
@@ -21,6 +25,7 @@ Session 5 is back on the auth bug, and its automatic first-prompt recall asks wi
 from __future__ import annotations
 
 import pytest
+from hindsight_client_api.exceptions import ApiException
 
 from hindsight_system_tests.payloads import Consolidation, Observation, batch_fact_id, extracted, fact
 
@@ -97,7 +102,34 @@ def _texts(response) -> list[str]:
     return [r.text for r in response.results]
 
 
-async def test_session_5_gets_session_1_and_nothing_in_between(client, coding_bank):
+async def test_on_a_default_server_the_gate_only_observes(client, coding_bank):
+    ungated = await _recall(client, coding_bank, SESSION_5_TASK)
+    ids = {r.text: r.id for r in ungated.results}
+
+    with pytest.raises(ApiException) as refused:
+        await _set_mode(client, coding_bank, "strict")
+    assert refused.value.status == 400
+    assert "HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL" in str(refused.value.body)
+
+    await _set_mode(client, coding_bank, "observe")
+    observed = await _recall(
+        client, coding_bank, SESSION_5_TASK, purpose="auto_context", context=SESSION_5_CONTEXT, trace=True
+    )
+
+    # The caller gets the ungated answer, unchanged and with no admission summary.
+    assert [(r.id, r.text) for r in observed.results] == [(r.id, r.text) for r in ungated.results]
+    assert observed.context_admission is None
+    # The trace says what strict would have injected, scored without any decision model.
+    admission = observed.trace["context_admission"]
+    assert (admission["mode"], admission["scorer"]) == ("observe", "deterministic")
+    assert admission["shadow_final_ids"] == [r.id for r in ungated.results if r.text in (AUTH_CAUSE, AUTH_FIX)]
+    assert admission["would_change_top_k"] is True and admission["would_drop"] >= 2
+    reasons = {d["memory_id"]: d["reason"] for d in admission["decisions"]}
+    assert reasons[ids[OTHER_REPO_AUTH]] == "wrong_scope"
+    assert reasons[ids[FRONTEND]] == "below_threshold"
+
+
+async def test_session_5_gets_session_1_and_nothing_in_between(client, experimental_admission_client, coding_bank):
     ungated = await _recall(client, coding_bank, SESSION_5_TASK)
     ungated_texts = _texts(ungated)
     # Retrieval alone hands the agent the other repository's twin and the frontend change too:
@@ -107,9 +139,14 @@ async def test_session_5_gets_session_1_and_nothing_in_between(client, coding_ba
     # The scope the gate compares is the metadata the session was retained with.
     assert next(r.metadata for r in ungated.results if r.text == AUTH_CAUSE) == SESSIONS[0][2]
 
-    await _set_mode(client, coding_bank, "strict")
+    await _set_mode(experimental_admission_client, coding_bank, "strict")
     gated = await _recall(
-        client, coding_bank, SESSION_5_TASK, purpose="auto_context", context=SESSION_5_CONTEXT, trace=True
+        experimental_admission_client,
+        coding_bank,
+        SESSION_5_TASK,
+        purpose="auto_context",
+        context=SESSION_5_CONTEXT,
+        trace=True,
     )
 
     # Exactly session 1, in recall's own order, although session 5 runs on another branch:
@@ -126,14 +163,19 @@ async def test_session_5_gets_session_1_and_nothing_in_between(client, coding_ba
     assert admission["cross_scope_candidates"] >= 1
 
 
-async def test_a_task_no_memory_helps_with_gets_nothing(client, coding_bank):
+async def test_a_task_no_memory_helps_with_gets_nothing(client, experimental_admission_client, coding_bank):
     ungated = await _recall(client, coding_bank, UNRELATED_TASK)
     # Ungated, recall answers with the least bad memories it has (the coffee joke among them).
     assert JOKE in _texts(ungated)
 
-    await _set_mode(client, coding_bank, "strict")
+    await _set_mode(experimental_admission_client, coding_bank, "strict")
     gated = await _recall(
-        client, coding_bank, UNRELATED_TASK, purpose="auto_context", context=SESSION_5_CONTEXT, trace=True
+        experimental_admission_client,
+        coding_bank,
+        UNRELATED_TASK,
+        purpose="auto_context",
+        context=SESSION_5_CONTEXT,
+        trace=True,
     )
 
     assert gated.results == []
@@ -145,17 +187,21 @@ async def test_a_task_no_memory_helps_with_gets_nothing(client, coding_bank):
     assert admission["reasons"]["below_threshold"] == admission["candidates"] > 0
 
 
-async def test_the_automatic_observation_recall_keeps_the_other_repository_out(client, coding_bank):
-    async def observations(**kwargs):
-        return await client.arecall(bank_id=coding_bank, query=SESSION_5_TASK, types=["observation"], **kwargs)
+async def test_the_automatic_observation_recall_keeps_the_other_repository_out(
+    client, experimental_admission_client, coding_bank
+):
+    async def observations(via=client, **kwargs):
+        return await via.arecall(bank_id=coding_bank, query=SESSION_5_TASK, types=["observation"], **kwargs)
 
     ungated = await observations()
     # Both observations are retrieved; neither carries metadata of its own.
     assert {AUTH_OBSERVATION, OTHER_REPO_OBSERVATION} <= set(_texts(ungated))
     ids = {r.text: r.id for r in ungated.results}
 
-    await _set_mode(client, coding_bank, "strict")
-    gated = await observations(purpose="auto_context", context=SESSION_5_CONTEXT, trace=True)
+    await _set_mode(experimental_admission_client, coding_bank, "strict")
+    gated = await observations(
+        via=experimental_admission_client, purpose="auto_context", context=SESSION_5_CONTEXT, trace=True
+    )
 
     assert AUTH_OBSERVATION in _texts(gated)
     assert OTHER_REPO_OBSERVATION not in _texts(gated)

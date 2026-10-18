@@ -899,7 +899,7 @@ export type BankTemplateConfig = {
   /**
    * Context Admission Mode
    *
-   * Context admission mode for external recalls: 'off' (default; recall is unchanged), 'observe' (decisions and the would-be admitted set go to traces and metrics only), 'filter' (rejected memories are dropped and recall may return none) or 'strict' (filter plus hard scope, near-duplicate suppression and the memory/token budget)
+   * Context admission mode for external recalls: 'off' (default; recall is unchanged) or 'observe' (decisions and the would-be admitted set go to traces and metrics only). The experimental 'filter' (rejected memories are dropped and recall may return none) and 'strict' (filter plus hard scope, near-duplicate suppression and the memory/token budget) are accepted only when the server sets HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL
    */
   context_admission_mode?: string | null;
   /**
