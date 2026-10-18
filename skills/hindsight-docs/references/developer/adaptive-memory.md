@@ -60,6 +60,29 @@ client.BanksAPI.UpdateBankConfig(ctx, memBankID).
 
 Every mode above `off` applies only to banks whose store keeps adaptive state; the built-in PostgreSQL and Oracle stores do, a custom memories extension does not unless it says so, and on such a bank every mode behaves as `off`.
 
+## Personal profile
+
+One block of server settings turns on the parts of adaptive memory that showed a benefit in the benchmarks and leaves out the parts that did not:
+
+```bash
+HINDSIGHT_API_ENABLE_OBSERVATIONS=true
+HINDSIGHT_API_ADAPTIVE_MEMORY_MODE=lifecycle
+HINDSIGHT_API_ADAPTIVE_MEMORY_SCORE_ALPHA=0
+HINDSIGHT_API_CONTEXT_ADMISSION_MODE=observe
+HINDSIGHT_API_CONTEXT_ADMISSION_SCORER=deterministic
+HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL=false
+```
+
+The same block is in `.env.example`, commented out. The first four settings are hierarchical, so a single bank can take the profile through the [bank config API](./api/memory-banks.md) instead (`enable_observations`, `adaptive_memory_mode`, `adaptive_memory_score_alpha`, `context_admission_mode`); the last two are server-level. What each line does:
+
+- **Observations on.** Lifecycle labels come from consolidation, which builds observations. Without observations consolidation labels nothing, and only the explicit lifecycle `PATCH` changes a claim.
+- **`lifecycle` mode.** The [truth lifecycle](#truth-lifecycle): `active`, `uncertain`, `superseded` and `refuted` claims with their validity interval, current recall without retired claims, history through `lifecycle_view` and `as_of`, lifecycle relations and claim evidence that link an old claim to what replaced it (with snapshots of both ends), raw facts that inherit a retirement, scope-aware contradictions (a fact from another `environment`, `service` or `module` never retires a claim), and mental models refreshed when a memory they cite is retired.
+- **Alpha `0`.** Retention state and reinforcement are still recorded and shown (`GET` on a memory, the trace's `score_components`, the metrics), but they never change ranking: while every candidate is active, a lifecycle-mode recall returns the same memories in the same order as `off`. It is the default; the line only makes it explicit.
+- **Admission in `observe` with the deterministic scorer.** Every external recall reports in `trace.context_admission` and the metrics what `strict` would have injected, and returns exactly what it would without admission. No memory is sent to a decision model.
+- **Experimental switch off.** `filter`, `strict`, `jev` and `hybrid` are rejected, so a bank-config write cannot turn automatic filtering on.
+
+Everything else stays at its default: archiving, pruning, recall reinforcement and the historical-cue detector are off, and a conflict stays `uncertain` until a later consolidation or an explicit `PATCH` settles it. The profile costs a larger consolidation prompt and schema, the claim and retention reads of every lifecycle recall, and the admission decisions of every external recall, which show most in tail latency under concurrent recalls.
+
 ## Event time vs memory time
 
 Five timestamps describe a memory, and they answer different questions. Mixing them up is the most common way to get history wrong.
