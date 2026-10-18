@@ -359,3 +359,23 @@ class TestApplyResultChecks:
         assert result.nothing_relevant is False
         listing = client.requests[-1][0]
         assert isinstance(listing, str) and PLANTED not in listing and "Use pnpm." in listing
+
+
+# --- the response payload ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flag", [None, True, False])
+def test_nothing_relevant_is_in_the_payload_only_when_the_check_answered(flag):
+    """A recall without the check (or without an answer) sends the payload it sent before the
+    field existed, over HTTP and over MCP (which sends the engine model's JSON)."""
+    import json
+
+    from hindsight_api.api.http import RecallResponse
+
+    engine_payload = json.loads(RecallResult(results=[], nothing_relevant=flag).model_dump_json())
+    http_payload = RecallResponse(results=[], nothing_relevant=flag).model_dump(mode="json")
+    for payload in (engine_payload, http_payload):
+        if flag is None:
+            assert "nothing_relevant" not in payload
+        else:
+            assert payload["nothing_relevant"] is flag

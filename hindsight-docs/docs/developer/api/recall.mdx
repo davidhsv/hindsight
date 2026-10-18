@@ -562,7 +562,7 @@ Whether the token budget cut the `source_facts` map short. When `true`, some IDs
 
 ### nothing_relevant
 
-A warning, set only on a bank with the [recall relevance check](/developer/configuration#recall-checks) on: `true` when a decision model judged that none of the top ten results helps answer the query (or nothing was recalled), `false` when one does. The results are the same either way; an agent can tell its user it found nothing relevant, or read the memories with that in mind. `null` when the check is off or the decision model did not answer.
+A warning, set only on a bank with the [recall relevance check](/developer/configuration#recall-checks) on: `true` when a decision model judged that none of the top ten results helps answer the query (or nothing was recalled), `false` when one does. The results are the same either way; an agent can tell its user it found nothing relevant, or read the memories with that in mind. Left out of the response when the check is off or the decision model did not answer, so a bank without the check gets the same payload as before.
 
 ### chunks
 
