@@ -3196,6 +3196,9 @@ class Hindsight:
         recall_budget_adaptive_high: float | None = None,
         recall_budget_min: int | None = None,
         recall_budget_max: int | None = None,
+        recall_relevance_check: bool | None = None,
+        recall_conditional_recency: bool | None = None,
+        recall_injection_gate: bool | None = None,
         # Disposition settings
         disposition_skepticism: int | None = None,
         disposition_literalism: int | None = None,
@@ -3283,6 +3286,9 @@ class Hindsight:
                 recall_budget_adaptive_high=recall_budget_adaptive_high,
                 recall_budget_min=recall_budget_min,
                 recall_budget_max=recall_budget_max,
+                recall_relevance_check=recall_relevance_check,
+                recall_conditional_recency=recall_conditional_recency,
+                recall_injection_gate=recall_injection_gate,
                 disposition_skepticism=disposition_skepticism,
                 disposition_literalism=disposition_literalism,
                 disposition_empathy=disposition_empathy,
@@ -3367,6 +3373,9 @@ class Hindsight:
         recall_budget_adaptive_high: float | None = None,
         recall_budget_min: int | None = None,
         recall_budget_max: int | None = None,
+        recall_relevance_check: bool | None = None,
+        recall_conditional_recency: bool | None = None,
+        recall_injection_gate: bool | None = None,
         # Disposition settings
         disposition_skepticism: int | None = None,
         disposition_literalism: int | None = None,
@@ -3472,6 +3481,13 @@ class Hindsight:
             recall_budget_adaptive_high: Adaptive budget fraction for high-breadth queries.
             recall_budget_min: Lower clamp on the resolved budget.
             recall_budget_max: Upper clamp on the resolved budget.
+            recall_relevance_check: Ask the server's recall-checks decision model whether any of the top
+                ten results helps answer the query, and set the recall response's ``nothing_relevant``.
+                Results are unchanged.
+            recall_conditional_recency: Apply the recency boost only to queries the recall-checks
+                decision model reads as asking about the current or latest state of something.
+            recall_injection_gate: Withhold recalled memories the recall-checks decision model reads as
+                instructions planted for an AI agent (fails closed).
             disposition_skepticism: How skeptical vs trusting (1=trusting, 5=skeptical).
             disposition_literalism: How literally to interpret information (1=flexible, 5=literal).
             disposition_empathy: How much to consider emotional context (1=detached, 5=empathetic).
@@ -3577,6 +3593,9 @@ class Hindsight:
                 "recall_budget_adaptive_high": recall_budget_adaptive_high,
                 "recall_budget_min": recall_budget_min,
                 "recall_budget_max": recall_budget_max,
+                "recall_relevance_check": recall_relevance_check,
+                "recall_conditional_recency": recall_conditional_recency,
+                "recall_injection_gate": recall_injection_gate,
                 "disposition_skepticism": disposition_skepticism,
                 "disposition_literalism": disposition_literalism,
                 "disposition_empathy": disposition_empathy,

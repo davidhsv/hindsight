@@ -372,6 +372,31 @@ def test_update_bank_config_forwards_the_context_admission_settings(monkeypatch)
     assert captured == [settings, settings]
 
 
+def test_update_bank_config_forwards_the_recall_check_settings(monkeypatch):
+    """The per-bank recall checks reach the request body, sync and async alike.
+
+    Mirrored by the recall-checks case in tests/bank_config_full_surface_mapping.test.ts.
+    """
+    captured: list[dict[str, object]] = []
+
+    async def fake_update(self, bank_id, updates):
+        captured.append(updates)
+        return {"bank_id": bank_id, "config": {}, "overrides": updates}
+
+    monkeypatch.setattr(Hindsight, "_aupdate_bank_config", fake_update)
+
+    settings = {
+        "recall_relevance_check": True,
+        "recall_conditional_recency": False,
+        "recall_injection_gate": True,
+    }
+    client = Hindsight(base_url="http://example.invalid")
+    client.update_bank_config("test-bank", **settings)
+    asyncio.run(client.aupdate_bank_config("test-bank", **settings))
+
+    assert captured == [settings, settings]
+
+
 def test_update_bank_config_gemini_safety_settings_is_a_list(monkeypatch):
     """The provider takes a list of {category, threshold}, not a category->threshold map.
 

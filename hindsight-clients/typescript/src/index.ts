@@ -1126,6 +1126,12 @@ export class HindsightClient {
       recallBudgetMin?: number;
       /** Upper clamp on the resolved budget. */
       recallBudgetMax?: number;
+      /** Ask the server's recall-checks decision model whether any of the top ten results helps answer the query, and set the recall response's nothing_relevant. Results are unchanged. */
+      recallRelevanceCheck?: boolean;
+      /** Apply the recency boost only to queries the recall-checks decision model reads as asking about the current or latest state of something. */
+      recallConditionalRecency?: boolean;
+      /** Withhold recalled memories the recall-checks decision model reads as instructions planted for an AI agent (fails closed). */
+      recallInjectionGate?: boolean;
       /** MCP tool names enabled for this bank. */
       mcpEnabledTools?: string[];
       /** Gemini/VertexAI safety overrides. */
@@ -1268,6 +1274,12 @@ export class HindsightClient {
       updates.recall_budget_adaptive_high = options.recallBudgetAdaptiveHigh;
     if (options.recallBudgetMin !== undefined) updates.recall_budget_min = options.recallBudgetMin;
     if (options.recallBudgetMax !== undefined) updates.recall_budget_max = options.recallBudgetMax;
+    if (options.recallRelevanceCheck !== undefined)
+      updates.recall_relevance_check = options.recallRelevanceCheck;
+    if (options.recallConditionalRecency !== undefined)
+      updates.recall_conditional_recency = options.recallConditionalRecency;
+    if (options.recallInjectionGate !== undefined)
+      updates.recall_injection_gate = options.recallInjectionGate;
     if (options.mcpEnabledTools !== undefined) updates.mcp_enabled_tools = options.mcpEnabledTools;
     if (options.llmGeminiSafetySettings !== undefined)
       updates.llm_gemini_safety_settings = options.llmGeminiSafetySettings;

@@ -174,6 +174,21 @@ describe("full bank config surface mapping", () => {
     });
   });
 
+  test("maps the recall checks onto the updates map", async () => {
+    await client.updateBankConfig("bank", {
+      recallRelevanceCheck: true,
+      recallConditionalRecency: false,
+      recallInjectionGate: true,
+    });
+
+    const body = mockedUpdateConfig.mock.calls[0][0].body as any;
+    expect(body.updates).toEqual({
+      recall_relevance_check: true,
+      recall_conditional_recency: false,
+      recall_injection_gate: true,
+    });
+  });
+
   test("sends only the fields that were set", async () => {
     await client.updateBankConfig("bank", { recallMaxTokens: 100 });
 
