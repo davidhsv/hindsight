@@ -62,6 +62,8 @@ def decision_model(monkeypatch) -> _DecisionModel:
     monkeypatch.setenv("HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_API_KEY", "k")
     server = config_module.HindsightConfig.from_env()
     fake = _DecisionModel()
+    # The breaker is process-wide: each test starts with a closed one, whatever an earlier test left.
+    recall_checks._breaker.cache_clear()
     monkeypatch.setattr(recall_checks, "get_config", lambda: server)
     monkeypatch.setattr(recall_checks, "_client", lambda setup: fake)
     return fake

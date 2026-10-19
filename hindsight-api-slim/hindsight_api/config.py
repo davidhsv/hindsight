@@ -2340,7 +2340,8 @@ DEFAULT_RECALL_CHECKS_TIMEOUT = 2.0
 # Requests in a row that get no answer (connection error, timeout, 5xx, 429, a refused key, no
 # credit left) before the breaker opens and recalls stop asking. A gate sends up to ten requests at
 # once, so an endpoint that is down opens it within a recall or two, while one failed request
-# among answered ones never does.
+# among answered ones never does. A request sent before another was answered does not count: under
+# load it is most often a timeout spent queued behind answered requests, not an outage.
 DEFAULT_RECALL_CHECKS_BREAKER_FAILURES = 5
 # Seconds the breaker stays open before one request probes the endpoint again. While it stays down,
 # that costs one recall at most the timeout per cool-down.

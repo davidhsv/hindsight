@@ -217,6 +217,20 @@ class TestBreaker:
             breaker.record_unavailable(breaker.admit())
         assert breaker.admit() is Admission.SEND
 
+    def test_a_request_sent_before_another_was_answered_does_not_count(self):
+        """Requests sent together, one answered and the rest failing after it: the endpoint is up."""
+        breaker = _breaker(failures=2)
+        sent = breaker.answers
+        breaker.record_answer()
+        for _ in range(3):
+            breaker.record_unavailable(breaker.admit(), answers_when_sent=sent)
+        assert not breaker.is_open
+        # Requests sent after that answer count again.
+        sent = breaker.answers
+        for _ in range(2):
+            breaker.record_unavailable(breaker.admit(), answers_when_sent=sent)
+        assert breaker.is_open
+
     def test_open_it_sends_nothing_until_the_cool_down_is_over(self):
         clock = _Clock()
         breaker = _opened(clock, cooldown=30.0)
@@ -299,6 +313,41 @@ class TestGuard:
                 await model.ask("state", {})
         assert endpoint.requests == ["ask", "ask"]
         assert not breaker.is_open
+
+    async def test_requests_queued_behind_answered_ones_fall_back_without_opening_it(self):
+        """Ten recalls at once against an endpoint that serves one request at a time (the clients'
+        concurrency cap, at its smallest): the ones still queued at the recall timeout fall back, but
+        the endpoint answered others meanwhile, so the breaker stays closed. The same load against an
+        endpoint that answers nothing in time opens it."""
+
+        class _OneAtATime(_Endpoint):
+            def __init__(self, *, delay: float) -> None:
+                super().__init__(delay=delay)
+                self._slot = asyncio.Semaphore(1)
+
+            async def _answer(self, kind: str) -> None:
+                async with self._slot:
+                    await super()._answer(kind)
+
+        async def recalls(endpoint: _Endpoint, breaker: CircuitBreaker) -> int:
+            async def one() -> bool:
+                guarded = GuardedDecisionModel(endpoint, RecallGuard(breaker, timeout=0.3))  # type: ignore[arg-type]
+                try:
+                    await guarded.ask("state", {})
+                except TimeoutError:
+                    return False
+                return True
+
+            return sum(await asyncio.gather(*(one() for _ in range(10))))
+
+        loaded = _breaker(failures=3)
+        answered = await recalls(_OneAtATime(delay=0.05), loaded)
+        assert 0 < answered < 10, "some recalls were answered and some timed out in the queue"
+        assert not loaded.is_open
+
+        dead = _breaker(failures=3)
+        assert await recalls(_OneAtATime(delay=5.0), dead) == 0
+        assert dead.is_open
 
     async def test_a_cancelled_probe_is_cancelled_and_frees_the_probe(self):
         clock = _Clock()
