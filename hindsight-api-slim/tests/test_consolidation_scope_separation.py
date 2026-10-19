@@ -3,7 +3,7 @@
 "Uploads are capped at 25 MB" retained with ``metadata.service=media`` and "... at 100 MB" with
 ``service=archive`` are both true. Without the service in the prompt the second reads as a state
 change and the model rewrites the media observation in place. So a fact's scope keys
-(``environment``, ``service``, ``module``, ``repository``, and any further key in
+(``environment``, ``service``, ``module``, ``repository``, and in lifecycle mode any further key in
 ``HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS``, which lifecycle validation compares) are rendered on
 its prompt line and on the pool's source facts, and processing rule 13 says a differing scope is
 a separate observation. A fact in the *same* scope as the observation renders the same label, so
@@ -100,16 +100,23 @@ class TestScopeLabel:
 class TestPromptScopeKeys:
     def test_by_default_the_base_keys_cover_the_lifecycle_ones(self, lifecycle_scope_keys):
         lifecycle_scope_keys(["environment", "service", "module"])
-        assert _prompt_scope_keys() == ("environment", "service", "module", "repository")
+        assert _prompt_scope_keys(lifecycle=True) == ("environment", "service", "module", "repository")
 
     def test_a_key_lifecycle_compares_is_rendered_after_the_base_keys(self, lifecycle_scope_keys):
         """Lifecycle validation drops a label across a differing value of any of the server's scope
-        keys, so the model sees each of them; the base keys stay, in every mode."""
+        keys, so a lifecycle batch shows the model each of them, after the base keys."""
         lifecycle_scope_keys(["region", "environment", "tenant"])
-        assert _prompt_scope_keys() == ("environment", "service", "module", "repository", "region", "tenant")
-        assert _scope_label({"tenant": "acme", "region": "eu", "service": "api"}, _prompt_scope_keys()) == (
+        keys = _prompt_scope_keys(lifecycle=True)
+        assert keys == ("environment", "service", "module", "repository", "region", "tenant")
+        assert _scope_label({"tenant": "acme", "region": "eu", "service": "api"}, keys) == (
             "service=api, region=eu, tenant=acme"
         )
+
+    def test_outside_lifecycle_only_the_base_keys_are_rendered(self, lifecycle_scope_keys):
+        """The setting belongs to adaptive memory: a bank in another mode sends the prompt a server
+        without adaptive memory sends, whatever the setting lists."""
+        lifecycle_scope_keys(["region", "environment", "tenant"])
+        assert _prompt_scope_keys(lifecycle=False) == KEYS
 
 
 def test_pool_source_facts_carry_their_scope():
@@ -231,12 +238,12 @@ async def test_a_fact_with_only_repository_metadata_is_scoped_by_its_repository(
     assert "branch" not in sent.user and "codex" not in sent.user
 
 
-@pytest.mark.asyncio
-async def test_a_lifecycle_scope_key_reaches_both_sides_of_the_prompt(lifecycle_scope_keys):
-    lifecycle_scope_keys(["environment", "region"])
-    obs_id, old_fact_id, new_fact_id = str(uuid.uuid4()), str(uuid.uuid4()), uuid.uuid4()
+async def _sent_with_a_region_scope(*, lifecycle: bool) -> _SentPrompt:
+    """One batch whose new fact and pool source fact differ only in ``region`` metadata, in a
+    lifecycle batch (the observation in the batch's pool) or an ordinary one."""
+    obs_id, old_fact_id, new_fact_id = "obs-backups", "fact-eu", "fact-us"
     observation = MemoryFact(
-        id=obs_id, text="Backups run at 02:00.", fact_type="observation", source_fact_ids=[old_fact_id]
+        id=obs_id, text="Backups run at 02:00.", fact_type="observation", source_fact_ids=[old_fact_id], tags=[]
     )
     old_fact = MemoryFact(id=old_fact_id, text="Backups run at 02:00.", fact_type="world", metadata={"region": "eu"})
     llm_config = _llm_returning_nothing()
@@ -247,12 +254,33 @@ async def test_a_lifecycle_scope_key_reaches_both_sides_of_the_prompt(lifecycle_
         union_observations=[observation],
         union_source_facts={old_fact_id: old_fact},
         config=_config(),
+        lifecycle_pool={obs_id: claim_lifecycle.pool_entry(observation, None, frozenset())} if lifecycle else None,
     )
+    return _sent_prompt(llm_config)
 
-    sent = _sent_prompt(llm_config)
-    assert f"[{new_fact_id}] Backups run at 04:00. [scope: region=us]" in sent.user
-    [pool_entry] = [json.loads(line.rstrip(",")) for line in sent.user.splitlines() if obs_id in line]
+
+@pytest.mark.asyncio
+async def test_a_lifecycle_scope_key_reaches_both_sides_of_a_lifecycle_prompt(lifecycle_scope_keys):
+    lifecycle_scope_keys(["environment", "region"])
+
+    sent = await _sent_with_a_region_scope(lifecycle=True)
+
+    assert "[fact-us] Backups run at 04:00. [scope: region=us]" in sent.user
+    [pool_entry] = [json.loads(line.rstrip(",")) for line in sent.user.splitlines() if "obs-backups" in line]
     assert [sm.get("scope") for sm in pool_entry["source_memories"]] == ["region=eu"]
+
+
+@pytest.mark.asyncio
+async def test_outside_lifecycle_a_lifecycle_scope_key_changes_nothing(lifecycle_scope_keys):
+    """Byte for byte the prompt the same batch sends with the setting at its default."""
+    lifecycle_scope_keys(["environment", "service", "module"])
+    default = await _sent_with_a_region_scope(lifecycle=False)
+    lifecycle_scope_keys(["environment", "region"])
+
+    configured = await _sent_with_a_region_scope(lifecycle=False)
+
+    assert configured == default
+    assert "region" not in configured.user and "scope" not in configured.user
 
 
 @pytest.mark.asyncio

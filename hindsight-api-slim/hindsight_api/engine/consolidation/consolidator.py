@@ -4746,24 +4746,27 @@ async def _shape_lifecycle_pools(
 #: integration stamps it on everything it retains, and a service is often named only that
 #: way, so without it two services' values of one setting read as one setting changing.
 #: Shown as each fact's ``scope``, which the SCOPES STAY APART processing rule keeps apart.
-#: Only scope keys reach the prompt (these, and the server's lifecycle scope keys, see
-#: :func:`_prompt_scope_keys`): the rest of a fact's metadata is mostly provenance (source,
-#: session, harness, branch) that would spend tokens on every fact line and invite splits on
-#: what is not a scope.
+#: Only scope keys reach the prompt (these, and in lifecycle mode the server's lifecycle scope
+#: keys, see :func:`_prompt_scope_keys`): the rest of a fact's metadata is mostly provenance
+#: (source, session, harness, branch) that would spend tokens on every fact line and invite splits
+#: on what is not a scope.
 _SCOPE_METADATA_KEYS = ("environment", "service", "module", "repository")
 #: A scope value is an identifier; cap it so a pasted blob in metadata cannot bloat every line.
 _SCOPE_VALUE_MAX_CHARS = 120
 
 
-def _prompt_scope_keys() -> tuple[str, ...]:
-    """The keys the prompt renders as a fact's scope: :data:`_SCOPE_METADATA_KEYS`, then any
-    further key in ``HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS``.
+def _prompt_scope_keys(*, lifecycle: bool) -> tuple[str, ...]:
+    """The keys the prompt renders as a fact's scope: :data:`_SCOPE_METADATA_KEYS`, then, for a
+    lifecycle batch, any further key in ``HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS``.
 
     Lifecycle validation drops a label whose claim and target differ on one of the server's scope
-    keys, so the model is shown every key it compares; a key it cannot see would get its labels
-    dropped for a difference it was never told about. Every mode renders them all: the setting is
-    server-level, and a scope the model can see keeps two values apart without lifecycle too.
+    keys, so a lifecycle batch shows the model every key it compares; a key it cannot see would get
+    its labels dropped for a difference it was never told about. Every other batch shows the base
+    keys only: the setting belongs to adaptive memory, and a bank in ``off`` mode must send the
+    consolidation prompt a server without adaptive memory sends, whatever the setting says.
     """
+    if not lifecycle:
+        return _SCOPE_METADATA_KEYS
     return tuple(dict.fromkeys((*_SCOPE_METADATA_KEYS, *lifecycle_scope_keys(get_config()))))
 
 
@@ -4794,14 +4797,14 @@ def _build_observations_for_llm(
     """Serialize MemoryFact observations into dicts for the consolidation LLM prompt.
 
     ``scope_keys`` are the metadata keys a source fact's ``scope`` shows; None reads them with
-    :func:`_prompt_scope_keys`.
+    :func:`_prompt_scope_keys`, for a lifecycle batch when ``lifecycle_pool`` is given.
 
     ``lifecycle_pool`` (lifecycle mode) adds each entry's ``status``, ``successor`` and
     ``retirable``, the ids of a retirable entry's source facts (what ``retires_source_ids`` /
     ``keeps_source_ids`` name), and shows a retired entry without its sources.
     """
     if scope_keys is None:
-        scope_keys = _prompt_scope_keys()
+        scope_keys = _prompt_scope_keys(lifecycle=lifecycle_pool is not None)
     obs_list = []
     for obs in observations:
         # Rows written before #4799 may repeat an id thousands of times; show each source once.
@@ -4983,7 +4986,7 @@ async def _consolidate_batch_with_llm(
     """
     if config is None:
         raise ValueError("config is required for _consolidate_batch_with_llm")
-    scope_keys = _prompt_scope_keys()
+    scope_keys = _prompt_scope_keys(lifecycle=lifecycle_pool is not None)
     if union_observations:
         obs_list = _build_observations_for_llm(
             union_observations, union_source_facts, lifecycle_pool, scope_keys=scope_keys
