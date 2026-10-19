@@ -4210,6 +4210,13 @@ class BankTemplateConfig(BaseModel):
             "defaults to retain_chunk_size when unset"
         ),
     )
+    retain_skip_refused_chunks: bool | None = Field(
+        default=None,
+        description=(
+            "Keep a retain whose chunks the provider refused on content-policy grounds, extracting "
+            "the rest of the document; off, one refused chunk fails the retain"
+        ),
+    )
     enable_observations: bool | None = Field(default=None, description="Toggle observation consolidation")
     observations_mission: str | None = Field(default=None, description="Controls what gets synthesised")
     enable_text_search: bool | None = Field(

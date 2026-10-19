@@ -33,6 +33,7 @@ import pytest
 
 from hindsight_api.engine.llm_interface import ProviderContentPolicyError, ProviderRateLimitResetError
 from hindsight_api.engine.memory_engine import _is_non_retryable_task_error
+from hindsight_api.engine.operation_metadata import RetainExtractionErrors
 from hindsight_api.worker.exceptions import RetryTaskAt
 
 # Verbatim shape of the refusal from the issue's worker log.
@@ -215,18 +216,23 @@ async def test_call_with_tools_raises_permanent_error_without_retrying(monkeypat
 # ---------------------------------------------------------------------------
 
 
-def _extraction_config() -> SimpleNamespace:
-    """Only the chunking fields extract_facts_from_text reads before chunk dispatch."""
+def _extraction_config(skip_refused_chunks: bool = False) -> SimpleNamespace:
+    """Only the fields extract_facts_from_text reads around chunk dispatch."""
     return SimpleNamespace(
         retain_chunk_size=1000,
         retain_structured_chunk_size=1000,
         # Chunking budgets the image-aware splitter reads; these bodies carry no
         # images, so the values only have to exist.
         retain_max_attachments_per_chunk=8,
+        retain_skip_refused_chunks=skip_refused_chunks,
     )
 
 
-async def _run_extraction(chunk_errors: dict[int, Exception]):
+async def _run_extraction(
+    chunk_errors: dict[int, Exception],
+    skip_refused_chunks: bool = False,
+    skipped_chunks: RetainExtractionErrors | None = None,
+):
     """Extract from a 2-chunk text where the given chunk indices raise."""
     from hindsight_api.engine.retain import fact_extraction
 
@@ -234,7 +240,8 @@ async def _run_extraction(chunk_errors: dict[int, Exception]):
         error = chunk_errors.get(chunk_index)
         if error is not None:
             raise error
-        return [], fact_extraction.TokenUsage()
+        # One marker "fact" per chunk, so tests can check facts stay aligned with chunks.
+        return [f"fact-{chunk_index}"], fact_extraction.TokenUsage()
 
     with patch.object(fact_extraction, "_extract_facts_with_auto_split", side_effect=fake_chunk_extract):
         return await fact_extraction.extract_facts_from_text(
@@ -248,7 +255,8 @@ async def _run_extraction(chunk_errors: dict[int, Exception]):
             extraction_prompt=fact_extraction.ExtractionPrompt(
                 system_prompt="", response_schema=fact_extraction.FactExtractionResponse
             ),
-            config=_extraction_config(),
+            config=_extraction_config(skip_refused_chunks),
+            skipped_chunks=skipped_chunks,
         )
 
 
@@ -286,6 +294,71 @@ async def test_transient_chunk_failure_stays_retryable():
 
     assert not isinstance(excinfo.value, ProviderContentPolicyError)
     assert _is_non_retryable_task_error(excinfo.value) is False
+
+
+# ---------------------------------------------------------------------------
+# retain_skip_refused_chunks: a refused chunk is skipped, the rest is kept
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_skip_refused_chunks_keeps_the_rest_of_the_document():
+    """With the switch on, the refused chunk is stored without facts and extraction succeeds."""
+    refusal = ProviderContentPolicyError(f"Claude Code reported an error: {REFUSAL_TEXT}")
+    skipped = RetainExtractionErrors()
+    facts, chunk_metadata, _usage = await _run_extraction(
+        {1: refusal}, skip_refused_chunks=True, skipped_chunks=skipped
+    )
+
+    # Every chunk survives, in order, and the refused one carries no facts, so callers
+    # slicing facts by each entry's count still land each fact on its own chunk.
+    counts = [count for _text, count in chunk_metadata]
+    assert len(counts) > 2
+    assert counts == [1, 0] + [1] * (len(counts) - 2)
+    assert facts == [f"fact-{i}" for i in range(len(counts)) if i != 1]
+    assert chunk_metadata[0][0].startswith("First sentence.")
+    assert chunk_metadata[-1][0].rstrip().endswith("Second sentence.")
+    # The skip is handed back for the operation, naming the chunk by its text.
+    assert skipped.count == 1
+    assert skipped.sample == [
+        f"Chunk skipped, refused by the provider's content policy ({refusal}): {chunk_metadata[1][0][:120]!r}"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_skip_refused_chunks_when_every_chunk_is_refused():
+    """A fully refused text yields no facts instead of failing the retain."""
+    refusal = ProviderContentPolicyError(f"Claude Code reported an error: {REFUSAL_TEXT}")
+    # More indices than the text has chunks, so every chunk is refused.
+    facts, chunk_metadata, _usage = await _run_extraction(dict.fromkeys(range(50), refusal), skip_refused_chunks=True)
+
+    assert facts == []
+    assert chunk_metadata and all(count == 0 for _text, count in chunk_metadata)
+
+
+@pytest.mark.asyncio
+async def test_skip_refused_chunks_leaves_a_transient_sibling_retryable():
+    """Skipping a refusal must not swallow a transient failure next to it."""
+    errors = {
+        0: ProviderContentPolicyError(f"Claude Code reported an error: {REFUSAL_TEXT}"),
+        1: RuntimeError("connection reset by peer"),
+    }
+    with pytest.raises(RuntimeError) as excinfo:
+        await _run_extraction(errors, skip_refused_chunks=True)
+
+    assert not isinstance(excinfo.value, ProviderContentPolicyError)
+    assert _is_non_retryable_task_error(excinfo.value) is False
+
+
+@pytest.mark.asyncio
+async def test_skip_refused_chunks_still_defers_a_quota_sibling():
+    """With the refusal skipped, a sibling quota error defers the task as it would alone."""
+    errors = {
+        0: ProviderContentPolicyError(f"Claude Code reported an error: {REFUSAL_TEXT}"),
+        1: ProviderRateLimitResetError(retry_at=datetime.now(UTC) + timedelta(hours=1), message="weekly limit"),
+    }
+    with pytest.raises(ProviderRateLimitResetError):
+        await _run_extraction(errors, skip_refused_chunks=True)
 
 
 # ---------------------------------------------------------------------------

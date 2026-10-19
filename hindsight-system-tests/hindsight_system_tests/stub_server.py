@@ -84,6 +84,8 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
             return _provider_error(
                 f"stub provider error {reply.error_status}", code="stub_error", status=reply.error_status
             )
+        if reply.finish_reason == "refusal":
+            return _provider_error("refuses() answers the Anthropic Messages API only", code="stub_misuse")
 
         return JSONResponse(
             {
@@ -151,6 +153,7 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
         if reply.error_status is not None:
             return _anthropic_error(f"stub provider error {reply.error_status}", reply.error_status)
 
+        refused = reply.finish_reason == "refusal"
         usage = _usage(chat_request.all_text, str(reply.message.get("content") or ""))
         return JSONResponse(
             {
@@ -158,8 +161,8 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
                 "type": "message",
                 "role": "assistant",
                 "model": body["model"],
-                "content": [{"type": "text", "text": reply.message["content"]}],
-                "stop_reason": "end_turn",
+                "content": [] if refused else [{"type": "text", "text": reply.message["content"]}],
+                "stop_reason": "refusal" if refused else "end_turn",
                 "stop_sequence": None,
                 "usage": {"input_tokens": usage["prompt_tokens"], "output_tokens": usage["completion_tokens"]},
             }

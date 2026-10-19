@@ -32,6 +32,7 @@ from ..adaptive.producers import write_settings
 from ..chunk_ids import build_chunk_id
 from ..db_utils import acquire_with_retry
 from ..memory_engine import count_tokens, fq_table
+from ..operation_metadata import RetainExtractionErrors, RetainPartialCommit
 
 if TYPE_CHECKING:
     from .attachment_store import RetainAttachmentLoader
@@ -163,6 +164,112 @@ async def _persist_operation_document_id(conn: Any, table: str, operation_id: st
         json.dumps([document_id]),
         operation_uuid,
     )
+
+
+async def _update_operation_metadata(pool: Any, operation_id: str, mutate: Callable[[dict[str, Any]], None]) -> None:
+    """Read-modify-write an operation's result_metadata under its row lock.
+
+    For updates that must merge with what concurrent retain passes of the same operation
+    wrote (one pass per document, and per sub-batch of an oversized one).
+    """
+    table = fq_table("async_operations")
+    operation_uuid = uuid.UUID(operation_id)
+    async with acquire_with_retry(pool) as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                f"SELECT result_metadata FROM {table} WHERE operation_id = $1 FOR UPDATE",
+                operation_uuid,
+            )
+            if row is None:
+                return
+            # Retain may hold a raw asyncpg pool (PG), whose connections hand back the JSON
+            # text undecoded, or a backend wrapper, which may already have decoded it.
+            raw = row["result_metadata"]
+            metadata = json.loads(raw) if isinstance(raw, str) else raw
+            if not isinstance(metadata, dict):
+                metadata = {}
+            mutate(metadata)
+            # The whole document goes back under the row lock: the Oracle compatibility
+            # rewriter cannot translate the jsonb `||` merge (see _oracle_append_operation_metadata).
+            cast_suffix = "" if getattr(conn, "backend_type", "postgresql") == "oracle" else "::jsonb"
+            await conn.execute(
+                f"UPDATE {table} SET result_metadata = $1{cast_suffix}, updated_at = CURRENT_TIMESTAMP "
+                "WHERE operation_id = $2",
+                json.dumps(metadata),
+                operation_uuid,
+            )
+
+
+async def _persist_extraction_errors(pool: Any, operation_id: str | None, errors: RetainExtractionErrors) -> None:
+    """Add one retain pass's non-fatal extraction errors to its operation's result_metadata.
+
+    Additive rather than an overwrite: one operation runs a pass per document (and per
+    sub-batch of an oversized one), concurrently, and each must add to what the others
+    recorded. ``_mark_operation_completed`` reads the total, which is what lets
+    HINDSIGHT_API_FAIL_ON_EXTRACTION_ERRORS fail the operation.
+    """
+    if not operation_id or errors.count == 0:
+        return
+
+    def _add(metadata: dict[str, Any]) -> None:
+        total = RetainExtractionErrors()
+        total.merge_metadata(metadata)
+        total.merge(errors)
+        metadata.update(total.to_dict())
+
+    try:
+        await _update_operation_metadata(pool, operation_id, _add)
+    except Exception:
+        # Best-effort like the other operation-metadata writes, but loud: losing this hides
+        # skipped chunks from the operation and from HINDSIGHT_API_FAIL_ON_EXTRACTION_ERRORS.
+        logger.error(
+            f"Failed to record {errors.count} extraction error(s) on operation {operation_id}: {errors.sample}",
+            exc_info=True,
+        )
+
+
+async def _record_kept_after_failure(
+    pool: Any,
+    operation_id: str | None,
+    bank_id: str,
+    document_id: str,
+    chunks_total: int,
+    chunks_failed: int,
+) -> None:
+    """Say what a failing streaming retain leaves of its document, before the failure propagates.
+
+    The batches committed so far stay (see ``RetainPartialCommit``), so a failed retain is
+    not "nothing stored". Logged for every retain and recorded on the operation when there
+    is one. Overwrites this document's entry: a retried attempt reports the document's
+    state as of its own failure, which already counts what earlier attempts committed.
+    """
+    from ..memories import get_memories
+
+    try:
+        async with acquire_with_retry(pool) as conn:
+            memories_kept = len(
+                await get_memories().document_unit_ids(
+                    conn=conn, fq_table=fq_table, bank_id=bank_id, document_id=document_id
+                )
+            )
+        kept = RetainPartialCommit(chunks_total=chunks_total, chunks_failed=chunks_failed, memories_kept=memories_kept)
+        logger.warning(
+            f"[streaming] Retain of document {document_id} failed on {chunks_failed} of {chunks_total} chunks; "
+            f"{memories_kept} memories committed before the failure are kept"
+        )
+        if operation_id:
+
+            def _set(metadata: dict[str, Any]) -> None:
+                by_document = metadata.get("kept_after_failure")
+                if not isinstance(by_document, dict):
+                    by_document = {}
+                by_document[document_id] = kept.to_dict()
+                metadata["kept_after_failure"] = by_document
+
+            await _update_operation_metadata(pool, operation_id, _set)
+    except Exception:
+        # Never let the report replace the failure it reports on.
+        logger.error(f"Failed to record what failed retain of document {document_id} kept", exc_info=True)
 
 
 def utcnow():
@@ -558,6 +665,7 @@ class _EmbeddedExtraction:
     processed_facts: list[ProcessedFact]
     chunks: list[ChunkMetadata]
     usage: TokenUsage
+    extraction_errors: RetainExtractionErrors = dataclasses.field(default_factory=RetainExtractionErrors)
 
 
 async def _record_retain_document_outcome(pool: Any, bank_id: str, document_id: str, units_created: int) -> None:
@@ -1441,7 +1549,7 @@ async def _extract_and_embed(
     )
 
     if not extracted_facts:
-        return _EmbeddedExtraction(extracted_facts, [], chunks, usage)
+        return _EmbeddedExtraction(extracted_facts, [], chunks, usage, extraction.extraction_errors)
 
     if fact_type_override:
         for fact in extracted_facts:
@@ -1455,7 +1563,9 @@ async def _extract_and_embed(
 
     fact_batch = _process_extracted_facts(extracted_facts, embeddings)
 
-    return _EmbeddedExtraction(fact_batch.extracted_facts, fact_batch.processed_facts, chunks, usage)
+    return _EmbeddedExtraction(
+        fact_batch.extracted_facts, fact_batch.processed_facts, chunks, usage, extraction.extraction_errors
+    )
 
 
 def _remap_causal_relations(
@@ -2837,6 +2947,9 @@ async def _streaming_retain_batch(
 
     # Shared mutable state for the producer to report skipped chunks and usage
     producer_error: list[BaseException] = []
+    # Non-fatal extraction errors across every chunk task, recorded on the operation once the
+    # pipeline is done. Each chunk is its own extraction call, so writing per chunk would race.
+    extraction_errors = RetainExtractionErrors()
     # Content + context tokens of the chunks the producer actually sent to extraction, for the
     # processed-content-tokens signal. Only filled in recovery mode, which is the only mode where
     # chunks are skipped and so the only one where the number means anything. See the return at
@@ -2931,6 +3044,7 @@ async def _streaming_retain_batch(
             processed = embedded.processed_facts
             chunk_meta = embedded.chunks
             usage = embedded.usage
+            extraction_errors.merge(embedded.extraction_errors)
             # Reserve before queueing, so a producer running ahead of a slow write path
             # waits here instead of piling extracted facts up behind the queue. Extraction
             # for chunks already in flight continues; only the handover is throttled.
@@ -3622,8 +3736,15 @@ async def _streaming_retain_batch(
             # exception that is propagating).
             await asyncio.gather(producer_task, consumer_task, return_exceptions=True)
 
-        # Propagate producer errors (e.g. LLM failures)
+        # Propagate producer errors (e.g. LLM failures). The consumer has already committed
+        # every chunk that did extract, and that is not undone: the committed batches are what
+        # a retry resumes from (existing_chunk_hashes), and the first one already replaced the
+        # document's previous version. Record what stays before failing.
         if producer_error:
+            if not pipeline_aborted[0]:
+                await _record_kept_after_failure(
+                    pool, operation_id, bank_id, effective_doc_id, total_chunks, len(producer_error)
+                )
             raise producer_error[0]
 
         # If no batch was processed (e.g. zero facts extracted from gibberish
@@ -3708,6 +3829,9 @@ async def _streaming_retain_batch(
                 async with conn.transaction():
                     await outbox_callback(conn)
             outbox_fired[0] = True
+
+        if not pipeline_aborted[0]:
+            await _persist_extraction_errors(pool, operation_id, extraction_errors)
 
         # Mark facts as committed in operation metadata (crash recovery checkpoint)
         if operation_id and all_unit_ids:
@@ -4425,6 +4549,7 @@ async def _try_delta_retain(
         # written; the streaming path redoes the work under its own lock, and
         # for an append its base check turns the loss into a retry.
         return None
+    await _persist_extraction_errors(pool, operation_id, embedded.extraction_errors)
     await _record_retain_document_outcome(pool, bank_id, effective_doc_id, sum(len(ids) for ids in result_unit_ids))
     # Count content + context tokens that actually went through extraction.
     # ``delta_contents`` holds the per-chunk RetainContent items for the

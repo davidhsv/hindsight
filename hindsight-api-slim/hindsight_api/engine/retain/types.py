@@ -17,6 +17,7 @@ from uuid import UUID
 import numpy as np
 
 from ..metadata_utils import drop_null_values
+from ..operation_metadata import RetainExtractionErrors
 from ..response_models import TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -290,6 +291,13 @@ class ExtractionResult:
 
     usage: TokenUsage
     """LLM tokens consumed. Zero for chunks mode, which makes no model call."""
+
+    extraction_errors: RetainExtractionErrors = field(default_factory=RetainExtractionErrors)
+    """Non-fatal extraction failures the caller must record on the operation.
+
+    Today only chunks skipped under ``retain_skip_refused_chunks``. The Batch API
+    route persists its own errors and leaves this empty.
+    """
 
 
 def merge_processed_content_tokens(a: int | None, b: int | None) -> int | None:

@@ -839,6 +839,7 @@ ENV_LLM_DEBUG_DUMP_4XX = "HINDSIGHT_API_LLM_DEBUG_DUMP_4XX"
 ENV_RETAIN_MAX_COMPLETION_TOKENS = "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS"
 ENV_RETAIN_CHUNK_SIZE = "HINDSIGHT_API_RETAIN_CHUNK_SIZE"
 ENV_RETAIN_STRUCTURED_CHUNK_SIZE = "HINDSIGHT_API_RETAIN_STRUCTURED_CHUNK_SIZE"
+ENV_RETAIN_SKIP_REFUSED_CHUNKS = "HINDSIGHT_API_RETAIN_SKIP_REFUSED_CHUNKS"
 ENV_RETAIN_EXTRACT_CAUSAL_LINKS = "HINDSIGHT_API_RETAIN_EXTRACT_CAUSAL_LINKS"
 ENV_RETAIN_OPTIONAL_FACT_DIMENSIONS = "HINDSIGHT_API_RETAIN_OPTIONAL_FACT_DIMENSIONS"
 ENV_RETAIN_EXTRACTION_MODE = "HINDSIGHT_API_RETAIN_EXTRACTION_MODE"
@@ -2053,6 +2054,12 @@ DEFAULT_RETAIN_ENTITY_RESOLUTION_BATCH_SIZE = 100  # Unique entity names per pg_
 # signal is noise, while the cost is a synchronous SequenceMatcher call per candidate.
 DEFAULT_RETAIN_ENTITY_RESOLUTION_MAX_CANDIDATES = 200
 DEFAULT_RETAIN_BATCH_ENABLED = False  # Use LLM Batch API for fact extraction (only when async=True)
+# Keep a retain whose chunks the provider refused on content-policy grounds (the refusals
+# the Anthropic, Claude Code and Cursor providers raise): the refused chunks yield no facts,
+# are recorded on the operation as extraction errors, and the rest of the document is
+# extracted. Off, one refused chunk fails the retain, so no document is reported complete
+# while missing a chunk's facts.
+DEFAULT_RETAIN_SKIP_REFUSED_CHUNKS = False
 DEFAULT_LLM_PROMPT_CACHE_ENABLED = True  # Reuse the fixed system prefix via provider prompt caching
 DEFAULT_LLM_DEBUG_DUMP_4XX = False  # Log the exact request behind any LLM 4xx (diagnostic, off by default)
 DEFAULT_RETAIN_BATCH_POLL_INTERVAL_SECONDS = 60  # Batch API polling interval in seconds
@@ -4064,6 +4071,7 @@ class HindsightConfig:
     retain_max_completion_tokens: int
     retain_chunk_size: int
     retain_structured_chunk_size: int | None
+    retain_skip_refused_chunks: bool
     retain_extract_causal_links: bool
     retain_optional_fact_dimensions: bool
     retain_extraction_mode: str
@@ -4524,6 +4532,7 @@ class HindsightConfig:
         # Retention settings (behavioral)
         "retain_chunk_size",
         "retain_structured_chunk_size",
+        "retain_skip_refused_chunks",
         "retain_extraction_mode",
         "retain_mission",
         "retain_custom_instructions",
@@ -6057,6 +6066,9 @@ class HindsightConfig:
             retain_structured_chunk_size=_parse_optional_positive_int(
                 ENV_RETAIN_STRUCTURED_CHUNK_SIZE,
                 os.getenv(ENV_RETAIN_STRUCTURED_CHUNK_SIZE),
+            ),
+            retain_skip_refused_chunks=_parse_boolean_env(
+                ENV_RETAIN_SKIP_REFUSED_CHUNKS, DEFAULT_RETAIN_SKIP_REFUSED_CHUNKS
             ),
             retain_extract_causal_links=os.getenv(
                 ENV_RETAIN_EXTRACT_CAUSAL_LINKS, str(DEFAULT_RETAIN_EXTRACT_CAUSAL_LINKS)

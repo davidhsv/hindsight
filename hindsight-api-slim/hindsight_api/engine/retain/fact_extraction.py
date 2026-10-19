@@ -2441,10 +2441,10 @@ async def _extract_facts_from_chunk(
             # fire — but the rest were dropped for drifting their key names, and the
             # caller gets no signal at all. Say so loudly; a chunk that lost most of its
             # facts is a schema problem, not thin content.
-            # ponytail: log-only. The streaming path has no extraction-error channel
-            # (RetainExtractionErrors is batch-only), so surfacing this on the operation
-            # needs a signature change through extract_facts_from_text; do that if an
-            # operator ever needs it in the API rather than the log.
+            # ponytail: log-only. The streaming path's extraction-error channel ends at
+            # extract_facts_from_text (its ``skipped_chunks``), so surfacing this on the
+            # operation means threading that sink down to here; do that if an operator
+            # ever needs it in the API rather than the log.
             if has_malformed_facts and len(chunk_facts) < len(raw_facts):
                 # ``has_malformed_facts`` also covers a non-dict entry and a fact the Fact
                 # model rejected, where no drifted keys were seen — so only name them when
@@ -2636,6 +2636,7 @@ async def extract_facts_from_text(
     attachment_loader: "AttachmentLoader | None" = None,
     vlm_config: "AnyLLMProvider | None" = None,
     extraction_prompt: ExtractionPrompt | None = None,
+    skipped_chunks: RetainExtractionErrors | None = None,
 ) -> tuple[list[Fact], list[tuple[str, int]], TokenUsage]:
     """
     Extract semantic facts from conversational or narrative text using LLM.
@@ -2665,6 +2666,9 @@ async def extract_facts_from_text(
         extraction_prompt: Optional precomputed extraction prompt and response schema.
             When provided, reuses the already compiled system prompt and Pydantic model
             across all chunks in this text. When omitted, compiles them once from config.
+        skipped_chunks: Receives one entry per chunk skipped under
+            ``retain_skip_refused_chunks``, so the caller can record it on the operation.
+            None when the caller has nowhere to record it; the skip is still logged.
 
     Returns:
         Tuple of (facts, chunks, usage) where:
@@ -2725,8 +2729,9 @@ async def extract_facts_from_text(
     ]
 
     # return_exceptions=True so we can collect all results even if some chunks
-    # exhausted their retries. We check for failures below and fail the retain
-    # if ANY chunk could not be extracted — partial extraction is not acceptable.
+    # exhausted their retries. We check for failures below and fail this call
+    # if ANY chunk could not be extracted, except for content-policy refusals
+    # when retain_skip_refused_chunks is on.
     chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
 
     all_facts = []
@@ -2741,6 +2746,33 @@ async def extract_facts_from_text(
         all_facts.extend(chunk_facts)
         chunk_metadata.append((chunk, len(chunk_facts)))
         total_usage = total_usage + chunk_usage
+
+    if failed_chunks and config.retain_skip_refused_chunks:
+        refused = [(idx, err) for idx, err in failed_chunks if isinstance(err, ProviderContentPolicyError)]
+        if refused:
+            # A refusal is deterministic, so retrying cannot recover these chunks; keep
+            # their text with no facts rather than losing the rest of the document.
+            logger.warning(
+                f"[FACT_EXTRACTION] Skipping {len(refused)} of {len(chunks)} chunks refused by the "
+                f"provider's content policy (retain_skip_refused_chunks): "
+                + ", ".join(f"chunk {idx}: {err}" for idx, err in refused[:5])
+            )
+            if skipped_chunks is not None:
+                # Named by its opening text, not its index: streaming retain extracts each
+                # chunk of a document in its own call, where every index is 0 of 1.
+                for idx, err in refused:
+                    skipped_chunks.add(
+                        f"Chunk skipped, refused by the provider's content policy ({err}): {chunks[idx][:120]!r}"
+                    )
+            refused_idx = {idx for idx, _ in refused}
+            failed_chunks = [(idx, err) for idx, err in failed_chunks if idx not in refused_idx]
+            # Rebuilt in chunk order: callers slice all_facts by each entry's fact count.
+            chunk_metadata = []
+            for i, (chunk, result) in enumerate(zip(chunks, chunk_results)):
+                if i in refused_idx:
+                    chunk_metadata.append((chunk, 0))
+                elif not isinstance(result, BaseException):
+                    chunk_metadata.append((chunk, len(result[0])))
 
     if failed_chunks:
         # Include the exception message — not just the type — so operators
@@ -2777,9 +2809,11 @@ async def extract_facts_from_text(
                 f"succeed. First failures: {failed_summary}"
             ) from policy_errors[0]
 
-        # Fail the entire retain — partial extraction is not acceptable.
-        # All successfully extracted facts are discarded because the transaction
-        # hasn't committed yet. The worker poller will retry the entire task.
+        # Fail this call, discarding its successfully extracted facts. That is the
+        # whole retain only where one call covers it (the delta path extracts every
+        # changed chunk before writing anything). Streaming retain extracts chunk
+        # by chunk and keeps the chunks it already committed, which a task retry
+        # resumes from; see _streaming_retain_batch.
         raise RuntimeError(
             f"Fact extraction failed: {len(failed_chunks)}/{len(chunks)} chunks failed. "
             f"First failures: {failed_summary}"
@@ -3521,6 +3555,7 @@ async def extract_facts_from_contents(
         return await extract_facts_from_contents_batch_api(contents, llm_config, config, pool, operation_id, schema)
 
     extraction_prompt = _build_extraction_prompt_and_schema(config)
+    skipped_chunks = RetainExtractionErrors()
 
     # Step 1: Create parallel fact extraction tasks
     fact_extraction_tasks = []
@@ -3536,6 +3571,7 @@ async def extract_facts_from_contents(
             attachment_loader=attachment_loader,
             vlm_config=vlm_config,
             extraction_prompt=extraction_prompt,
+            skipped_chunks=skipped_chunks,
         )
         fact_extraction_tasks.append(task)
 
@@ -3630,7 +3666,7 @@ async def extract_facts_from_contents(
     # Step 6: Auto-tag facts from label groups with tag=True
     _inject_label_tags(extracted_facts, config)
 
-    return ExtractionResult(extracted_facts, chunks_metadata, total_usage)
+    return ExtractionResult(extracted_facts, chunks_metadata, total_usage, skipped_chunks)
 
 
 def _collapse_to_verbatim(facts: list[ExtractedFactType], chunks: list[ChunkMetadata]) -> list[ExtractedFactType]:

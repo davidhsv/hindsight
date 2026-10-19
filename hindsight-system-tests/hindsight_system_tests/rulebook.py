@@ -169,6 +169,18 @@ class RuleBuilder:
     def returns_text(self, text: str) -> LLMStub:
         return self._register(lambda _request: _assistant_message(text))
 
+    def refuses(self) -> LLMStub:
+        """Refuse on content-policy grounds the way Anthropic does: HTTP 200, no content,
+        ``stop_reason: "refusal"``.
+
+        Anthropic Messages API only. The OpenAI-compatible provider has no refusal it
+        treats as permanent, so ``/v1/chat/completions`` rejects the rule instead of
+        inventing one.
+        """
+        return self._register(
+            lambda _request: StubbedReply(message={"role": "assistant", "content": ""}, finish_reason="refusal")
+        )
+
     def answers_with(self, build: Callable[[ChatRequest], BaseModel]) -> LLMStub:
         """Compute the reply from the request that triggered it.
 

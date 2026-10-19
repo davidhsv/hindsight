@@ -118,6 +118,7 @@ async def test_hierarchical_fields_categorization():
     assert "retain_custom_instructions" in configurable
     assert "retain_chunk_size" in configurable
     assert "retain_structured_chunk_size" in configurable
+    assert "retain_skip_refused_chunks" in configurable
     assert "enable_observations" in configurable
     assert "consolidation_llm_batch_size" in configurable
     assert "consolidation_source_facts_max_tokens" in configurable
@@ -172,7 +173,7 @@ async def test_hierarchical_fields_categorization():
     assert "context_admission_weights" in static
 
     # Verify count is correct
-    assert len(configurable) == 76
+    assert len(configurable) == 77
 
     # Verify credential fields (NEVER exposed)
     assert "llm_api_key" in credentials

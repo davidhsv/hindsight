@@ -81,6 +81,19 @@
           "description": "Max characters for a single JSONL line or conversation turn to keep whole; defaults to retain_chunk_size when unset",
           "title": "Retain Structured Chunk Size"
         },
+        "retain_skip_refused_chunks": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Keep a retain whose chunks the provider refused on content-policy grounds, extracting the rest of the document; off, one refused chunk fails the retain",
+          "title": "Retain Skip Refused Chunks"
+        },
         "enable_observations": {
           "anyOf": [
             {

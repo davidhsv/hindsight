@@ -65,6 +65,7 @@ _SAMPLE_VALUES: dict[str, Any] = {
     "retain_custom_instructions": "Extract one fact per decision, dated.",
     "retain_chunk_size": 2500,
     "retain_structured_chunk_size": 1800,
+    "retain_skip_refused_chunks": True,
     "enable_observations": False,
     "observations_mission": "Observations cover preferences and skills only.",
     "enable_text_search": False,
