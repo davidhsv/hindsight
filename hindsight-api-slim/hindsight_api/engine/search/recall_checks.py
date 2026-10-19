@@ -27,11 +27,17 @@ checks can run beside the cross-encoder reranker, and only on the typesafe provi
 wordings and thresholds below were developed on TypeSafe's jev-1.13.0 and re-measured unchanged
 on jev-1.14.0, the provider's default, which is also the model the Jev rerank was measured on;
 they are not known to hold for another model.
+
+A recall waits on these requests, so each is bounded by the recall timeout, a recall stops asking
+after its first request that gets no answer, and a process-wide circuit breaker stops every recall
+from asking while the endpoint keeps failing (see ``recall_guard.py``). A check that is not asked
+falls back exactly as on a failed request, without a warning of its own.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -44,36 +50,47 @@ from ..decision_model import DecisionModel, DecisionQuestion
 from ..remote_retry import RetryPolicy
 from ..response_models import MemoryFact, RecallResult
 from ..token_encoding import count_tokens, truncate_to_tokens
+from .recall_guard import CircuitBreaker, GuardedDecisionModel, GuardedRanker, RecallCheckSkipped, RecallGuard
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class RecallChecks:
-    """Which checks one recall runs, and the decision model they ask."""
+    """Which checks one recall runs, and the decision model they ask, through the recall's guard."""
 
-    model: DecisionModel
+    model: GuardedDecisionModel
     relevance: bool
     conditional_recency: bool
     injection_gate: bool
     #: Set when the Jev rerank is on: the same setup, asked the TypeSafe reranker's rank question.
-    jev_reranker: TypeSafeCrossEncoder | None = None
+    jev_reranker: GuardedRanker | None = None
 
     @property
     def on_results(self) -> bool:
         return self.relevance or self.injection_gate
 
 
+def _retry_policy(timeout: float) -> RetryPolicy:
+    """One quick retry within the recall timeout, for a request refused at once (a 429 when
+    recalls overlap on one endpoint replica, a dropped connection). The decision model's default
+    policy retried four times over up to 15 s, which a recall cannot wait for."""
+    return RetryPolicy(max_retries=1, initial_backoff=0.2, max_backoff=0.2, budget_seconds=timeout)
+
+
 @lru_cache(maxsize=4)
 def _client(setup: DecisionModelConfig) -> DecisionModel:
     # One client per setup for the process, so its connection pool and concurrency cap are shared.
-    return DecisionModel.from_config(setup)
+    # ``setup.timeout`` is already the recall timeout (see resolve_recall_checks).
+    client = DecisionModel.from_config(setup)
+    client.retry_policy = _retry_policy(setup.timeout)
+    return client
 
 
 @lru_cache(maxsize=4)
 def _reranker(setup: DecisionModelConfig) -> TypeSafeCrossEncoder:
     """The rank question's client for one setup, shared like ``_client``. The request is the
-    TypeSafe reranker's own; its window and its retries are the decision model's."""
+    TypeSafe reranker's own; its window, timeout and retries are the recall checks'."""
     reranker = TypeSafeCrossEncoder(
         api_key=setup.api_key,
         model=setup.model,
@@ -82,8 +99,14 @@ def _reranker(setup: DecisionModelConfig) -> TypeSafeCrossEncoder:
         max_concurrent=setup.max_concurrent,
     )
     reranker.MAX_QUESTION_TOKENS = setup.max_request_tokens
-    reranker.retry_policy = RetryPolicy()
+    reranker.retry_policy = _retry_policy(setup.timeout)
     return reranker
+
+
+@lru_cache(maxsize=1)
+def _breaker(failure_threshold: int, cooldown_seconds: float) -> CircuitBreaker:
+    """The one breaker every recall shares: the recall checks have one endpoint per server."""
+    return CircuitBreaker(failure_threshold=failure_threshold, cooldown_seconds=cooldown_seconds, name="Recall checks")
 
 
 @lru_cache(maxsize=1)
@@ -117,19 +140,27 @@ def resolve_recall_checks(bank_config: Mapping[str, Any]) -> RecallChecks | None
     jev_rerank = bool(bank_config.get("recall_jev_rerank", False))
     if not (relevance or conditional_recency or injection_gate or jev_rerank):
         return None
-    setup = get_config().decision_model_config("recall_checks")
+    config = get_config()
+    setup = config.decision_model_config("recall_checks")
     if setup is None:
         _warn_no_model()
         return None
     if setup.provider != "typesafe":
         _warn_unsupported(setup.provider)
         return None
+    # The decision model's own timeout is sized for consolidation and reflect; a recall waits on
+    # these requests, so its clients time out at the recall timeout.
+    setup = dataclasses.replace(setup, timeout=config.recall_checks_timeout)
+    guard = RecallGuard(
+        _breaker(config.recall_checks_breaker_failures, config.recall_checks_breaker_cooldown),
+        config.recall_checks_timeout,
+    )
     return RecallChecks(
-        model=_client(setup),
+        model=GuardedDecisionModel(_client(setup), guard),
         relevance=relevance,
         conditional_recency=conditional_recency,
         injection_gate=injection_gate,
-        jev_reranker=_reranker(setup) if jev_rerank else None,
+        jev_reranker=GuardedRanker(_reranker(setup), guard) if jev_rerank else None,
     )
 
 
@@ -151,7 +182,7 @@ _CURRENT_STATE_TASK = "The question asks about the current or latest state of so
 _CURRENT_STATE_MIN = 0.5
 
 
-async def asks_current_state(model: DecisionModel, query: str) -> bool | None:
+async def asks_current_state(model: GuardedDecisionModel, query: str) -> bool | None:
     """Whether ``query`` asks about the current or latest state of something, or None when the
     decision model did not answer, which leaves the recency boost as configured."""
     questions = {
@@ -161,6 +192,8 @@ async def asks_current_state(model: DecisionModel, query: str) -> bool | None:
     }
     try:
         answer = (await model.ask(_CURRENT_STATE_STATE, questions)).answers.get("current_state")
+    except RecallCheckSkipped:
+        return None
     except Exception as e:
         logger.warning(f"Recall conditional recency: the decision model did not answer, recency stays on: {e}")
         return None
@@ -199,7 +232,7 @@ def _listing_state(query: str, facts: Sequence[MemoryFact], memory_tokens: int) 
     return f"Question: {_capped(query, _MAX_QUERY_TOKENS)}\n\nMemories recalled for it, ranked best first:\n{listing}"
 
 
-async def nothing_relevant(model: DecisionModel, query: str, facts: Sequence[MemoryFact]) -> bool | None:
+async def nothing_relevant(model: GuardedDecisionModel, query: str, facts: Sequence[MemoryFact]) -> bool | None:
     """Whether none of the top results helps answer ``query``: True when there are none, None
     when the decision model did not answer."""
     shortlist = list(facts[:_RELEVANCE_SHORTLIST])
@@ -211,6 +244,8 @@ async def nothing_relevant(model: DecisionModel, query: str, facts: Sequence[Mem
     questions = {"flag": DecisionQuestion(type="noul", instructions=_ANY_HELPS)}
     try:
         response = await model.ask(_listing_state(query, shortlist, memory_tokens), questions)
+    except RecallCheckSkipped:
+        return None
     except Exception as e:
         logger.warning(f"Recall relevance check: the decision model did not answer: {e}")
         return None
@@ -309,7 +344,7 @@ def _gate_groups(facts: Sequence[MemoryFact], memory_budget: int) -> list[list[M
     return groups
 
 
-async def _planted_in_group(model: DecisionModel, query: str, group: Sequence[MemoryFact]) -> set[str]:
+async def _planted_in_group(model: GuardedDecisionModel, query: str, group: Sequence[MemoryFact]) -> set[str]:
     ids = [f"m{position}" for position in range(1, len(group) + 1)]
     state = {
         "query": query[:_GATE_QUERY_CHARS],
@@ -320,6 +355,8 @@ async def _planted_in_group(model: DecisionModel, query: str, group: Sequence[Me
         questions.update(_planted_questions(memory_id))
     try:
         answers = (await model.ask(state, questions)).answers
+    except RecallCheckSkipped:
+        return set()
     except Exception as e:
         # Fail open: an outage of the decision model must not empty every recall.
         logger.warning(
@@ -340,9 +377,10 @@ async def _planted_in_group(model: DecisionModel, query: str, group: Sequence[Me
     return planted
 
 
-async def planted_memory_ids(model: DecisionModel, query: str, facts: Sequence[MemoryFact]) -> set[str]:
+async def planted_memory_ids(model: GuardedDecisionModel, query: str, facts: Sequence[MemoryFact]) -> set[str]:
     """Ids of the memories in ``facts`` the decision model reads as planted instructions. A
-    memory it could not read is not among them: it is returned unchecked, with a warning."""
+    memory it could not read is not among them: it is returned unchecked, with a warning (none
+    when the guard skipped the request: the breaker logged its own)."""
     unique = list({fact.id: fact for fact in facts}.values())
     if not unique:
         return set()

@@ -11,14 +11,18 @@ Each check is unit-tested on its own. What only a story shows is that the per-ba
 the decision model's answer and the recall the client receives line up: that a flag leaves
 the memories alone, that a withheld memory is gone from what the client gets, that the
 recency decision reaches the scores the client sees, and that the rerank's order is the one
-the client gets, or the local one when the decision model fails.
+the client gets, or the local one when the decision model fails, and that a decision model
+that keeps failing stops being asked for a while, with recall still answering.
 """
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from hindsight_system_tests.payloads import consolidation, extracted, fact
+from hindsight_system_tests.server import RECALL_CHECKS_BREAKER_COOLDOWN_SECONDS
 
 pytestmark = pytest.mark.asyncio
 
@@ -135,3 +139,33 @@ async def test_a_failed_jev_rerank_returns_the_local_order(client, bank, stubs):
 
     assert _texts(response) == before
     assert stubs.recall_checks.asked == ["jev_rerank"]
+
+
+async def test_a_decision_model_that_keeps_failing_is_not_asked_until_its_cool_down_is_over(client, bank, stubs):
+    """Five recalls in a row whose rerank gets a 401 open the server's circuit breaker (its default
+    threshold): the next recall sends nothing and still returns the local order. Once the cool-down
+    is over one recall probes the decision model, gets its answer, and the breaker is closed again."""
+    before = _texts(await client.arecall(bank_id=bank, query=QUERY))
+    await _turn_on(client, bank, "recall_jev_rerank")
+    stubs.recall_checks.jev_first = before[-1]
+    reranked = [before[-1], *before[:-1]]
+    # The breaker is the server's, shared by every story: an answer first, so the count of failures
+    # in a row starts here and not at whatever an earlier story left.
+    assert _texts(await client.arecall(bank_id=bank, query=QUERY)) == reranked
+
+    stubs.recall_checks.jev_fails = True
+    for _ in range(5):
+        assert _texts(await client.arecall(bank_id=bank, query=QUERY)) == before
+    assert stubs.recall_checks.asked == ["jev_rerank"] * 6
+
+    skipped = await client.arecall(bank_id=bank, query=QUERY)
+    assert _texts(skipped) == before
+    assert len(stubs.recall_checks.asked) == 6, "nothing is sent while the breaker is open"
+
+    stubs.recall_checks.jev_fails = False
+    await asyncio.sleep(RECALL_CHECKS_BREAKER_COOLDOWN_SECONDS + 0.5)
+    probed = await client.arecall(bank_id=bank, query=QUERY)
+    closed = await client.arecall(bank_id=bank, query=QUERY)
+
+    assert _texts(probed) == _texts(closed) == reranked
+    assert stubs.recall_checks.asked == ["jev_rerank"] * 8

@@ -19,18 +19,18 @@ temporal-reasoning question's evidence in the top five for 0.827 against 0.701 (
 lost). On knowledge-update questions the latest value came first for 0.764 against 0.819 for the
 local order: the dates win back most of what Jev without them loses there (0.597), not all of it.
 
-A request that fails, times out or answers out of shape leaves the local order: the recall never
-fails for it.
+A request that fails, outlasts the recall timeout or answers out of shape leaves the local order:
+the recall never fails for it. So does one the recall's guard skips (the circuit breaker is open, or
+an earlier request of the recall got no answer; see ``recall_guard.py``), without a warning.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from ..cross_encoder import TypeSafeCrossEncoder
+from .recall_guard import GuardedRanker, RecallCheckSkipped
 from .reranking import rerank_document
 from .types import RetrievalResult, ScoredResult
 
@@ -68,15 +68,16 @@ class JevRerank:
     results: list[ScoredResult]
     #: The results it ordered, best first; empty when it ordered none.
     ranked_ids: list[str] = field(default_factory=list)
-    #: Why it ordered none although there was something to order, e.g. ``"TimeoutError"``.
+    #: Why it ordered none although there was something to order, e.g. ``"TimeoutError"``, or
+    #: ``"RecallCheckSkipped"`` when the guard sent no request.
     error: str | None = None
 
 
 async def jev_rerank(
-    reranker: TypeSafeCrossEncoder, query: str, scored_results: list[ScoredResult], now: datetime
+    reranker: GuardedRanker, query: str, scored_results: list[ScoredResult], now: datetime
 ) -> JevRerank:
     """``scored_results`` (sorted, best first) with the top :data:`POOL_SIZE` in the decision
-    model's order, or unchanged when it does not answer within the reranker's timeout.
+    model's order, or unchanged when it does not answer within the recall timeout.
 
     The reordered results keep their final scores as a set, handed out by the new rank: the
     result ranked first gets the highest final score of the pool, and so on. The final score then
@@ -89,10 +90,11 @@ async def jev_rerank(
         return JevRerank(results=scored_results)
     options = [jev_option(sr.retrieval) for sr in pool]
     try:
-        async with asyncio.timeout(reranker.timeout):
-            order = await reranker.rank(query, options, current_date=_utc_date(now))
+        order = await reranker.rank(query, options, current_date=_utc_date(now))
         if sorted(order) != list(range(len(pool))):
             raise ValueError(f"the answer ranks {len(order)} positions for {len(pool)} options")
+    except RecallCheckSkipped as e:
+        return JevRerank(results=scored_results, error=type(e).__name__)
     except Exception as e:
         logger.warning(f"Recall Jev rerank: the decision model did not answer, the local order stays: {e!r}")
         return JevRerank(results=scored_results, error=type(e).__name__)

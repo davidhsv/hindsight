@@ -100,6 +100,8 @@ The provider is set for the `recall_checks` operation only, not through `HINDSIG
 
 Each check adds TypeSafe requests to every REST and MCP recall on the bank: one for conditional recency, asked while retrieval runs; one for the flag; one for the rerank, about 10,000 input tokens for 100 memories; and one per ten screened memories (results and their source facts) for the gate. The rerank, the gate and the flag run after retrieval, one after the other, so their round trips add to recall latency.
 
+If TypeSafe stops answering (unreachable, failing, rate-limited, or the key refused or out of credit), recall falls back the way each bullet above says, and it does not wait long for it: each request has [`HINDSIGHT_API_RECALL_CHECKS_TIMEOUT`](./configuration#recall-checks) (2 s) with its one retry, a recall stops asking after its first request that gets no answer, and after five such requests in a row a circuit breaker stops every recall from asking for 30 s, then lets one request probe the endpoint. While it is open a recall takes what it takes without the checks, and it returns what it would without them, so the poisoning guard is off until TypeSafe answers again. The server logs one warning when the breaker opens and one when it closes.
+
 ## Event time vs memory time
 
 Five timestamps describe a memory, and they answer different questions. Mixing them up is the most common way to get history wrong.

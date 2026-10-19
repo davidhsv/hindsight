@@ -50,6 +50,10 @@ SERVER_STARTUP_TIMEOUT = 180.0
 #: the worker has *not* claimed wait a multiple of this.
 WORKER_POLL_INTERVAL_MS = 500
 
+#: How long the recall checks' circuit breaker stays open once it opens. Stories that wait
+#: for its probe wait a little longer than this.
+RECALL_CHECKS_BREAKER_COOLDOWN_SECONDS = 1.0
+
 
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -153,6 +157,9 @@ def stub_environment(stub_url: str) -> dict[str, str]:
         "HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_PROVIDER": "typesafe",
         "HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_API_KEY": "stub-key",
         "HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_BASE_URL": stub_url,
+        # Pinned short: test_77 opens the recall checks' circuit breaker and waits out its cool-down
+        # for the probe that closes it again.
+        "HINDSIGHT_API_RECALL_CHECKS_BREAKER_COOLDOWN": str(RECALL_CHECKS_BREAKER_COOLDOWN_SECONDS),
         # In production a retry earns its keep even on a 400: a model that
         # returned malformed JSON often gets it right the second time. Against a
         # deterministic stub it cannot — the same request gets the same answer —

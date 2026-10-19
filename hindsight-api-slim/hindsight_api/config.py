@@ -1091,6 +1091,11 @@ ENV_RECALL_RELEVANCE_CHECK = "HINDSIGHT_API_RECALL_RELEVANCE_CHECK"
 ENV_RECALL_CONDITIONAL_RECENCY = "HINDSIGHT_API_RECALL_CONDITIONAL_RECENCY"
 ENV_RECALL_INJECTION_GATE = "HINDSIGHT_API_RECALL_INJECTION_GATE"
 ENV_RECALL_JEV_RERANK = "HINDSIGHT_API_RECALL_JEV_RERANK"
+# How long a recall waits on the recall checks' decision model, and the breaker that stops asking it
+# while it does not answer. Server-level (see engine/search/recall_guard.py).
+ENV_RECALL_CHECKS_TIMEOUT = "HINDSIGHT_API_RECALL_CHECKS_TIMEOUT"
+ENV_RECALL_CHECKS_BREAKER_FAILURES = "HINDSIGHT_API_RECALL_CHECKS_BREAKER_FAILURES"
+ENV_RECALL_CHECKS_BREAKER_COOLDOWN = "HINDSIGHT_API_RECALL_CHECKS_BREAKER_COOLDOWN"
 
 # Recall budget mapping (budget enum -> thinking_budget integer)
 ENV_RECALL_BUDGET_FUNCTION = "HINDSIGHT_API_RECALL_BUDGET_FUNCTION"
@@ -2320,6 +2325,26 @@ DEFAULT_RECALL_INJECTION_GATE = False
 # Have the decision model reorder the reranker's top 100, told the question date and each
 # memory's date; its order is final for those 100 (see engine/search/jev_rerank.py).
 DEFAULT_RECALL_JEV_RERANK = False
+# Fast failure for the recall checks, server-level (see engine/search/recall_guard.py). A recall
+# waits on their requests, and the decision model's own timeout and retry budget are sized for
+# consolidation and reflect: with the endpoint unreachable, those retries made every recall take
+# about 16 s instead of 0.5 s.
+#
+# Seconds one recall-check request may take, its retry included. Measured on jev-1.14.0 over 1,825
+# recall-check requests (a rank of 100 memories, or one gate request of ten memories with up to ten
+# of those in flight at once): p95 0.50 s, p99 0.61 s, slowest 0.98 s. Two seconds is twice the
+# slowest, with room for the one retry of a request refused at once (a 429 when recalls overlap),
+# so a healthy endpoint does not reach it; an endpoint that does not answer costs a recall about
+# this once, since a recall stops asking after its first request that gets no answer.
+DEFAULT_RECALL_CHECKS_TIMEOUT = 2.0
+# Requests in a row that get no answer (connection error, timeout, 5xx, 429, a refused key, no
+# credit left) before the breaker opens and recalls stop asking. A gate sends up to ten requests at
+# once, so an endpoint that is down opens it within a recall or two, while one failed request
+# among answered ones never does.
+DEFAULT_RECALL_CHECKS_BREAKER_FAILURES = 5
+# Seconds the breaker stays open before one request probes the endpoint again. While it stays down,
+# that costs one recall at most the timeout per cool-down.
+DEFAULT_RECALL_CHECKS_BREAKER_COOLDOWN = 30.0
 
 # Recall budget mapping
 # "fixed": thinking_budget = recall_budget_fixed_<level> (preserves legacy behavior)
@@ -4392,6 +4417,10 @@ class HindsightConfig:
     recall_checks_decision_model_api_key: str | None = None
     recall_checks_decision_model_model: str | None = None
     recall_checks_decision_model_base_url: str | None = None
+    # How long a recall waits on the recall checks, and their breaker (static).
+    recall_checks_timeout: float = DEFAULT_RECALL_CHECKS_TIMEOUT
+    recall_checks_breaker_failures: int = DEFAULT_RECALL_CHECKS_BREAKER_FAILURES
+    recall_checks_breaker_cooldown: float = DEFAULT_RECALL_CHECKS_BREAKER_COOLDOWN
 
     # Class-level sets for configuration categorization
 
@@ -4743,6 +4772,13 @@ class HindsightConfig:
         """Validate configuration values and raise errors for invalid combinations."""
         for operation in DECISION_MODEL_OPERATIONS:
             self.decision_model_config(operation)  # raises on an unknown provider or a missing key
+        # A zero timeout would fail every recall check, and a zero cool-down probe on every recall.
+        for env_name, value in (
+            (ENV_RECALL_CHECKS_TIMEOUT, self.recall_checks_timeout),
+            (ENV_RECALL_CHECKS_BREAKER_COOLDOWN, self.recall_checks_breaker_cooldown),
+        ):
+            _require_number_in_range(env_name, value, minimum=0.0, exclusive_minimum=True)
+        _require_number_in_range(ENV_RECALL_CHECKS_BREAKER_FAILURES, self.recall_checks_breaker_failures, minimum=1)
         # Validate vector_extension
         validate_extension(self.vector_extension)
 
@@ -5881,6 +5917,19 @@ class HindsightConfig:
                 for operation in DECISION_MODEL_OPERATIONS
                 for setting in ("PROVIDER", "API_KEY", "MODEL", "BASE_URL")
             },
+            recall_checks_timeout=_parse_non_negative_float(
+                ENV_RECALL_CHECKS_TIMEOUT, os.getenv(ENV_RECALL_CHECKS_TIMEOUT), DEFAULT_RECALL_CHECKS_TIMEOUT
+            ),
+            recall_checks_breaker_failures=_parse_positive_int(
+                ENV_RECALL_CHECKS_BREAKER_FAILURES,
+                os.getenv(ENV_RECALL_CHECKS_BREAKER_FAILURES),
+                DEFAULT_RECALL_CHECKS_BREAKER_FAILURES,
+            ),
+            recall_checks_breaker_cooldown=_parse_non_negative_float(
+                ENV_RECALL_CHECKS_BREAKER_COOLDOWN,
+                os.getenv(ENV_RECALL_CHECKS_BREAKER_COOLDOWN),
+                DEFAULT_RECALL_CHECKS_BREAKER_COOLDOWN,
+            ),
             # Server
             host=os.getenv(ENV_HOST) or None,
             port=int(os.getenv(ENV_PORT, DEFAULT_PORT)),

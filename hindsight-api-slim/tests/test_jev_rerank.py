@@ -23,6 +23,7 @@ from hindsight_api.engine.remote_retry import RetryPolicy
 from hindsight_api.engine.search import recall_checks
 from hindsight_api.engine.search.jev_rerank import POOL_SIZE, jev_option, jev_rerank, memory_date, ranked_first
 from hindsight_api.engine.search.recall_checks import resolve_recall_checks
+from hindsight_api.engine.search.recall_guard import CircuitBreaker, GuardedRanker, RecallGuard
 from hindsight_api.engine.search.reranking import rerank_document
 from hindsight_api.engine.search.types import MergedCandidate, RetrievalResult, ScoredResult
 
@@ -249,11 +250,27 @@ class TestFallback:
         assert out.error == type(failure).__name__
 
     @pytest.mark.asyncio
-    async def test_a_timeout_keeps_the_local_order(self):
+    async def test_a_request_past_the_recall_timeout_keeps_the_local_order(self):
         results = _pool(12)
-        out = await jev_rerank(_Jev(delay=1.0, timeout=0.05), "q", results, ASKED_AT)
+        breaker = CircuitBreaker(failure_threshold=5, cooldown_seconds=30.0, name="test")
+        ranker = GuardedRanker(_Jev(delay=1.0), RecallGuard(breaker, timeout=0.05))
+        out = await jev_rerank(ranker, "q", results, ASKED_AT)
         assert [sr.id for sr in out.results] == [f"m{i}" for i in range(12)]
         assert out.error == "TimeoutError"
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_request_keeps_the_local_order_without_a_warning(self, caplog):
+        """The breaker is open: nothing is sent, and the breaker's own warning is the only one."""
+        results = _pool(12)
+        breaker = CircuitBreaker(failure_threshold=1, cooldown_seconds=30.0, name="test")
+        breaker.record_unavailable(breaker.admit())
+        jev = _Jev()
+        with caplog.at_level("WARNING"):
+            out = await jev_rerank(GuardedRanker(jev, RecallGuard(breaker, timeout=2.0)), "q", results, ASKED_AT)
+        assert jev.bodies == []
+        assert [sr.id for sr in out.results] == [f"m{i}" for i in range(12)]
+        assert (out.ranked_ids, out.error) == ([], "RecallCheckSkipped")
+        assert "Jev rerank" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_an_answer_out_of_shape_keeps_the_local_order(self):
@@ -325,9 +342,17 @@ class TestResolve:
         server_config({**TYPESAFE, "HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_BASE_URL": "http://jev.test/"})
         checks = resolve_recall_checks({"recall_jev_rerank": True})
 
-        assert checks is not None and isinstance(checks.jev_reranker, TypeSafeCrossEncoder)
-        assert (checks.jev_reranker.model, checks.jev_reranker.base_url) == ("jev-1.14.0", "http://jev.test")
-        assert checks.jev_reranker.retry_policy is not None
+        assert checks is not None and checks.jev_reranker is not None
+        client = checks.jev_reranker.client
+        assert isinstance(client, TypeSafeCrossEncoder)
+        assert (checks.jev_reranker.model, client.base_url) == ("jev-1.14.0", "http://jev.test")
+        # The recall timeout, not the decision model's, and one quick retry inside it.
+        assert client.timeout == 2.0
+        assert client.retry_policy == RetryPolicy(
+            max_retries=1, initial_backoff=0.2, max_backoff=0.2, budget_seconds=2.0
+        )
+        # The rerank and the other checks of a recall share its guard.
+        assert checks.jev_reranker.guard is checks.model.guard
         # The other checks stay off, so nothing is asked about the results afterwards.
         assert (checks.relevance, checks.conditional_recency, checks.injection_gate) == (False, False, False)
         assert checks.on_results is False

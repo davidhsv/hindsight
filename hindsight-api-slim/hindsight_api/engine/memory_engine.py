@@ -776,6 +776,7 @@ from .search.lifecycle_filter import (
     resolve_view,
 )
 from .search.recall_checks import apply_result_checks, asks_current_state, recency_decay_for, resolve_recall_checks
+from .search.recall_guard import GuardedRanker
 from .search.reranking import CrossEncoderReranker, apply_combined_scoring
 from .search.tag_resolution import MAX_VOCABULARY, TagResolutionError, needs_resolution, resolve_tag_groups
 from .search.tags import (
@@ -10229,7 +10230,7 @@ class MemoryEngine(MemoryEngineInterface):
         enable_temporal_retrieval: bool = True,
         enable_graph_retrieval: bool = True,
         recency_route: "asyncio.Task[bool | None] | None" = None,
-        jev_reranker: TypeSafeCrossEncoder | None = None,
+        jev_reranker: GuardedRanker | None = None,
         adaptive_settings: AdaptiveSettings | None = None,
         lifecycle_view: str | None = None,
         as_of: datetime | None = None,
