@@ -12,7 +12,10 @@ decision-model requests per recall:
   current or latest state of something, and applies the recency boost only then. The boost
   helps "what is X now?" and works against "when did X first ...?".
 - **injection gate** (``recall_injection_gate``): asks of each returned memory whether it is an
-  instruction planted for an AI agent, and withholds the ones that are.
+  instruction planted for an AI agent, and withholds the ones that are. A memory the decision
+  model leaves unanswered (a failed request, an out-of-credit key, a missing answer) is returned
+  unchecked with a warning: failing closed there turned an outage of the decision model into a
+  recall that returns nothing.
 - **Jev rerank** (``recall_jev_rerank``): asks for the order of the reranker's top 100, told the
   question date and each memory's date, and keeps that order (see ``jev_rerank.py``).
 
@@ -290,7 +293,7 @@ def _planted_questions(memory_id: str) -> dict[str, DecisionQuestion]:
 def _gate_groups(facts: Sequence[MemoryFact], memory_budget: int) -> list[list[MemoryFact]]:
     """``facts`` in request-sized groups: at most ``_GATE_GROUP`` each, and their text within
     ``memory_budget`` tokens. Nothing is truncated, since a cut could hide the instruction; a
-    memory over the budget goes out alone, and is withheld if that request fails."""
+    memory over the budget goes out alone."""
     groups: list[list[MemoryFact]] = []
     current: list[MemoryFact] = []
     used = 0
@@ -318,23 +321,28 @@ async def _planted_in_group(model: DecisionModel, query: str, group: Sequence[Me
     try:
         answers = (await model.ask(state, questions)).answers
     except Exception as e:
-        # Fail closed, as jevmem does: a memory the gate could not read is not shown.
-        logger.warning(f"Recall injection gate: a request for {len(group)} memories failed, withholding them: {e}")
-        return {fact.id for fact in group}
+        # Fail open: an outage of the decision model must not empty every recall.
+        logger.warning(
+            f"Recall injection gate: a request for {len(group)} memories failed, returning them unchecked: {e}"
+        )
+        return set()
 
     planted: set[str] = set()
+    unanswered = 0
     for memory_id, fact in zip(ids, group):
         inj, skip = answers.get(f"inj_{memory_id}"), answers.get(f"skip_{memory_id}")
         if inj is None or skip is None or inj.noul is None or skip.noul is None:
-            planted.add(fact.id)  # unanswered: fail closed, like a failed request
+            unanswered += 1
         elif max(inj.noul, skip.noul) >= _PLANTED_MIN:
             planted.add(fact.id)
+    if unanswered:
+        logger.warning(f"Recall injection gate: {unanswered} memories got no answer, returning them unchecked")
     return planted
 
 
 async def planted_memory_ids(model: DecisionModel, query: str, facts: Sequence[MemoryFact]) -> set[str]:
-    """Ids of the memories in ``facts`` the decision model reads as planted instructions, plus
-    every memory it could not read."""
+    """Ids of the memories in ``facts`` the decision model reads as planted instructions. A
+    memory it could not read is not among them: it is returned unchecked, with a warning."""
     unique = list({fact.id: fact for fact in facts}.values())
     if not unique:
         return set()

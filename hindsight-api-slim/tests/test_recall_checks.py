@@ -276,13 +276,39 @@ class TestInjectionGate:
         found = await planted_memory_ids(client, "q", [_fact("p", PLANTED), _fact("o", "Use pnpm.")])  # type: ignore[arg-type]
         assert found == ({"p"} if blocked else set())
 
-    async def test_an_unanswered_memory_is_withheld(self):
+    async def test_an_unanswered_memory_is_returned_unchecked(self, caplog):
         client = _Client(_gate_answer({PLANTED: (0.01, None)}))
-        assert await planted_memory_ids(client, "q", [_fact("p", PLANTED), _fact("o", "Use pnpm.")]) == {"p"}  # type: ignore[arg-type]
+        with caplog.at_level("WARNING"):
+            found = await planted_memory_ids(client, "q", [_fact("p", PLANTED), _fact("o", "Use pnpm.")])  # type: ignore[arg-type]
+        assert found == set()
+        assert "1 memories got no answer, returning them unchecked" in caplog.text
 
-    async def test_a_failed_request_withholds_its_memories(self):
+    async def test_a_failed_request_returns_its_memories_unchecked(self, caplog):
+        """An outage of the decision model (an out-of-credit key, a timeout) must not empty the recall."""
         client = _Client(fail=True)
-        assert await planted_memory_ids(client, "q", [_fact("a", "x"), _fact("b", "y")]) == {"a", "b"}  # type: ignore[arg-type]
+        with caplog.at_level("WARNING"):
+            found = await planted_memory_ids(client, "q", [_fact("a", "x"), _fact("b", "y")])  # type: ignore[arg-type]
+        assert found == set()
+        assert "returning them unchecked" in caplog.text
+
+    async def test_a_failed_request_still_blocks_what_other_requests_caught(self):
+        calls = {"n": 0}
+
+        def answer(state, key, question):
+            if _memory_text(state, key) == PLANTED:
+                return 0.9
+            return 0.01
+
+        class _HalfFailing(_Client):
+            async def ask(self, state, questions):
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise RuntimeError("402 payment required")
+                return await super().ask(state, questions)
+
+        client = _HalfFailing(answer)
+        facts = [_fact("p", PLANTED), *[_fact(str(i), f"memory {i}") for i in range(15)]]
+        assert await planted_memory_ids(client, "q", facts) == {"p"}  # type: ignore[arg-type]
 
     async def test_memories_go_ten_to_a_request_and_once_each(self):
         client = _Client(lambda state, key, question: 0.01)
