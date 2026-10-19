@@ -2,8 +2,8 @@
 
 "Session tokens expire after 15 minutes" retained from production and "... after 12
 hours" from the sandbox are both true at once. Where each one holds is recorded at
-retain time, in the item's metadata (`environment`, `service`, `module`). If
-consolidation never sees it, the second fact reads as the first one changing: the
+retain time, in the item's metadata (`environment`, `service`, `module`, `repository`).
+If consolidation never sees it, the second fact reads as the first one changing: the
 model rewrites the production observation with the sandbox value, and the bank answers
 "12 hours" for production. That is the opposite failure to test_23_contradiction,
 where retiring the old observation is the job.

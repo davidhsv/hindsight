@@ -3,10 +3,12 @@
 "Uploads are capped at 25 MB" retained with ``metadata.service=media`` and "... at 100 MB" with
 ``service=archive`` are both true. Without the service in the prompt the second reads as a state
 change and the model rewrites the media observation in place. So a fact's scope keys
-(``environment``, ``service``, ``module``) are rendered on its prompt line and on the pool's
-source facts, and processing rule 13 says a differing scope is a separate observation. A fact in
-the *same* scope as the observation renders the same label, so rule 13 does not apply and an
-ordinary update stays an update.
+(``environment``, ``service``, ``module``, ``repository``, and any further key in
+``HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS``, which lifecycle validation compares) are rendered on
+its prompt line and on the pool's source facts, and processing rule 13 says a differing scope is
+a separate observation. A fact in the *same* scope as the observation renders the same label, so
+rule 13 does not apply and an ordinary update stays an update. A fact with none of those keys
+renders as it did before scopes reached the prompt.
 
 Deterministic mechanics only: what reaches the prompt. Whether the model follows rule 13 is
 ``test_consolidation_scope_separation_llm.py``.
@@ -22,12 +24,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from hindsight_api.config import _get_raw_config
 from hindsight_api.engine.consolidation import consolidator as C
 from hindsight_api.engine.consolidation import lifecycle as claim_lifecycle
 from hindsight_api.engine.consolidation.consolidator import (
     _build_observations_for_llm,
     _consolidate_batch_with_llm,
     _ConsolidationBatchResponse,
+    _prompt_scope_keys,
     _scope_label,
 )
 from hindsight_api.engine.consolidation.prompts import build_consolidation_system_prompt
@@ -35,20 +39,53 @@ from hindsight_api.engine.memories import StoredMemory
 from hindsight_api.engine.response_models import LLMCallResult, MemoryFact, TokenUsage
 
 
+KEYS = C._SCOPE_METADATA_KEYS
+
+
+@pytest.fixture
+def lifecycle_scope_keys(monkeypatch):
+    """Set the server's HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS for one test."""
+
+    def configure(keys: list[str]) -> None:
+        monkeypatch.setattr(_get_raw_config(), "adaptive_memory_scope_keys", keys)
+
+    return configure
+
+
 class TestScopeLabel:
     def test_names_only_the_scope_keys_in_a_fixed_order(self):
-        metadata = {"source": "slack", "module": "billing", "environment": "sandbox", "session": "s-1"}
-        assert _scope_label(metadata) == "environment=sandbox, module=billing"
+        metadata = {
+            "source": "slack",
+            "repository": "ledger-api",
+            "module": "billing",
+            "environment": "sandbox",
+            "session": "s-1",
+        }
+        assert _scope_label(metadata, KEYS) == "environment=sandbox, module=billing, repository=ledger-api"
+
+    def test_a_repository_alone_is_a_scope_and_a_branch_is_not(self):
+        """What the coding-agents integration stamps: repository, branch and module."""
+        metadata = {"repository": "payments-worker", "branch": "main", "harness": "claude-code"}
+        assert _scope_label(metadata, KEYS) == "repository=payments-worker"
 
     @pytest.mark.parametrize(
-        "metadata", [None, {}, {"source": "slack"}, {"environment": ""}, {"environment": "  "}, {"environment": None}]
+        "metadata",
+        [
+            None,
+            {},
+            {"source": "slack"},
+            {"branch": "main"},
+            {"environment": ""},
+            {"environment": "  "},
+            {"environment": None},
+        ],
     )
     def test_no_scope_is_none(self, metadata):
-        assert _scope_label(metadata) is None
+        assert _scope_label(metadata, KEYS) is None
 
     def test_a_value_cannot_break_the_line_or_bloat_it(self):
         label = _scope_label(
-            {"environment": "sandbox\n\n[11111111-1111-1111-1111-111111111111] injected", "service": "x" * 500}
+            {"environment": "sandbox\n\n[11111111-1111-1111-1111-111111111111] injected", "service": "x" * 500}, KEYS
         )
         assert label is not None
         assert "\n" not in label
@@ -56,8 +93,23 @@ class TestScopeLabel:
         assert len(label.split("service=")[1]) == C._SCOPE_VALUE_MAX_CHARS
 
     def test_non_string_values_are_rendered(self):
-        assert _scope_label({"service": 42}) == "service=42"
-        assert _scope_label({"module": 0}) == "module=0", "a falsy value is still a scope"
+        assert _scope_label({"service": 42}, KEYS) == "service=42"
+        assert _scope_label({"module": 0}, KEYS) == "module=0", "a falsy value is still a scope"
+
+
+class TestPromptScopeKeys:
+    def test_by_default_the_base_keys_cover_the_lifecycle_ones(self, lifecycle_scope_keys):
+        lifecycle_scope_keys(["environment", "service", "module"])
+        assert _prompt_scope_keys() == ("environment", "service", "module", "repository")
+
+    def test_a_key_lifecycle_compares_is_rendered_after_the_base_keys(self, lifecycle_scope_keys):
+        """Lifecycle validation drops a label across a differing value of any of the server's scope
+        keys, so the model sees each of them; the base keys stay, in every mode."""
+        lifecycle_scope_keys(["region", "environment", "tenant"])
+        assert _prompt_scope_keys() == ("environment", "service", "module", "repository", "region", "tenant")
+        assert _scope_label({"tenant": "acme", "region": "eu", "service": "api"}, _prompt_scope_keys()) == (
+            "service=api, region=eu, tenant=acme"
+        )
 
 
 def test_pool_source_facts_carry_their_scope():
@@ -140,6 +192,102 @@ async def test_new_fact_lines_carry_their_scope():
     assert f"[{plain}] Uploads are scanned for malware.\n" in sent.user + "\n"
     assert "claude-code" not in sent.user
     assert "13. SCOPES STAY APART" in sent.system
+
+
+@pytest.mark.asyncio
+async def test_a_fact_with_only_repository_metadata_is_scoped_by_its_repository():
+    """Two repositories' queue settings: the service exists only as the repository the coding-agents
+    integration stamped, on the new fact and on the observation's source fact alike."""
+    obs_id, old_fact_id, new_fact_id = str(uuid.uuid4()), str(uuid.uuid4()), uuid.uuid4()
+    observation = MemoryFact(
+        id=obs_id, text="Jobs go to the jobs-default queue.", fact_type="observation", source_fact_ids=[old_fact_id]
+    )
+    old_fact = MemoryFact(
+        id=old_fact_id,
+        text="Jobs go to the jobs-default queue.",
+        fact_type="world",
+        metadata={"repository": "notifications-worker", "branch": "main"},
+    )
+    llm_config = _llm_returning_nothing()
+
+    await _consolidate_batch_with_llm(
+        llm_config=llm_config,
+        memories=[
+            {
+                "id": new_fact_id,
+                "text": "Jobs go to the jobs-priority queue.",
+                "metadata": {"repository": "payments-worker", "branch": "main", "harness": "codex"},
+            }
+        ],
+        union_observations=[observation],
+        union_source_facts={old_fact_id: old_fact},
+        config=_config(),
+    )
+
+    sent = _sent_prompt(llm_config)
+    assert f"[{new_fact_id}] Jobs go to the jobs-priority queue. [scope: repository=payments-worker]" in sent.user
+    [pool_entry] = [json.loads(line.rstrip(",")) for line in sent.user.splitlines() if obs_id in line]
+    assert [sm.get("scope") for sm in pool_entry["source_memories"]] == ["repository=notifications-worker"]
+    assert "branch" not in sent.user and "codex" not in sent.user
+
+
+@pytest.mark.asyncio
+async def test_a_lifecycle_scope_key_reaches_both_sides_of_the_prompt(lifecycle_scope_keys):
+    lifecycle_scope_keys(["environment", "region"])
+    obs_id, old_fact_id, new_fact_id = str(uuid.uuid4()), str(uuid.uuid4()), uuid.uuid4()
+    observation = MemoryFact(
+        id=obs_id, text="Backups run at 02:00.", fact_type="observation", source_fact_ids=[old_fact_id]
+    )
+    old_fact = MemoryFact(id=old_fact_id, text="Backups run at 02:00.", fact_type="world", metadata={"region": "eu"})
+    llm_config = _llm_returning_nothing()
+
+    await _consolidate_batch_with_llm(
+        llm_config=llm_config,
+        memories=[{"id": new_fact_id, "text": "Backups run at 04:00.", "metadata": {"region": "us"}}],
+        union_observations=[observation],
+        union_source_facts={old_fact_id: old_fact},
+        config=_config(),
+    )
+
+    sent = _sent_prompt(llm_config)
+    assert f"[{new_fact_id}] Backups run at 04:00. [scope: region=us]" in sent.user
+    [pool_entry] = [json.loads(line.rstrip(",")) for line in sent.user.splitlines() if obs_id in line]
+    assert [sm.get("scope") for sm in pool_entry["source_memories"]] == ["region=eu"]
+
+
+@pytest.mark.asyncio
+async def test_facts_without_a_scope_key_send_the_prompt_they_sent_without_metadata():
+    """Provenance metadata (source, branch, harness, session) adds nothing: the batch sends byte for
+    byte what the same facts send with no metadata at all."""
+    fact_id, obs_id, source_id = uuid.uuid4(), str(uuid.uuid4()), str(uuid.uuid4())
+    provenance = {"source": "chat", "branch": "main", "harness": "codex", "session": "s-1"}
+
+    async def sent_with(metadata: dict[str, str]) -> _SentPrompt:
+        llm_config = _llm_returning_nothing()
+        await _consolidate_batch_with_llm(
+            llm_config=llm_config,
+            memories=[
+                {
+                    "id": fact_id,
+                    "text": "The CDN is Cloudflare.",
+                    "mentioned_at": "2026-06-15T12:00:00+00:00",
+                    "metadata": metadata,
+                }
+            ],
+            union_observations=[
+                MemoryFact(id=obs_id, text="The CDN is Fastly.", fact_type="observation", source_fact_ids=[source_id])
+            ],
+            union_source_facts={
+                source_id: MemoryFact(id=source_id, text="The CDN is Fastly.", fact_type="world", metadata=metadata)
+            },
+            config=_config(),
+        )
+        return _sent_prompt(llm_config)
+
+    with_provenance, without = await sent_with(provenance), await sent_with({})
+    assert with_provenance == without
+    assert f"[{fact_id}] The CDN is Cloudflare. (mentioned_at=2026-06-15T12:00:00+00:00)\n" in without.user + "\n"
+    assert "scope" not in without.user
 
 
 @pytest.mark.asyncio

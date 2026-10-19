@@ -1,5 +1,8 @@
 """A real model keeps one setting's values in two services as two observations.
 
+The service is named either as ``service`` metadata or only as the ``repository`` the coding-agents
+integration stamps; both reach the prompt as the fact's ``scope``.
+
 The deterministic half (the scope reaching the prompt) is ``test_consolidation_scope_separation.py``.
 Whether the model then treats a differing ``scope`` as a separate observation rather than a state
 change is prompt-following behaviour MockLLM cannot simulate, so this runs the real batch call
@@ -9,6 +12,7 @@ and judges the actions it returns.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -22,8 +26,22 @@ from tests.llm_judge import assert_meets_criteria
 pytestmark = pytest.mark.hs_llm_core
 
 
+@dataclass(frozen=True)
+class _Scope:
+    """The metadata key that names where each cap holds, and its two values."""
+
+    key: str
+    first: str
+    second: str
+
+
 @pytest.mark.asyncio
-async def test_real_model_keeps_another_services_value_apart_from_the_observation():
+@pytest.mark.parametrize(
+    "scope",
+    [_Scope("service", "media", "archive"), _Scope("repository", "media-uploads", "archive-uploads")],
+    ids=lambda scope: scope.key,
+)
+async def test_real_model_keeps_another_services_value_apart_from_the_observation(scope: _Scope):
     media_obs_id, media_fact_id, archive_fact_id = str(uuid.uuid4()), str(uuid.uuid4()), uuid.uuid4()
     stated = datetime(2026, 6, 1, 12, tzinfo=timezone.utc)
     later = stated + timedelta(days=14)
@@ -40,7 +58,7 @@ async def test_real_model_keeps_another_services_value_apart_from_the_observatio
         text="Uploads are capped at 25 MB.",
         fact_type="world",
         mentioned_at=stated.isoformat(),
-        metadata={"service": "media"},
+        metadata={scope.key: scope.first},
     )
     memories = [
         {
@@ -50,7 +68,7 @@ async def test_real_model_keeps_another_services_value_apart_from_the_observatio
             "occurred_start": None,
             "occurred_end": None,
             "mentioned_at": later,
-            "metadata": {"service": "archive"},
+            "metadata": {scope.key: scope.second},
         }
     ]
 
@@ -71,15 +89,15 @@ async def test_real_model_keeps_another_services_value_apart_from_the_observatio
     await assert_meets_criteria(
         response=actions_summary or "(no actions)",
         criteria=(
-            f"The media-service observation {media_obs_id} still says uploads are capped at 25 MB: no DELETE "
+            f"The {scope.first} observation {media_obs_id} still says uploads are capped at 25 MB: no DELETE "
             "removes it and no UPDATE of it says the cap is 100 MB, was raised, or changed. The 100 MB cap is "
-            "recorded for the archive service by a CREATE (an UPDATE of the media observation that keeps 25 MB "
-            "for media and adds 100 MB for archive also meets this)."
+            f"recorded for {scope.second} by a CREATE (an UPDATE of the {scope.first} observation that keeps "
+            f"25 MB for {scope.first} and adds 100 MB for {scope.second} also meets this)."
         ),
         context=(
             f"A consolidation model was given one existing observation, 'Uploads are capped at 25 MB.' "
-            f"(id {media_obs_id}), whose source fact holds in the media service, and one new fact, 'Uploads "
-            "are capped at 100 MB.', which holds in the archive service. Both caps are true at once, each in "
-            "its own service."
+            f"(id {media_obs_id}), whose source fact holds in the {scope.key} {scope.first}, and one new fact, "
+            f"'Uploads are capped at 100 MB.', which holds in the {scope.key} {scope.second}. Both caps are true "
+            f"at once, each in its own {scope.key}."
         ),
     )

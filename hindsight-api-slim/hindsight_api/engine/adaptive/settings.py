@@ -99,6 +99,13 @@ def _keys(value: Any, defaults: tuple[str, ...]) -> tuple[str, ...]:
     return keys or defaults
 
 
+def lifecycle_scope_keys(static: HindsightConfig | StaticConfigProxy) -> tuple[str, ...]:
+    """The server's ``HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS``: the metadata keys a claim's scope
+    fingerprint reads in lifecycle consolidation. Consolidation's prompt renders them too, so both
+    read them through this one function."""
+    return _keys(getattr(static, "adaptive_memory_scope_keys", None), DEFAULT_ADAPTIVE_MEMORY_SCOPE_KEYS)
+
+
 def _weights(value: Any, defaults: Mapping[str, float]) -> Mapping[str, float]:
     """A JSON-map setting merged over its defaults, read-only.
 
@@ -249,5 +256,5 @@ class AdaptiveSettings:
             prune_after_days=_non_negative(
                 static.adaptive_memory_prune_after_days, DEFAULT_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS
             ),
-            scope_keys=_keys(getattr(static, "adaptive_memory_scope_keys", None), DEFAULT_ADAPTIVE_MEMORY_SCOPE_KEYS),
+            scope_keys=lifecycle_scope_keys(static),
         )

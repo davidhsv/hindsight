@@ -50,6 +50,7 @@ from ..adaptive.producers import (
     reinforcement_allowed,
     write_settings,
 )
+from ..adaptive.settings import lifecycle_scope_keys
 from ..db import DatabaseBackend
 from ..db_utils import acquire_with_retry
 from ..fact_budget import select_facts_within_budget
@@ -4741,24 +4742,41 @@ async def _shape_lifecycle_pools(
 #: Retain-metadata keys that say *where* a fact holds rather than what it says. The same
 #: setting in two environments (reminders at 06:00 on staging, at 09:00 on dev) is two true
 #: facts; with no environment in the prompt the second reads as a state change and the model
-#: rewrites the first in place. Shown as each fact's ``scope``, which the SCOPES STAY APART
-#: processing rule keeps apart. Only these keys reach the prompt: the rest of a fact's metadata
-#: is mostly provenance (source, session, harness) that would spend tokens on every fact line
-#: and invite splits on what is not a scope.
-_SCOPE_METADATA_KEYS = ("environment", "service", "module")
+#: rewrites the first in place. ``repository`` is the same for code: the coding-agents
+#: integration stamps it on everything it retains, and a service is often named only that
+#: way, so without it two services' values of one setting read as one setting changing.
+#: Shown as each fact's ``scope``, which the SCOPES STAY APART processing rule keeps apart.
+#: Only scope keys reach the prompt (these, and the server's lifecycle scope keys, see
+#: :func:`_prompt_scope_keys`): the rest of a fact's metadata is mostly provenance (source,
+#: session, harness, branch) that would spend tokens on every fact line and invite splits on
+#: what is not a scope.
+_SCOPE_METADATA_KEYS = ("environment", "service", "module", "repository")
 #: A scope value is an identifier; cap it so a pasted blob in metadata cannot bloat every line.
 _SCOPE_VALUE_MAX_CHARS = 120
 
 
-def _scope_label(metadata: dict[str, Any] | None) -> str | None:
-    """``key=value, ...`` over the fact's non-empty scope keys, or None when it names no scope.
+def _prompt_scope_keys() -> tuple[str, ...]:
+    """The keys the prompt renders as a fact's scope: :data:`_SCOPE_METADATA_KEYS`, then any
+    further key in ``HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS``.
+
+    Lifecycle validation drops a label whose claim and target differ on one of the server's scope
+    keys, so the model is shown every key it compares; a key it cannot see would get its labels
+    dropped for a difference it was never told about. Every mode renders them all: the setting is
+    server-level, and a scope the model can see keeps two values apart without lifecycle too.
+    """
+    return tuple(dict.fromkeys((*_SCOPE_METADATA_KEYS, *lifecycle_scope_keys(get_config()))))
+
+
+def _scope_label(metadata: dict[str, Any] | None, scope_keys: Sequence[str]) -> str | None:
+    """``key=value, ...`` over the fact's non-empty ``scope_keys``, in that order, or None when it
+    names no scope.
 
     Whitespace is collapsed so a value cannot break the one-fact-per-line input format.
     """
     if not metadata:
         return None
     parts: list[str] = []
-    for key in _SCOPE_METADATA_KEYS:
+    for key in scope_keys:
         value = metadata.get(key)
         words = str(value).split() if value is not None else []
         if words:
@@ -4770,13 +4788,20 @@ def _build_observations_for_llm(
     observations: "list[MemoryFact]",
     source_facts: "dict[str, MemoryFact]",
     lifecycle_pool: Mapping[str, claim_lifecycle.PoolEntry] | None = None,
+    *,
+    scope_keys: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Serialize MemoryFact observations into dicts for the consolidation LLM prompt.
+
+    ``scope_keys`` are the metadata keys a source fact's ``scope`` shows; None reads them with
+    :func:`_prompt_scope_keys`.
 
     ``lifecycle_pool`` (lifecycle mode) adds each entry's ``status``, ``successor`` and
     ``retirable``, the ids of a retirable entry's source facts (what ``retires_source_ids`` /
     ``keeps_source_ids`` name), and shows a retired entry without its sources.
     """
+    if scope_keys is None:
+        scope_keys = _prompt_scope_keys()
     obs_list = []
     for obs in observations:
         # Rows written before #4799 may repeat an id thousands of times; show each source once.
@@ -4808,7 +4833,7 @@ def _build_observations_for_llm(
             )
             if sf.context:
                 sf_data["context"] = truncate_context_for_prompt(sf.context)
-            if scope := _scope_label(sf.metadata):
+            if scope := _scope_label(sf.metadata, scope_keys):
                 sf_data["scope"] = scope
             if sf.occurred_start:
                 sf_data["occurred_start"] = sf.occurred_start
@@ -4958,8 +4983,11 @@ async def _consolidate_batch_with_llm(
     """
     if config is None:
         raise ValueError("config is required for _consolidate_batch_with_llm")
+    scope_keys = _prompt_scope_keys()
     if union_observations:
-        obs_list = _build_observations_for_llm(union_observations, union_source_facts, lifecycle_pool)
+        obs_list = _build_observations_for_llm(
+            union_observations, union_source_facts, lifecycle_pool, scope_keys=scope_keys
+        )
         # One observation per line, no indentation: the pool is nearly all of a batch's
         # uncached input, and `indent=2` spent a fifth of it on whitespace.
         observations_text = "[\n" + ",\n".join(json.dumps(o, ensure_ascii=False) for o in obs_list) + "\n]"
@@ -4977,7 +5005,7 @@ async def _consolidate_batch_with_llm(
             temporal_parts.append(f"mentioned_at={m['mentioned_at']}")
         if temporal_parts:
             text += f" ({', '.join(temporal_parts)})"
-        if scope := _scope_label(m.get("metadata")):
+        if scope := _scope_label(m.get("metadata"), scope_keys):
             text += f" [scope: {scope}]"
         return text
 
