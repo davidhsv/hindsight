@@ -695,6 +695,7 @@
       "webhookDelivery": "Webhook Delivery",
       "graphMaintenance": "Graph Maintenance",
       "vectorIndexMaintenance": "Vector index maintenance",
+      "adaptiveMemoryMaintenance": "Adaptive memory maintenance",
       "exportDocuments": "Export Documents",
       "importDocuments": "Import Documents",
       "exportBank": "Export Bank",
@@ -2021,7 +2022,9 @@
         "retain": "Failed to batch retain",
         "retainAsync": "Failed to batch retain async",
         "history": "Failed to fetch observation history",
-        "update": "Failed to update memory"
+        "update": "Failed to update memory",
+        "confirm": "Failed to confirm memory",
+        "lifecycle": "Failed to update memory lifecycle"
       },
       "documents": {
         "fetchList": "Failed to fetch documents",
@@ -2259,5 +2262,32 @@
     "pausedTitle": "The last refresh failed, so this model does not refresh itself any more — refresh it to resume",
     "retrying": "Retrying",
     "retryingTitle": "The last attempt failed and another is queued — automatic refreshes stop only if this one fails too"
+  },
+  "memoryLifecycle": {
+    "sectionTitle": "Adaptive memory",
+    "truthStatus": "Truth status",
+    "status": {
+      "active": "Active",
+      "uncertain": "Uncertain",
+      "superseded": "Superseded",
+      "refuted": "Refuted"
+    },
+    "until": "until {date}",
+    "supersededByTitle": "Replaced by {id}",
+    "validity": "Valid",
+    "unknownStart": "before anything recorded",
+    "openEnd": "now",
+    "supersededBy": "Superseded by",
+    "retiredVia": "Retired via",
+    "reason": "Reason",
+    "retrievability": "Retrievability",
+    "stability": "Stability",
+    "stabilityValue": "{days} days",
+    "reinforcements": "Reinforcements",
+    "importance": "Importance",
+    "exempt": "Exempt from forgetting",
+    "yes": "Yes",
+    "archived": "Archived",
+    "observeShadow": "Observe mode would mark it"
   }
 }

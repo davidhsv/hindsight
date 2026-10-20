@@ -122,6 +122,75 @@ describe("full bank config surface mapping", () => {
     });
   });
 
+  test("maps the adaptive memory group onto the updates map", async () => {
+    await client.updateBankConfig("bank", {
+      adaptiveMemoryMode: "rank",
+      adaptiveMemoryScoreAlpha: 0.4,
+      adaptiveMemoryScoreFloor: 0.2,
+      adaptiveMemoryReinforcementEnabled: false,
+      adaptiveMemoryBaseStabilityDays: 45,
+      adaptiveMemoryMaxStabilityDays: 900,
+      adaptiveMemoryDefaultView: "current",
+      adaptiveMemoryHistoricalCues: false,
+    });
+
+    const body = mockedUpdateConfig.mock.calls[0][0].body as any;
+    expect(body.updates).toEqual({
+      adaptive_memory_mode: "rank",
+      adaptive_memory_score_alpha: 0.4,
+      adaptive_memory_score_floor: 0.2,
+      adaptive_memory_reinforcement_enabled: false,
+      adaptive_memory_base_stability_days: 45,
+      adaptive_memory_max_stability_days: 900,
+      adaptive_memory_default_view: "current",
+      adaptive_memory_historical_cues: false,
+    });
+  });
+
+  test("maps the context admission group onto the updates map", async () => {
+    await client.updateBankConfig("bank", {
+      contextAdmissionMode: "strict",
+      contextAdmissionThresholdAuto: 0.7,
+      contextAdmissionThresholdExplicit: 0.3,
+      contextAdmissionReferenceBonus: 0.1,
+      contextAdmissionCandidates: 20,
+      contextAdmissionMaxMemories: 5,
+      contextAdmissionMaxTokens: 1500,
+      contextAdmissionMmrLambda: 0.6,
+      contextAdmissionDupSimilarity: 0.9,
+    });
+
+    const body = mockedUpdateConfig.mock.calls[0][0].body as any;
+    expect(body.updates).toEqual({
+      context_admission_mode: "strict",
+      context_admission_threshold_auto: 0.7,
+      context_admission_threshold_explicit: 0.3,
+      context_admission_reference_bonus: 0.1,
+      context_admission_candidates: 20,
+      context_admission_max_memories: 5,
+      context_admission_max_tokens: 1500,
+      context_admission_mmr_lambda: 0.6,
+      context_admission_dup_similarity: 0.9,
+    });
+  });
+
+  test("maps the recall checks onto the updates map", async () => {
+    await client.updateBankConfig("bank", {
+      recallRelevanceCheck: true,
+      recallConditionalRecency: false,
+      recallInjectionGate: true,
+      recallJevRerank: true,
+    });
+
+    const body = mockedUpdateConfig.mock.calls[0][0].body as any;
+    expect(body.updates).toEqual({
+      recall_relevance_check: true,
+      recall_conditional_recency: false,
+      recall_injection_gate: true,
+      recall_jev_rerank: true,
+    });
+  });
+
   test("sends only the fields that were set", async () => {
     await client.updateBankConfig("bank", { recallMaxTokens: 100 });
 

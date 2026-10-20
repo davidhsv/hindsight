@@ -335,6 +335,10 @@ impl App {
                         tag_groups: None,
                         min_scores: None,
                         temporal_window: None,
+                        lifecycle_view: None,
+                        as_of: None,
+                        purpose: None,
+                        context: None,
                     };
 
                     let result = client

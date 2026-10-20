@@ -13,7 +13,7 @@ import logging
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
 
 from ...cancellation import OperationCancelledError
 from ...config import DEFAULT_RECALL_CHUNKS_MAX_TOKENS, DEFAULT_RECALL_MAX_TOKENS, get_config
@@ -540,6 +540,18 @@ def _spawn_cache_cleanup(
     task.add_done_callback(_cache_cleanup_tasks.discard)
 
 
+class RecallToolFn(Protocol):
+    """The ``recall`` tool callback: (query, max_tokens, max_chunk_tokens) -> tool result.
+
+    ``include_history`` is passed (as True) only when the agent asked for it, which it can only do
+    in a lifecycle-mode bank, where the tool schema offers the flag (adaptive memory).
+    """
+
+    def __call__(
+        self, query: str, max_tokens: int, max_chunk_tokens: int, /, *, include_history: bool = False
+    ) -> Awaitable[dict[str, Any]]: ...
+
+
 async def run_reflect_agent(
     llm_config: "AnyLLMProvider",
     bank_id: str,
@@ -548,7 +560,7 @@ async def run_reflect_agent(
     search_mental_models_fn: Callable[[str, int], Awaitable[dict[str, Any]]],
     read_mental_models_fn: Callable[[list[str], int], Awaitable[dict[str, Any]]],
     search_observations_fn: Callable[[str, int], Awaitable[dict[str, Any]]],
-    recall_fn: Callable[[str, int, int], Awaitable[dict[str, Any]]],
+    recall_fn: "RecallToolFn",
     expand_fn: Callable[[list[str], str], Awaitable[dict[str, Any]]],
     reflect_id: str | None = None,
     **kwargs: Any,
@@ -619,7 +631,7 @@ async def _run_reflect_agent_inner(
     search_mental_models_fn: Callable[[str, int], Awaitable[dict[str, Any]]],
     read_mental_models_fn: Callable[[list[str], int], Awaitable[dict[str, Any]]],
     search_observations_fn: Callable[[str, int], Awaitable[dict[str, Any]]],
-    recall_fn: Callable[[str, int, int], Awaitable[dict[str, Any]]],
+    recall_fn: "RecallToolFn",
     expand_fn: Callable[[list[str], str], Awaitable[dict[str, Any]]],
     context: str | None = None,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
@@ -638,6 +650,7 @@ async def _run_reflect_agent_inner(
     tool_token_limits: ReflectToolTokenLimits | None = None,
     evidence_is_sufficient_fn: Callable[[str, str], Awaitable[bool]] | None = None,
     prune_evidence_fn: Callable[[str, list[str]], Awaitable[list[bool]]] | None = None,
+    lifecycle: bool = False,
     *,
     reflect_id: str,
     provider_impl: Any,
@@ -681,6 +694,9 @@ async def _run_reflect_agent_inner(
         prune_evidence_fn: (question, candidate texts) -> keep flag per candidate. In a
             decision-orchestrated reflect each round's observations, facts and chunks are
             pruned with it before the model (or the sufficiency check) reads them.
+        lifecycle: The bank's adaptive memory mode is ``lifecycle``: the recall tool offers
+            ``include_history`` and the system prompt says how to read claim annotations.
+            False leaves tools and prompt byte-identical.
 
     Returns:
         ReflectAgentResult with final answer and metadata
@@ -721,6 +737,7 @@ async def _run_reflect_agent_inner(
         include_expand=include_expand,
         answer_as_document=answer_as_document,
         llm_output_language=llm_output_language,
+        lifecycle=lifecycle,
     )
     # Build set of enabled tool names to guard against LLM hallucinating disabled tool calls
     enabled_tools: frozenset[str] = frozenset(t["function"]["name"] for t in tools if t.get("type") == "function")
@@ -735,6 +752,7 @@ async def _run_reflect_agent_inner(
         budget=budget,
         answer_as_document=answer_as_document,
         llm_output_language=llm_output_language,
+        lifecycle=lifecycle,
     )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -2583,6 +2601,7 @@ async def _process_done_tool(
         used_mental_model_ids=used_mental_model_ids,
         used_observation_ids=used_observation_ids,
         directives_applied=directives_applied,
+        answer_found=_answer_found(args),
     )
 
 
@@ -2591,7 +2610,7 @@ async def _execute_tool_with_timing(
     search_mental_models_fn: Callable[[str, int], Awaitable[dict[str, Any]]],
     read_mental_models_fn: Callable[[list[str], int], Awaitable[dict[str, Any]]],
     search_observations_fn: Callable[[str, int], Awaitable[dict[str, Any]]],
-    recall_fn: Callable[[str, int, int], Awaitable[dict[str, Any]]],
+    recall_fn: "RecallToolFn",
     expand_fn: Callable[[list[str], str], Awaitable[dict[str, Any]]],
     token_limits: "ReflectToolTokenLimits",
     ceiling: int,
@@ -2671,7 +2690,7 @@ async def _execute_tool(
     search_mental_models_fn: Callable[[str, int], Awaitable[dict[str, Any]]],
     read_mental_models_fn: Callable[[list[str], int], Awaitable[dict[str, Any]]],
     search_observations_fn: Callable[[str, int], Awaitable[dict[str, Any]]],
-    recall_fn: Callable[[str, int, int], Awaitable[dict[str, Any]]],
+    recall_fn: "RecallToolFn",
     expand_fn: Callable[[list[str], str], Awaitable[dict[str, Any]]],
     token_limits: "ReflectToolTokenLimits",
     ceiling: int,
@@ -2757,6 +2776,10 @@ async def _execute_tool(
         )
         if error:
             return {"error": error}
+        # Only offered in a lifecycle-mode bank's tool schema; an absent or false flag keeps the
+        # three-argument call every other bank has always made.
+        if _tool_flag(args, "include_history"):
+            return await recall_fn(query, max_tokens, max_chunk_tokens, include_history=True)
         return await recall_fn(query, max_tokens, max_chunk_tokens)
 
     elif tool_name == "expand":
@@ -2771,6 +2794,14 @@ async def _execute_tool(
 
 
 _NULLISH_TOOL_INT_STRINGS = {"", "none", "null"}
+
+
+def _tool_flag(args: dict[str, Any], name: str) -> bool:
+    """A boolean tool argument: True for ``true`` (or the string "true"); anything else is False."""
+    value = args.get(name)
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return value is True
 
 
 def _parse_tool_int_arg(

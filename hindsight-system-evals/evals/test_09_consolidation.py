@@ -57,6 +57,7 @@ from hindsight_system_evals.consolidation import (
     Wave,
     noisy_personal_bank,
     noisy_service_bank,
+    noisy_service_bank_with_mission,
     run_scenario,
 )
 from hindsight_system_evals.pages import SettleFn
@@ -559,22 +560,5 @@ async def test_consolidation_noisy_personal_bank(client: Hindsight, bank_id: str
 
 @pytest.mark.full
 async def test_consolidation_noisy_bank_with_mission(client: Hindsight, bank_id: str, settled: SettleFn) -> None:
-    """The service bank again under a bank's own mission, the common setup (#525, #4619 set one):
-    the mission's wording must not change what lands, and chatter it does not ask for stays out."""
-    scenario = noisy_service_bank()
-    await _run(
-        client,
-        bank_id,
-        settled,
-        dataclasses.replace(
-            scenario,
-            id="noisy-service-catalogue-mission",
-            mission=(
-                "Keep a catalogue of the platform's services: which team owns each one, what language it is "
-                "written in, the port it listens on and where its pages go. Leave out small talk."
-            ),
-            # The chatter's own words join the focus so the judge sees any observation it left.
-            focus=(*scenario.focus, "coffee", "wifi", "thanks", "Grafana", "stand-up"),
-            traps=(*scenario.traps, "Some observation records small talk: a coffee break, the wifi, a thank-you."),
-        ),
-    )
+    """The service bank again under a bank's own mission (see ``noisy_service_bank_with_mission``)."""
+    await _run(client, bank_id, settled, noisy_service_bank_with_mission())

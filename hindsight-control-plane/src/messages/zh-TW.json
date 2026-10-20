@@ -695,6 +695,7 @@
       "webhookDelivery": "Webhook 投遞",
       "graphMaintenance": "圖譜維護",
       "vectorIndexMaintenance": "向量索引維護",
+      "adaptiveMemoryMaintenance": "自適應記憶維護",
       "exportDocuments": "匯出文件",
       "importDocuments": "匯入文件",
       "exportBank": "匯出記憶庫",
@@ -2021,7 +2022,9 @@
         "retain": "批次保留失敗",
         "retainAsync": "非同步批次保留失敗",
         "history": "取得觀察歷史失敗",
-        "update": "更新記憶失敗"
+        "update": "更新記憶失敗",
+        "confirm": "確認記憶失敗",
+        "lifecycle": "更新記憶生命週期失敗"
       },
       "documents": {
         "fetchList": "取得文件清單失敗",
@@ -2259,5 +2262,32 @@
     "pausedTitle": "上次重新整理失敗，此模型不再自動更新——手動重新整理即可恢復",
     "retrying": "重試中",
     "retryingTitle": "上次嘗試失敗，已排入下一次嘗試——只有這次也失敗才會停止自動重新整理"
+  },
+  "memoryLifecycle": {
+    "sectionTitle": "自適應記憶",
+    "truthStatus": "真實性狀態",
+    "status": {
+      "active": "有效",
+      "uncertain": "不確定",
+      "superseded": "已被取代",
+      "refuted": "已被駁斥"
+    },
+    "until": "至 {date}",
+    "supersededByTitle": "已被 {id} 取代",
+    "validity": "有效期",
+    "unknownStart": "任何記錄之前",
+    "openEnd": "現在",
+    "supersededBy": "取代者",
+    "retiredVia": "退役方式",
+    "reason": "原因",
+    "retrievability": "可回想度",
+    "stability": "穩定性",
+    "stabilityValue": "{days} 天",
+    "reinforcements": "強化次數",
+    "importance": "重要性",
+    "exempt": "免於遺忘",
+    "yes": "是",
+    "archived": "已封存",
+    "observeShadow": "觀察模式會標記為"
   }
 }

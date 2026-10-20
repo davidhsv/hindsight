@@ -36,8 +36,9 @@ class CausalLinkDescriptor:
     def as_json_dict(self) -> dict[str, Any]:
         """Serializable form written to ``invalidated_memory_units.causal_links``.
 
-        The key names double as the column list of the ``jsonb_to_recordset``
-        read in ``snapshot_causal_links`` — keep them in sync.
+        The key names double as the column list of the ``jsonb_to_recordset`` (PG) and
+        ``JSON_TABLE`` (Oracle) reads in ``DataAccessOps.fetch_causal_link_descriptors`` —
+        keep them in sync.
         """
         return {
             "from_unit_id": self.from_unit_id,

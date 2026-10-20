@@ -214,6 +214,8 @@ Search memories to provide personalized responses.
 | `include_source_facts` | boolean | No | For observation results, also return the facts they were built from. Default: `false` |
 | `max_source_facts_tokens` | integer | No | Max tokens of source facts when `include_source_facts` is set (default: 4096) |
 
+In a bank whose adaptive memory mode is `lifecycle`, the tool has no claim-view parameter (its schema is the same in every mode): it shows the bank's `adaptive_memory_default_view`, or the historical view when the bank's historical cues are on and the query asks about the past. A memory it returns whose claim is not plain active (an uncertain one, or a superseded one in a historical recall) carries a `lifecycle` annotation. See [Claim views in recall](./configuration#claim-views-in-recall).
+
 **Example:**
 ```json
 {

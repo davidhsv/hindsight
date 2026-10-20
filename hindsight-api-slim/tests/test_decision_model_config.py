@@ -1,6 +1,7 @@
 """The decision model is set up once and each operation may override it."""
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,15 +39,44 @@ def test_no_decision_model_by_default(monkeypatch):
     assert config.decision_model_config("recall") is None
     assert config.decision_model_config("reflect") is None
     assert config.decision_model_config("consolidation") is None
+    assert config.decision_model_config("recall_checks") is None
+
+
+def test_the_typesafe_default_is_an_explicit_jev_release(monkeypatch):
+    """Not an alias: jev-latest moves to each new release, and every decision would move with it."""
+    config = _config(monkeypatch, _GLOBAL)
+    setup = config.decision_model_config("reflect")
+    assert setup is not None and setup.model == "jev-1.14.0"
+    assert re.fullmatch(r"jev-\d+\.\d+\.\d+", setup.model)
+
+    overridden = _config(monkeypatch, {**_GLOBAL, "HINDSIGHT_API_DECISION_MODEL_MODEL": "jev-1.14.0"})
+    assert {operation: overridden.decision_model_config(operation).model for operation in ("recall", "reflect")} == {
+        "recall": "jev-1.14.0",
+        "reflect": "jev-1.14.0",
+    }
+
+
+def test_recall_checks_can_run_beside_the_reranker(monkeypatch):
+    """Its own operation: recall can keep the cross-encoder while the checks ask the decision model."""
+    config = _config(
+        monkeypatch,
+        {
+            "HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_PROVIDER": "typesafe",
+            "HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_API_KEY": "checks-key",
+        },
+    )
+    assert config.decision_model_config("recall") is None
+    checks = config.decision_model_config("recall_checks")
+    assert checks is not None and (checks.api_key, checks.model) == ("checks-key", "jev-1.14.0")
 
 
 def test_global_setup_reaches_every_operation(monkeypatch):
     config = _config(monkeypatch, _GLOBAL)
-    for operation in ("recall", "reflect", "consolidation"):
+    for operation in ("recall", "reflect", "consolidation", "recall_checks"):
         assert config.decision_model_config(operation) == DecisionModelConfig(
             provider="typesafe",
             api_key="global-key",
-            model="jev-latest",
+            model="jev-1.14.0",
             base_url="https://api.typesafe.ai",
             timeout=60.0,
             max_concurrent=24,
@@ -72,7 +102,7 @@ def test_operation_override_wins_and_falls_back_per_setting(monkeypatch):
     )
     recall = config.decision_model_config("recall")
     assert recall is not None
-    assert (recall.model, recall.api_key) == ("jev-latest", "global-key")
+    assert (recall.model, recall.api_key) == ("jev-1.14.0", "global-key")
 
 
 def test_operation_can_opt_out(monkeypatch):

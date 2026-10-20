@@ -589,6 +589,30 @@ export type BankTemplateConfig = {
    */
   enable_reranking?: boolean | null;
   /**
+   * Recall Relevance Check
+   *
+   * Ask the server's recall-checks decision model whether any top result helps answer the query, and flag the recall response (nothing_relevant) when none does
+   */
+  recall_relevance_check?: boolean | null;
+  /**
+   * Recall Conditional Recency
+   *
+   * Apply recall's recency boost only to queries the recall-checks decision model reads as asking about the current or latest state of something
+   */
+  recall_conditional_recency?: boolean | null;
+  /**
+   * Recall Injection Gate
+   *
+   * Withhold recalled memories the recall-checks decision model reads as instructions planted for an AI agent
+   */
+  recall_injection_gate?: boolean | null;
+  /**
+   * Recall Jev Rerank
+   *
+   * Have the recall-checks decision model reorder the reranker's top 100 results, told the question date and each memory's date; its order is final for those 100
+   */
+  recall_jev_rerank?: boolean | null;
+  /**
    * Reflect Use Decision Model
    *
    * When the server has a decision model, reflect lets it prune evidence and decide when to stop
@@ -848,6 +872,108 @@ export type BankTemplateConfig = {
    * Max tokens of raw chunks returned by recall (when recall_include_chunks is set)
    */
   recall_chunks_max_tokens?: number | null;
+  /**
+   * Adaptive Memory Mode
+   *
+   * Adaptive memory mode: 'off' (default; recall is unchanged), 'observe' (compute retention and report it in traces and metrics only), 'rank' (retention and reinforcement state; rarely reinforced memories are down-weighted only when adaptive_memory_score_alpha is above 0, which the server must allow) or 'lifecycle' (rank plus claim lifecycle: superseded and refuted memories stop answering current recall, and history is available through recall's lifecycle_view and as_of)
+   */
+  adaptive_memory_mode?: string | null;
+  /**
+   * Adaptive Memory Score Alpha
+   *
+   * Weight of the retention factor in the final recall score (0, the default, = no decay). A value above 0 is experimental: it is accepted only when the server sets HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL, and without it a stored value reads as 0
+   */
+  adaptive_memory_score_alpha?: number | null;
+  /**
+   * Adaptive Memory Score Floor
+   *
+   * Lowest retention factor a fully-forgotten memory can reach
+   */
+  adaptive_memory_score_floor?: number | null;
+  /**
+   * Adaptive Memory Reinforcement Enabled
+   *
+   * Let reinforcement events raise a memory's stability (rank and lifecycle modes only)
+   */
+  adaptive_memory_reinforcement_enabled?: boolean | null;
+  /**
+   * Adaptive Memory Base Stability Days
+   *
+   * Days before an unreinforced world fact's retrievability falls to e^-1
+   */
+  adaptive_memory_base_stability_days?: number | null;
+  /**
+   * Adaptive Memory Max Stability Days
+   *
+   * Cap on a memory's stability in days (must be >= adaptive_memory_base_stability_days)
+   */
+  adaptive_memory_max_stability_days?: number | null;
+  /**
+   * Adaptive Memory Default View
+   *
+   * Lifecycle recall view when the request names none: 'current' (default; superseded and refuted memories are left out) or 'historical' (superseded ones are returned too, annotated)
+   */
+  adaptive_memory_default_view?: string | null;
+  /**
+   * Adaptive Memory Historical Cues
+   *
+   * Detect historical phrasing ('used to', 'before the migration', 'before <date>', ...) in external recall queries that name no lifecycle_view, and answer them from the historical view (or as of the date). Lifecycle mode only
+   */
+  adaptive_memory_historical_cues?: boolean | null;
+  /**
+   * Context Admission Mode
+   *
+   * Context admission mode for external recalls: 'off' (default; recall is unchanged) or 'observe' (decisions and the would-be admitted set go to traces and metrics only). The experimental 'filter' (rejected memories are dropped and recall may return none) and 'strict' (filter plus hard scope, near-duplicate suppression and the memory/token budget) are accepted only when the server sets HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL
+   */
+  context_admission_mode?: string | null;
+  /**
+   * Context Admission Threshold Auto
+   *
+   * Admission score a memory needs on a recall with purpose 'auto_context'
+   */
+  context_admission_threshold_auto?: number | null;
+  /**
+   * Context Admission Threshold Explicit
+   *
+   * Admission score a memory needs on a recall with purpose 'explicit_search' or 'historical_search'
+   */
+  context_admission_threshold_explicit?: number | null;
+  /**
+   * Context Admission Reference Bonus
+   *
+   * Subtracted from the auto_context threshold when the query refers to shared history ('last time', 'what did we decide')
+   */
+  context_admission_reference_bonus?: number | null;
+  /**
+   * Context Admission Candidates
+   *
+   * Top-ranked recall results the admission gate judges; the rest are never admitted
+   */
+  context_admission_candidates?: number | null;
+  /**
+   * Context Admission Max Memories
+   *
+   * Most memories admitted per recall (strict mode)
+   */
+  context_admission_max_memories?: number | null;
+  /**
+   * Context Admission Max Tokens
+   *
+   * Most memory tokens admitted per recall (strict mode)
+   */
+  context_admission_max_tokens?: number | null;
+  /**
+   * Context Admission Mmr Lambda
+   *
+   * MMR trade-off between a memory's score and its novelty against those already admitted (1 = score only; strict mode)
+   */
+  context_admission_mmr_lambda?: number | null;
+  /**
+   * Context Admission Dup Similarity
+   *
+   * Embedding cosine above which a memory counts as a near-duplicate of one already admitted (strict mode)
+   */
+  context_admission_dup_similarity?: number | null;
   /**
    * Memory Defense
    *
@@ -1311,6 +1437,80 @@ export type ChunkResponse = {
 };
 
 /**
+ * ClaimShadowView
+ *
+ * What observe mode would have retired this memory as (diagnostic only).
+ */
+export type ClaimShadowView = {
+  /**
+   * Would Status
+   */
+  would_status: string;
+  /**
+   * Deciding Snapshot
+   */
+  deciding_snapshot?: {
+    [key: string]: unknown;
+  };
+  /**
+   * Evidence Ids
+   */
+  evidence_ids?: Array<string>;
+  /**
+   * Created At
+   */
+  created_at?: string | null;
+};
+
+/**
+ * ClaimView
+ *
+ * The memory's claim row: what should be believed about it, and why.
+ */
+export type ClaimView = {
+  /**
+   * Truth Status
+   */
+  truth_status: string;
+  /**
+   * Confidence
+   */
+  confidence?: number | null;
+  /**
+   * Valid From
+   */
+  valid_from?: string | null;
+  /**
+   * Valid To
+   */
+  valid_to?: string | null;
+  /**
+   * Retired Via
+   */
+  retired_via?: string | null;
+  /**
+   * Superseded By Id
+   */
+  superseded_by_id?: string | null;
+  /**
+   * Inherited From Id
+   */
+  inherited_from_id?: string | null;
+  /**
+   * Reason
+   */
+  reason?: string | null;
+  /**
+   * Evidence Memory Ids
+   */
+  evidence_memory_ids?: Array<string>;
+  /**
+   * Updated At
+   */
+  updated_at?: string | null;
+};
+
+/**
  * ClearMemoryObservationsResponse
  *
  * Response model for clearing observations for a specific memory.
@@ -1320,6 +1520,78 @@ export type ClearMemoryObservationsResponse = {
    * Deleted Count
    */
   deleted_count: number;
+};
+
+/**
+ * ConfirmMemoryRequest
+ *
+ * Request model for explicitly confirming that a memory still holds.
+ *
+ * A confirmation is reinforcement evidence: it makes the memory more stable, so it stays
+ * readily recallable for longer. Needs the bank's adaptive memory mode to be 'rank' or
+ * 'lifecycle' with reinforcement enabled.
+ */
+export type ConfirmMemoryRequest = {
+  /**
+   * Source Key
+   *
+   * Identifies this piece of evidence. A memory is confirmed at most once per key: re-sending the same key is reported as deduplicated and changes nothing, so a retry is safe. Omit it and every request counts as a separate confirmation.
+   */
+  source_key?: string | null;
+  /**
+   * Event Time
+   *
+   * When the confirmation happened (ISO 8601; a time without an offset is UTC). Defaults to now. It may be in the past, but not in the future.
+   */
+  event_time?: string | null;
+  /**
+   * Reason
+   *
+   * Free-text note for the audit log, when audit logging is on. Not stored with the memory.
+   */
+  reason?: string | null;
+};
+
+/**
+ * ConfirmMemoryResponse
+ *
+ * What an explicit confirmation did.
+ */
+export type ConfirmMemoryResponse = {
+  /**
+   * Memory Id
+   */
+  memory_id: string;
+  /**
+   * Recorded
+   *
+   * True when the confirmation was recorded as evidence for the memory.
+   */
+  recorded: boolean;
+  /**
+   * Deduplicated
+   *
+   * True when this source_key had already confirmed the memory; nothing changed.
+   */
+  deduplicated: boolean;
+  /**
+   * Outcome
+   *
+   * 'applied' (the memory was reinforced), 'cooldown' (recorded, but too soon after its last reinforcement to add stability) or 'deduplicated'.
+   */
+  outcome?: string | null;
+  /**
+   * Stability Days
+   *
+   * The memory's stability after the call: the days until, without reinforcement, its retrievability falls to about 37%.
+   */
+  stability_days?: number | null;
+  /**
+   * Reinforcement Count
+   *
+   * How many times the memory has been reinforced, after the call.
+   */
+  reinforcement_count?: number | null;
 };
 
 /**
@@ -1481,6 +1753,35 @@ export type Content =
           type: "file";
         } & FileContentBlock)
     >;
+
+/**
+ * ContextAdmissionSummary
+ *
+ * What context admission decided on a recall whose results it filters (filter or strict mode).
+ *
+ * Present only then: with the mode off or observe the results are what retrieval returned, and
+ * the payload carries nothing new. The reasons per candidate are in the trace only.
+ */
+export type ContextAdmissionSummary = {
+  /**
+   * Abstained
+   *
+   * Candidates were judged and none was admitted: the empty results are the answer (nothing relevant), not an empty bank or a too-narrow filter
+   */
+  abstained: boolean;
+  /**
+   * Candidates
+   *
+   * Candidates judged (0 when retrieval found nothing to judge)
+   */
+  candidates: number;
+  /**
+   * Admitted
+   *
+   * Candidates admitted (the results can be fewer, after the token budget)
+   */
+  admitted: number;
+};
 
 /**
  * CreateBankAliasRequest
@@ -4004,6 +4305,58 @@ export type MemoryItem = {
    * How to handle an existing document with the same document_id. 'replace' (default) deletes old data and reprocesses from scratch. 'append' concatenates new content to the existing document text and reprocesses.
    */
   update_mode?: "replace" | "append" | null;
+  /**
+   * Importance
+   *
+   * How much the memories extracted from this item matter, in [0, 1] (0.5 is neutral). Scales how long they stay readily recallable without being reinforced. Applied only when the bank's adaptive memory mode is 'rank' or 'lifecycle'; ignored in every other mode.
+   */
+  importance?: number | null;
+  /**
+   * Forgetting Exempt
+   *
+   * Exempt the memories extracted from this item from retention decay: they always rank as fully retrievable. Applied only when the bank's adaptive memory mode is 'rank' or 'lifecycle'; ignored in every other mode.
+   */
+  forgetting_exempt?: boolean | null;
+};
+
+/**
+ * MemoryLifecycle
+ *
+ * Everything the store holds about one memory's adaptive state.
+ *
+ * ``archived`` memories (curation-invalidated) are read from the snapshot taken when they were
+ * invalidated, which carries no shadow record. ``stored`` is False when nothing at all is stored
+ * for the memory, so ``retention`` is all defaults and every list is empty: the GET view leaves
+ * the key out for such a memory while the bank's mode is off.
+ */
+export type MemoryLifecycle = {
+  /**
+   * Memory Id
+   */
+  memory_id: string;
+  /**
+   * Archived
+   */
+  archived: boolean;
+  /**
+   * Stored
+   */
+  stored: boolean;
+  retention: RetentionView;
+  claim?: ClaimView | null;
+  /**
+   * Relations Out
+   */
+  relations_out?: Array<RelationView>;
+  /**
+   * Relations In
+   */
+  relations_in?: Array<RelationView>;
+  /**
+   * Recent Events
+   */
+  recent_events?: Array<ReinforcementEventView>;
+  shadow?: ClaimShadowView | null;
 };
 
 /**
@@ -4254,6 +4607,7 @@ export type MentalModelDryRunRefreshResult = {
     | "structured_doc_unreadable"
     | "delta_ops_failed"
     | "delta_ops_all_skipped"
+    | "retired_grounding"
     | null;
   /**
    * Outcome
@@ -4491,6 +4845,7 @@ export type MentalModelRefreshTrace = {
     | "structured_doc_unreadable"
     | "delta_ops_failed"
     | "delta_ops_all_skipped"
+    | "retired_grounding"
     | null;
   /**
    * Outcome
@@ -4657,12 +5012,16 @@ export type MentalModelResponse = {
  * report: the fact is gone from the bank, so it appears in no recall, no tool
  * call, and no supporting-fact list. Without this, a refresh that quietly
  * deleted a paragraph — or quietly declined to — leaves no evidence of why.
+ *
+ * In adaptive memory ``lifecycle`` mode a cited memory whose claim was superseded or
+ * refuted counts too: it is still a row, but no longer a current answer. ``cause`` and
+ * ``successor_ids`` say so; both are omitted when no such citation was found.
  */
 export type MentalModelRetraction = {
   /**
    * Fact Ids
    *
-   * Ids the document's based_on cites that no longer exist in the bank.
+   * Ids the document's based_on cites that no longer exist in the bank, or (lifecycle mode) whose claim was superseded or refuted.
    */
   fact_ids?: Array<string>;
   /**
@@ -4674,9 +5033,21 @@ export type MentalModelRetraction = {
   /**
    * Applied
    *
-   * Whether the pass that removes them ran to completion (zero edits still counts).
+   * Whether the pass that removes them ran to completion (zero edits still counts). For retired claims that pass is the full regeneration: true when it produced the document.
    */
   applied: boolean;
+  /**
+   * Cause
+   *
+   * Lifecycle mode: why cited memories stopped being current — 'refuted' when any of them was refuted, else 'superseded'. Omitted when every retracted fact is simply gone.
+   */
+  cause?: "superseded" | "refuted" | null;
+  /**
+   * Successor Ids
+   *
+   * Lifecycle mode: the memories that replaced the retired citations. Omitted when none.
+   */
+  successor_ids?: Array<string>;
   /**
    * Deferred Reason
    *
@@ -5541,6 +5912,48 @@ export type PromptPreviewResponse = {
 };
 
 /**
+ * RecallLifecycle
+ *
+ * What should be believed about a recalled memory, when that is not simply "it holds".
+ *
+ * Present on a recall result only when the bank's adaptive memory mode is ``lifecycle`` and the
+ * memory's claim is not plain ``active``: a superseded or refuted memory a historical or
+ * ``as_of`` recall returned, or an ``uncertain`` one (contested by conflicting evidence).
+ */
+export type RecallLifecycle = {
+  /**
+   * Truth Status
+   *
+   * 'superseded' (a later memory replaced it), 'refuted' (it was wrong) or 'uncertain' (conflicting evidence, not resolved)
+   */
+  truth_status: "uncertain" | "superseded" | "refuted";
+  /**
+   * Confidence
+   *
+   * Confidence in the claim, when one was recorded
+   */
+  confidence?: number | null;
+  /**
+   * Valid From
+   *
+   * ISO time the claim became true; null means since before anything recorded
+   */
+  valid_from?: string | null;
+  /**
+   * Valid To
+   *
+   * ISO time the claim stopped being true
+   */
+  valid_to?: string | null;
+  /**
+   * Superseded By
+   *
+   * Id of the memory that replaced this one
+   */
+  superseded_by?: string | null;
+};
+
+/**
  * RecallRequest
  *
  * Request model for recall endpoint.
@@ -5607,6 +6020,28 @@ export type RecallRequest = {
    * Window for the temporal retrieval arm, supplied instead of extracting dates from `query`. Set this when you already know the range you mean — a date picker, or an agent that resolved 'last quarter' itself — and recall will skip parsing the query text for dates. **This ranks, it does not filter**: the temporal arm surfaces memories whose own dates (`mentioned_at`, `occurred_start`, `occurred_end`) fall inside the window so they rank higher, while the semantic, keyword and graph arms are unaffected — so memories dated outside the window are still returned. Ignored when the bank has temporal retrieval disabled.
    */
   temporal_window?: TemporalWindow | null;
+  /**
+   * Lifecycle View
+   *
+   * Which memories to show when the bank's adaptive memory mode is 'lifecycle' (ignored in every other mode). 'current' leaves out memories that were superseded or refuted; 'historical' also returns superseded ones, each annotated with `lifecycle` (its validity and successor), but never refuted ones. When omitted, the bank's `adaptive_memory_default_view` applies.
+   */
+  lifecycle_view?: "current" | "historical" | null;
+  /**
+   * As Of
+   *
+   * Show memories as they stood at this instant (ISO 8601; a time without an offset is UTC), when the bank's adaptive memory mode is 'lifecycle': a memory is returned only if its claim was valid then. Refuted memories never are. Takes precedence over `lifecycle_view`. It does not change ranking: `query_timestamp` stays the clock recency is scored against.
+   */
+  as_of?: string | null;
+  /**
+   * Purpose
+   *
+   * Why the caller recalls, which sets the trade-off context admission makes when the bank's `context_admission_mode` is not 'off'. 'auto_context': memories injected into an agent's context that nobody asked for, judged against the stricter `context_admission_threshold_auto`; 'explicit_search' (the default when omitted): someone asked, judged against `context_admission_threshold_explicit`; 'historical_search': the caller wants how things were, so superseded memories are admissible, and in lifecycle mode the claim view is 'historical' unless `lifecycle_view` or `as_of` is given (whatever the admission mode). In filter and strict modes the result may be empty when no memory is worth injecting.
+   */
+  purpose?: "auto_context" | "explicit_search" | "historical_search" | null;
+  /**
+   * Where the caller is working (repository, branch, module, ...), compared with memory metadata by context admission. Ignored when the bank's `context_admission_mode` is 'off'.
+   */
+  context?: RecallTaskContext | null;
 };
 
 /**
@@ -5655,6 +6090,16 @@ export type RecallResponse = {
    * Whether the source_facts map was cut short by the token budget. When true, some IDs in results[].source_fact_ids have no entry in source_facts — the budget ran out, the references are not dangling. Only set when source facts were requested.
    */
   source_facts_truncated?: boolean | null;
+  /**
+   * Nothing Relevant
+   *
+   * Set when the bank's recall relevance check is on (recall_relevance_check): true when a decision model judged that none of the top ten results helps answer the query, or none was returned. A warning, not a filter: the results are the same either way. Left out when the check is off or the decision model did not answer.
+   */
+  nothing_relevant?: boolean | null;
+  /**
+   * Set only when context admission filtered this recall (bank context_admission_mode filter or strict). abstained=true means the empty results are the answer: candidates were judged and none was relevant to the task.
+   */
+  context_admission?: ContextAdmissionSummary | null;
 };
 
 /**
@@ -5719,6 +6164,10 @@ export type RecallResult = {
   source_fact_ids?: Array<string> | null;
   scores?: RecallScores | null;
   /**
+   * Claim lifecycle state, when the bank's adaptive memory mode is 'lifecycle' and the memory is not plain active: a superseded or refuted memory a historical or as_of recall returned, or an uncertain one. Omitted otherwise.
+   */
+  lifecycle?: RecallLifecycle | null;
+  /**
    * Attachments
    *
    * Attachments this fact was drawn from, as recorded per fact at extraction time — the same edge the memory read endpoints return, not everything its chunk happened to carry. A fact stated in prose reports none; an observation reports those of the facts it was consolidated from. Omitted when there are none.
@@ -5762,6 +6211,62 @@ export type RecallScores = {
    * Keyword/full-text (BM25) score (>= 0, unbounded). None if this result was not surfaced by keyword search.
    */
   keyword?: number | null;
+};
+
+/**
+ * RecallTaskContext
+ *
+ * Where the caller is working, compared with memory metadata by context admission.
+ *
+ * Every key is optional. With the bank's ``context_admission_mode`` at ``off`` the whole object is
+ * ignored. Otherwise each key the server lists in ``HINDSIGHT_API_CONTEXT_ADMISSION_SCOPE_KEYS``
+ * is compared with the memory metadata key of the same name (match, mismatch or unknown), and a
+ * mismatch on a key in ``HINDSIGHT_API_CONTEXT_ADMISSION_HARD_SCOPE_KEYS`` rejects the memory in
+ * strict mode. ``task_intent`` and ``workspace`` only reach the decision-model scorer.
+ */
+export type RecallTaskContext = {
+  /**
+   * Repository
+   *
+   * Stable repository identity, e.g. the normalized git remote 'github.com/acme/payments'
+   */
+  repository?: string | null;
+  /**
+   * Branch
+   *
+   * Current branch
+   */
+  branch?: string | null;
+  /**
+   * Module
+   *
+   * Subsystem or top-level folder the task is in
+   */
+  module?: string | null;
+  /**
+   * Environment
+   *
+   * Deployment environment, e.g. 'prod' or 'staging'
+   */
+  environment?: string | null;
+  /**
+   * Service
+   *
+   * Service the task concerns
+   */
+  service?: string | null;
+  /**
+   * Task Intent
+   *
+   * Free-text kind of task, e.g. 'debug', 'implementation', 'code review'
+   */
+  task_intent?: string | null;
+  /**
+   * Workspace
+   *
+   * Workspace or session label
+   */
+  workspace?: string | null;
 };
 
 /**
@@ -6214,6 +6719,98 @@ export type RefreshMentalModelRequest = {
 };
 
 /**
+ * ReinforcementEventView
+ *
+ * One ledger row.
+ */
+export type ReinforcementEventView = {
+  /**
+   * Source Type
+   */
+  source_type: string;
+  /**
+   * Source Key
+   */
+  source_key: string;
+  /**
+   * Event Time
+   */
+  event_time: string;
+  /**
+   * Weight
+   */
+  weight: number;
+  /**
+   * Independence Weight
+   */
+  independence_weight: number;
+  /**
+   * Applied Gain
+   */
+  applied_gain: number;
+  /**
+   * Outcome
+   */
+  outcome: string;
+  /**
+   * Processed At
+   */
+  processed_at?: string | null;
+};
+
+/**
+ * RelationView
+ *
+ * One lifecycle relation. A NULL endpoint is a tombstone: that memory is gone (its snapshot stays).
+ */
+export type RelationView = {
+  /**
+   * Id
+   */
+  id: string;
+  /**
+   * Relation Type
+   */
+  relation_type: string;
+  /**
+   * Source Memory Id
+   */
+  source_memory_id: string | null;
+  /**
+   * Target Memory Id
+   */
+  target_memory_id: string | null;
+  /**
+   * Source Snapshot
+   */
+  source_snapshot?: {
+    [key: string]: unknown;
+  };
+  /**
+   * Target Snapshot
+   */
+  target_snapshot?: {
+    [key: string]: unknown;
+  };
+  /**
+   * Origin
+   */
+  origin: string;
+  /**
+   * Reason
+   */
+  reason?: string | null;
+  /**
+   * Confidence
+   */
+  confidence?: number | null;
+  /**
+   * Created At
+   */
+  created_at?: string | null;
+};
+
+/**
  * ReprocessDocumentResponse
  *
  * Response model for reprocess document endpoint.
@@ -6305,6 +6902,72 @@ export type RetainResponse = {
    * Token usage metrics for LLM calls during fact extraction (only present for synchronous operations)
    */
   usage?: TokenUsage | null;
+};
+
+/**
+ * RetentionView
+ *
+ * A memory's retention, and its retrievability at the view's ``now``.
+ */
+export type RetentionView = {
+  /**
+   * Materialized
+   *
+   * True when a retention row exists; False when every value is a default.
+   */
+  materialized: boolean;
+  /**
+   * Retrievability
+   */
+  retrievability: number;
+  /**
+   * Stability Days
+   */
+  stability_days: number;
+  /**
+   * Importance
+   */
+  importance: number;
+  /**
+   * Last Reinforced At
+   */
+  last_reinforced_at: string | null;
+  /**
+   * Reinforcement Count
+   */
+  reinforcement_count: number;
+  /**
+   * Access Count
+   */
+  access_count: number;
+  /**
+   * Last Recalled At
+   */
+  last_recalled_at?: string | null;
+  /**
+   * Forgetting Exempt
+   */
+  forgetting_exempt: boolean;
+  /**
+   * Exemption Reason
+   */
+  exemption_reason?: string | null;
+  /**
+   * Retention State
+   */
+  retention_state?: string;
+  /**
+   * Below Threshold Since
+   */
+  below_threshold_since?: string | null;
+  /**
+   * Archived At
+   */
+  archived_at?: string | null;
+  /**
+   * Updated At
+   */
+  updated_at?: string | null;
 };
 
 /**
@@ -6779,6 +7442,65 @@ export type UpdateDocumentResponse = {
    * Success
    */
   success?: boolean;
+};
+
+/**
+ * UpdateMemoryLifecycleRequest
+ *
+ * Request model for changing how a memory is retained, and what should be believed about it.
+ *
+ * The retention fields need the bank's adaptive memory mode to be 'rank' or 'lifecycle'; the truth
+ * fields need 'lifecycle'. Omitted fields stay as they are; at least one must be set.
+ */
+export type UpdateMemoryLifecycleRequest = {
+  /**
+   * Importance
+   *
+   * How much the memory matters, in [0, 1] (0.5 is neutral). Rescales the stability the memory has learned by the ratio of the old and new importance, so earlier reinforcement is kept.
+   */
+  importance?: number | null;
+  /**
+   * Forgetting Exempt
+   *
+   * Exempt the memory from retention decay: it always ranks as fully retrievable. False lifts the exemption and clears its reason.
+   */
+  forgetting_exempt?: boolean | null;
+  /**
+   * Exemption Reason
+   *
+   * Why the memory is exempt. Cannot be set while turning forgetting_exempt off.
+   */
+  exemption_reason?: string | null;
+  /**
+   * Truth Status
+   *
+   * What should be believed about the memory ('lifecycle' mode only). 'superseded' or 'refuted' retires it from current recall (it must be active or uncertain, 409 otherwise): on an observation its source facts inherit the status unless another observation still stands on them; on a fact, the observations built on it are rebuilt from their other sources. 'active' restores a retired memory; 'uncertain' marks it contested.
+   */
+  truth_status?: "active" | "uncertain" | "superseded" | "refuted" | null;
+  /**
+   * Superseded By
+   *
+   * With truth_status 'superseded' or 'refuted': the memory that replaces this one. It must be a different live memory of the same bank with exactly the same tags.
+   */
+  superseded_by?: string | null;
+  /**
+   * Reason
+   *
+   * Why the truth status changed; recorded on the claim and its lifecycle relation.
+   */
+  reason?: string | null;
+  /**
+   * Hold
+   *
+   * Place the memory on hold ('rank' or 'lifecycle' mode): it is never archived or pruned and always ranks as fully retrievable. Stored as forgetting_exempt with exemption_reason 'hold'. False lifts the exemption. Cannot be combined with forgetting_exempt or exemption_reason.
+   */
+  hold?: boolean | null;
+  /**
+   * Retention State
+   *
+   * 'active' returns an archived memory to normal recall ('rank' or 'lifecycle' mode). A memory that is not archived is left as it is.
+   */
+  retention_state?: "active" | null;
 };
 
 /**
@@ -7626,6 +8348,91 @@ export type GetObservationHistoryResponses = {
    */
   200: unknown;
 };
+
+export type ConfirmMemoryData = {
+  /**
+   * Request
+   */
+  body?: ConfirmMemoryRequest | null;
+  headers?: {
+    /**
+     * Authorization
+     */
+    authorization?: string | null;
+  };
+  path: {
+    /**
+     * Bank Id
+     */
+    bank_id: string;
+    /**
+     * Memory Id
+     */
+    memory_id: string;
+  };
+  query?: never;
+  url: "/v1/default/banks/{bank_id}/memories/{memory_id}/confirm";
+};
+
+export type ConfirmMemoryErrors = {
+  /**
+   * Validation Error
+   */
+  422: HttpValidationError;
+};
+
+export type ConfirmMemoryError = ConfirmMemoryErrors[keyof ConfirmMemoryErrors];
+
+export type ConfirmMemoryResponses = {
+  /**
+   * Successful Response
+   */
+  200: ConfirmMemoryResponse;
+};
+
+export type ConfirmMemoryResponse2 = ConfirmMemoryResponses[keyof ConfirmMemoryResponses];
+
+export type UpdateMemoryLifecycleData = {
+  body: UpdateMemoryLifecycleRequest;
+  headers?: {
+    /**
+     * Authorization
+     */
+    authorization?: string | null;
+  };
+  path: {
+    /**
+     * Bank Id
+     */
+    bank_id: string;
+    /**
+     * Memory Id
+     */
+    memory_id: string;
+  };
+  query?: never;
+  url: "/v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle";
+};
+
+export type UpdateMemoryLifecycleErrors = {
+  /**
+   * Validation Error
+   */
+  422: HttpValidationError;
+};
+
+export type UpdateMemoryLifecycleError =
+  UpdateMemoryLifecycleErrors[keyof UpdateMemoryLifecycleErrors];
+
+export type UpdateMemoryLifecycleResponses = {
+  /**
+   * Successful Response
+   */
+  200: MemoryLifecycle;
+};
+
+export type UpdateMemoryLifecycleResponse =
+  UpdateMemoryLifecycleResponses[keyof UpdateMemoryLifecycleResponses];
 
 export type RecallMemoriesData = {
   body: RecallRequest;

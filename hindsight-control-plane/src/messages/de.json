@@ -695,6 +695,7 @@
       "webhookDelivery": "Webhook-Zustellung",
       "graphMaintenance": "Graph-Wartung",
       "vectorIndexMaintenance": "Wartung des Vektorindex",
+      "adaptiveMemoryMaintenance": "Wartung des adaptiven Gedächtnisses",
       "exportDocuments": "Dokumente exportieren",
       "importDocuments": "Dokumente importieren",
       "exportBank": "Bank exportieren",
@@ -2021,7 +2022,9 @@
         "retain": "Batch-Retain konnte nicht ausgeführt werden",
         "retainAsync": "Asynchrones Batch-Retain konnte nicht ausgeführt werden",
         "history": "Beobachtungsverlauf konnte nicht abgerufen werden",
-        "update": "Erinnerung konnte nicht aktualisiert werden"
+        "update": "Erinnerung konnte nicht aktualisiert werden",
+        "confirm": "Erinnerung konnte nicht bestätigt werden",
+        "lifecycle": "Lebenszyklus der Erinnerung konnte nicht aktualisiert werden"
       },
       "documents": {
         "fetchList": "Dokumente konnten nicht abgerufen werden",
@@ -2259,5 +2262,32 @@
     "pausedTitle": "Die letzte Aktualisierung ist fehlgeschlagen, daher aktualisiert sich dieses Modell nicht mehr selbst – aktualisieren Sie es, um fortzufahren",
     "retrying": "Wiederholung",
     "retryingTitle": "Der letzte Versuch ist fehlgeschlagen, ein weiterer steht an – automatische Aktualisierungen stoppen nur, wenn auch dieser fehlschlägt"
+  },
+  "memoryLifecycle": {
+    "sectionTitle": "Adaptives Gedächtnis",
+    "truthStatus": "Wahrheitsstatus",
+    "status": {
+      "active": "Aktiv",
+      "uncertain": "Unsicher",
+      "superseded": "Ersetzt",
+      "refuted": "Widerlegt"
+    },
+    "until": "bis {date}",
+    "supersededByTitle": "Ersetzt durch {id}",
+    "validity": "Gültig",
+    "unknownStart": "vor jeder Aufzeichnung",
+    "openEnd": "jetzt",
+    "supersededBy": "Ersetzt durch",
+    "retiredVia": "Zurückgezogen über",
+    "reason": "Grund",
+    "retrievability": "Abrufbarkeit",
+    "stability": "Stabilität",
+    "stabilityValue": "{days} Tage",
+    "reinforcements": "Verstärkungen",
+    "importance": "Wichtigkeit",
+    "exempt": "Vom Vergessen ausgenommen",
+    "yes": "Ja",
+    "archived": "Archiviert",
+    "observeShadow": "Beobachtungsmodus würde markieren als"
   }
 }

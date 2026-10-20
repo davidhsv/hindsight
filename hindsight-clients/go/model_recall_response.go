@@ -27,6 +27,8 @@ type RecallResponse struct {
 	Chunks map[string]ChunkData `json:"chunks,omitempty"`
 	SourceFacts map[string]RecallResult `json:"source_facts,omitempty"`
 	SourceFactsTruncated NullableBool `json:"source_facts_truncated,omitempty"`
+	NothingRelevant NullableBool `json:"nothing_relevant,omitempty"`
+	ContextAdmission NullableContextAdmissionSummary `json:"context_admission,omitempty"`
 }
 
 type _RecallResponse RecallResponse
@@ -247,6 +249,90 @@ func (o *RecallResponse) UnsetSourceFactsTruncated() {
 	o.SourceFactsTruncated.Unset()
 }
 
+// GetNothingRelevant returns the NothingRelevant field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *RecallResponse) GetNothingRelevant() bool {
+	if o == nil || IsNil(o.NothingRelevant.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.NothingRelevant.Get()
+}
+
+// GetNothingRelevantOk returns a tuple with the NothingRelevant field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *RecallResponse) GetNothingRelevantOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.NothingRelevant.Get(), o.NothingRelevant.IsSet()
+}
+
+// HasNothingRelevant returns a boolean if a field has been set.
+func (o *RecallResponse) HasNothingRelevant() bool {
+	if o != nil && o.NothingRelevant.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetNothingRelevant gets a reference to the given NullableBool and assigns it to the NothingRelevant field.
+func (o *RecallResponse) SetNothingRelevant(v bool) {
+	o.NothingRelevant.Set(&v)
+}
+// SetNothingRelevantNil sets the value for NothingRelevant to be an explicit nil
+func (o *RecallResponse) SetNothingRelevantNil() {
+	o.NothingRelevant.Set(nil)
+}
+
+// UnsetNothingRelevant ensures that no value is present for NothingRelevant, not even an explicit nil
+func (o *RecallResponse) UnsetNothingRelevant() {
+	o.NothingRelevant.Unset()
+}
+
+// GetContextAdmission returns the ContextAdmission field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *RecallResponse) GetContextAdmission() ContextAdmissionSummary {
+	if o == nil || IsNil(o.ContextAdmission.Get()) {
+		var ret ContextAdmissionSummary
+		return ret
+	}
+	return *o.ContextAdmission.Get()
+}
+
+// GetContextAdmissionOk returns a tuple with the ContextAdmission field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *RecallResponse) GetContextAdmissionOk() (*ContextAdmissionSummary, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.ContextAdmission.Get(), o.ContextAdmission.IsSet()
+}
+
+// HasContextAdmission returns a boolean if a field has been set.
+func (o *RecallResponse) HasContextAdmission() bool {
+	if o != nil && o.ContextAdmission.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetContextAdmission gets a reference to the given NullableContextAdmissionSummary and assigns it to the ContextAdmission field.
+func (o *RecallResponse) SetContextAdmission(v ContextAdmissionSummary) {
+	o.ContextAdmission.Set(&v)
+}
+// SetContextAdmissionNil sets the value for ContextAdmission to be an explicit nil
+func (o *RecallResponse) SetContextAdmissionNil() {
+	o.ContextAdmission.Set(nil)
+}
+
+// UnsetContextAdmission ensures that no value is present for ContextAdmission, not even an explicit nil
+func (o *RecallResponse) UnsetContextAdmission() {
+	o.ContextAdmission.Unset()
+}
+
 func (o RecallResponse) MarshalJSON() ([]byte, error) {
 	toSerialize,err := o.ToMap()
 	if err != nil {
@@ -272,6 +358,12 @@ func (o RecallResponse) ToMap() (map[string]interface{}, error) {
 	}
 	if o.SourceFactsTruncated.IsSet() {
 		toSerialize["source_facts_truncated"] = o.SourceFactsTruncated.Get()
+	}
+	if o.NothingRelevant.IsSet() {
+		toSerialize["nothing_relevant"] = o.NothingRelevant.Get()
+	}
+	if o.ContextAdmission.IsSet() {
+		toSerialize["context_admission"] = o.ContextAdmission.Get()
 	}
 	return toSerialize, nil
 }

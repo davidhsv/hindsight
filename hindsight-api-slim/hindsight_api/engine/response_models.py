@@ -262,6 +262,26 @@ class RecallScores(BaseModel):
     )
 
 
+class RecallLifecycle(BaseModel):
+    """What should be believed about a recalled memory, when that is not simply "it holds".
+
+    Present on a recall result only when the bank's adaptive memory mode is ``lifecycle`` and the
+    memory's claim is not plain ``active``: a superseded or refuted memory a historical or
+    ``as_of`` recall returned, or an ``uncertain`` one (contested by conflicting evidence).
+    """
+
+    truth_status: Literal["uncertain", "superseded", "refuted"] = Field(
+        description="'superseded' (a later memory replaced it), 'refuted' (it was wrong) or 'uncertain' "
+        "(conflicting evidence, not resolved)"
+    )
+    confidence: float | None = Field(default=None, description="Confidence in the claim, when one was recorded")
+    valid_from: str | None = Field(
+        default=None, description="ISO time the claim became true; null means since before anything recorded"
+    )
+    valid_to: str | None = Field(default=None, description="ISO time the claim stopped being true")
+    superseded_by: str | None = Field(default=None, description="Id of the memory that replaced this one")
+
+
 class MinScores(BaseModel):
     """Optional per-stage score floors for recall. Every floor is inclusive (``>=``).
 
@@ -423,6 +443,13 @@ class MemoryFact(BaseModel):
         None,
         description="Recall scores from each pipeline stage (final/reranker/semantic/keyword). Not returned for source facts.",
     )
+    # Omitted from every dump when None, so a recall outside lifecycle mode (and every active
+    # memory inside it) serializes exactly as it did before claims existed.
+    lifecycle: RecallLifecycle | None = Field(
+        None,
+        exclude_if=lambda v: v is None,
+        description="Claim lifecycle state (adaptive memory lifecycle mode only, for a memory that is not plain active)",
+    )
     # Internal, never serialised: the short ids of the attachments this fact was drawn
     # from, when the memories store returned them on the row. ``None`` means "not
     # carried", and the HTTP layer then reads them from `memory_units` instead; a list
@@ -458,6 +485,21 @@ class MentalModelResult(BaseModel):
     name: str = Field(description="Human-readable name")
     content: str = Field(description="The synthesized content")
     relevance: float = Field(default=0.0, description="Relevance score to the query")
+
+
+class ContextAdmissionSummary(BaseModel):
+    """What context admission decided on a recall whose results it filters (filter or strict mode).
+
+    Present only then: with the mode off or observe the results are what retrieval returned, and
+    the payload carries nothing new. The reasons per candidate are in the trace only.
+    """
+
+    abstained: bool = Field(
+        description="Candidates were judged and none was admitted: the empty results are the answer "
+        "(nothing relevant), not an empty bank or a too-narrow filter"
+    )
+    candidates: int = Field(description="Candidates judged (0 when retrieval found nothing to judge)")
+    admitted: int = Field(description="Candidates admitted (the results can be fewer, after the token budget)")
 
 
 class RecallResult(BaseModel):
@@ -510,6 +552,21 @@ class RecallResult(BaseModel):
             "results[].source_fact_ids have no entry in source_facts — the budget ran out, the "
             "references are not dangling. Only set when source facts were requested."
         ),
+    )
+    nothing_relevant: bool | None = Field(
+        None,
+        exclude_if=lambda v: v is None,
+        description=(
+            "Set when the bank's recall relevance check is on (recall_relevance_check): true when a decision "
+            "model judged that none of the top ten results helps answer the query, or none was returned. A "
+            "warning, not a filter: the results are the same either way. Left out when the check is off or the "
+            "decision model did not answer."
+        ),
+    )
+    context_admission: ContextAdmissionSummary | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Set only when context admission filtered this recall (bank mode filter or strict)",
     )
 
 

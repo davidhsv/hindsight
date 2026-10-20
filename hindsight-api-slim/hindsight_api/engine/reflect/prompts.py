@@ -200,6 +200,19 @@ def bank_disposition_line(bank_profile: dict[str, Any]) -> str:
     return f"Disposition: {', '.join(traits)}\n{described}"
 
 
+#: The lifecycle-mode addition to the conflicts section (adaptive memory). Only in a
+#: bank whose adaptive memory mode is ``lifecycle``, where tool results carry claim annotations.
+_LIFECYCLE_CONFLICT_RULES = (
+    "Some results carry a `lifecycle` field: what should be believed about that memory.",
+    '- `truth_status: "uncertain"` means conflicting evidence about it has not been resolved. Memories marked '
+    "uncertain are NOT resolved by recency: do not let the latest one win. Report the conflict and the evidence on "
+    "each side.",
+    '- `truth_status: "superseded"` (returned only when you ask recall for history) means a later memory replaced '
+    "it (`superseded_by`, `valid_to`): it describes how things were, not how they are.",
+    "",
+)
+
+
 def build_system_prompt_for_tools(
     bank_profile: dict[str, Any],
     context: str | None = None,
@@ -209,6 +222,7 @@ def build_system_prompt_for_tools(
     budget: str | None = None,
     answer_as_document: bool = False,
     llm_output_language: str | None = None,
+    lifecycle: bool = False,
 ) -> str:
     """
     Build the system prompt for tool-calling reflect agent.
@@ -233,6 +247,9 @@ def build_system_prompt_for_tools(
         answer_as_document: Whether done() takes a structured document instead of markdown.
         llm_output_language: Configured output language; drops the default language rule
             (the directive itself goes on the user message, see build_agent_user_prompt).
+        lifecycle: The bank's adaptive memory mode is ``lifecycle``: tool results may carry a
+            ``lifecycle`` annotation, and the conflicts section gains the rule for reading it.
+            False leaves the prompt byte-identical to what it was before claims existed.
     """
     mission = bank_profile.get("mission", "")
 
@@ -308,6 +325,7 @@ def build_system_prompt_for_tools(
             "",
             "An honest 'the data is inconsistent about X' beats a confident wrong answer. Do NOT pick a value arbitrarily, average conflicting values, or smooth over gaps in confident prose. Acknowledging ambiguity is a successful answer, not a failure mode.",
             "",
+            *(_LIFECYCLE_CONFLICT_RULES if lifecycle else ()),
             "## Showing Your Reasoning",
             "For any answer that resolves a conflict between facts, applies events on top of a count or status, or settles an ambiguity — show your work in the answer text so a reader can audit it.",
             "",

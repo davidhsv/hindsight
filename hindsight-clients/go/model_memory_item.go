@@ -34,6 +34,8 @@ type MemoryItem struct {
 	ObservationScopes NullableObservationScopes `json:"observation_scopes,omitempty"`
 	Strategy NullableString `json:"strategy,omitempty"`
 	UpdateMode NullableString `json:"update_mode,omitempty"`
+	Importance NullableFloat32 `json:"importance,omitempty"`
+	ForgettingExempt NullableBool `json:"forgetting_exempt,omitempty"`
 }
 
 type _MemoryItem MemoryItem
@@ -467,6 +469,90 @@ func (o *MemoryItem) UnsetUpdateMode() {
 	o.UpdateMode.Unset()
 }
 
+// GetImportance returns the Importance field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *MemoryItem) GetImportance() float32 {
+	if o == nil || IsNil(o.Importance.Get()) {
+		var ret float32
+		return ret
+	}
+	return *o.Importance.Get()
+}
+
+// GetImportanceOk returns a tuple with the Importance field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *MemoryItem) GetImportanceOk() (*float32, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Importance.Get(), o.Importance.IsSet()
+}
+
+// HasImportance returns a boolean if a field has been set.
+func (o *MemoryItem) HasImportance() bool {
+	if o != nil && o.Importance.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetImportance gets a reference to the given NullableFloat32 and assigns it to the Importance field.
+func (o *MemoryItem) SetImportance(v float32) {
+	o.Importance.Set(&v)
+}
+// SetImportanceNil sets the value for Importance to be an explicit nil
+func (o *MemoryItem) SetImportanceNil() {
+	o.Importance.Set(nil)
+}
+
+// UnsetImportance ensures that no value is present for Importance, not even an explicit nil
+func (o *MemoryItem) UnsetImportance() {
+	o.Importance.Unset()
+}
+
+// GetForgettingExempt returns the ForgettingExempt field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *MemoryItem) GetForgettingExempt() bool {
+	if o == nil || IsNil(o.ForgettingExempt.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.ForgettingExempt.Get()
+}
+
+// GetForgettingExemptOk returns a tuple with the ForgettingExempt field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *MemoryItem) GetForgettingExemptOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.ForgettingExempt.Get(), o.ForgettingExempt.IsSet()
+}
+
+// HasForgettingExempt returns a boolean if a field has been set.
+func (o *MemoryItem) HasForgettingExempt() bool {
+	if o != nil && o.ForgettingExempt.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetForgettingExempt gets a reference to the given NullableBool and assigns it to the ForgettingExempt field.
+func (o *MemoryItem) SetForgettingExempt(v bool) {
+	o.ForgettingExempt.Set(&v)
+}
+// SetForgettingExemptNil sets the value for ForgettingExempt to be an explicit nil
+func (o *MemoryItem) SetForgettingExemptNil() {
+	o.ForgettingExempt.Set(nil)
+}
+
+// UnsetForgettingExempt ensures that no value is present for ForgettingExempt, not even an explicit nil
+func (o *MemoryItem) UnsetForgettingExempt() {
+	o.ForgettingExempt.Unset()
+}
+
 func (o MemoryItem) MarshalJSON() ([]byte, error) {
 	toSerialize,err := o.ToMap()
 	if err != nil {
@@ -507,6 +593,12 @@ func (o MemoryItem) ToMap() (map[string]interface{}, error) {
 	}
 	if o.UpdateMode.IsSet() {
 		toSerialize["update_mode"] = o.UpdateMode.Get()
+	}
+	if o.Importance.IsSet() {
+		toSerialize["importance"] = o.Importance.Get()
+	}
+	if o.ForgettingExempt.IsSet() {
+		toSerialize["forgetting_exempt"] = o.ForgettingExempt.Get()
 	}
 	return toSerialize, nil
 }

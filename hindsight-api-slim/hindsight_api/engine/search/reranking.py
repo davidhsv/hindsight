@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from ..cross_encoder import RerankTimeoutError, _served_provider
 from .decision_reranker import PROVIDER_NAME as DECISION_MODEL_RERANKER
 from .decision_reranker import DecisionModelReranker, rerank_shared_context
-from .types import MergedCandidate, ScoredResult
+from .types import MergedCandidate, RetrievalResult, ScoredResult
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +171,33 @@ def _recency_for_unit(
         linear_window_days,
         halflife_days,
     )
+
+
+def rerank_document(retrieval: RetrievalResult, *, with_context: bool = True) -> str:
+    """The text a reranker scores for one candidate: its date, its context and its text.
+
+    ``with_context=False`` leaves the context out, for a decision model that was handed the
+    context every candidate shares once, in its state (see ``CrossEncoderReranker.rerank``).
+    """
+    # Text + context for better ranking
+    doc_text = retrieval.text
+    if retrieval.context and with_context:
+        doc_text = f"{retrieval.context}: {doc_text}"
+
+    # Formatted date information for temporal awareness
+    if retrieval.occurred_start:
+        occurred_start = retrieval.occurred_start
+
+        # Format in two styles for better model understanding
+        # 1. ISO format: YYYY-MM-DD
+        date_iso = occurred_start.strftime("%Y-%m-%d")
+
+        # 2. Human-readable: "June 5, 2022"
+        date_readable = occurred_start.strftime("%B %d, %Y")
+
+        # Prepend date to document text
+        doc_text = f"[Date: {date_readable} ({date_iso})] {doc_text}"
+    return doc_text
 
 
 def apply_combined_scoring(
@@ -403,31 +430,9 @@ class CrossEncoderReranker:
             today = f"Current date: {(now or datetime.now(timezone.utc)).date().isoformat()}"
             shared_context = f"{today}\n\n{pooled_context}" if pooled_context else today
 
-        # Prepare query-document pairs with date information
-        pairs = []
-        for candidate in candidates:
-            retrieval = candidate.retrieval
-
-            # Use text + context for better ranking
-            doc_text = retrieval.text
-            if retrieval.context and not pooled_context:
-                doc_text = f"{retrieval.context}: {doc_text}"
-
-            # Add formatted date information for temporal awareness
-            if retrieval.occurred_start:
-                occurred_start = retrieval.occurred_start
-
-                # Format in two styles for better model understanding
-                # 1. ISO format: YYYY-MM-DD
-                date_iso = occurred_start.strftime("%Y-%m-%d")
-
-                # 2. Human-readable: "June 5, 2022"
-                date_readable = occurred_start.strftime("%B %d, %Y")
-
-                # Prepend date to document text
-                doc_text = f"[Date: {date_readable} ({date_iso})] {doc_text}"
-
-            pairs.append([query, doc_text])
+        pairs = [
+            [query, rerank_document(candidate.retrieval, with_context=not pooled_context)] for candidate in candidates
+        ]
 
         # Get cross-encoder scores. A failover chain records the member that
         # served this task; read it before anything else on the chain can move.

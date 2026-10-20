@@ -20,6 +20,7 @@ import json
 from pydantic import BaseModel, ConfigDict, StrictStr
 from typing import Any, ClassVar, Dict, List, Optional
 from hindsight_client_api.models.chunk_attachment import ChunkAttachment
+from hindsight_client_api.models.recall_lifecycle import RecallLifecycle
 from hindsight_client_api.models.recall_scores import RecallScores
 from typing import Optional, Set
 from typing_extensions import Self
@@ -42,8 +43,9 @@ class RecallResult(BaseModel):
     tags: Optional[List[StrictStr]] = None
     source_fact_ids: Optional[List[StrictStr]] = None
     scores: Optional[RecallScores] = None
+    lifecycle: Optional[RecallLifecycle] = None
     attachments: Optional[List[ChunkAttachment]] = None
-    __properties: ClassVar[List[str]] = ["id", "text", "type", "entities", "context", "occurred_start", "occurred_end", "mentioned_at", "document_id", "metadata", "chunk_id", "tags", "source_fact_ids", "scores", "attachments"]
+    __properties: ClassVar[List[str]] = ["id", "text", "type", "entities", "context", "occurred_start", "occurred_end", "mentioned_at", "document_id", "metadata", "chunk_id", "tags", "source_fact_ids", "scores", "lifecycle", "attachments"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -87,6 +89,9 @@ class RecallResult(BaseModel):
         # override the default output from pydantic by calling `to_dict()` of scores
         if self.scores:
             _dict['scores'] = self.scores.to_dict()
+        # override the default output from pydantic by calling `to_dict()` of lifecycle
+        if self.lifecycle:
+            _dict['lifecycle'] = self.lifecycle.to_dict()
         # override the default output from pydantic by calling `to_dict()` of each item in attachments (list)
         _items = []
         if self.attachments:
@@ -154,6 +159,11 @@ class RecallResult(BaseModel):
         if self.scores is None and "scores" in self.model_fields_set:
             _dict['scores'] = None
 
+        # set to None if lifecycle (nullable) is None
+        # and model_fields_set contains the field
+        if self.lifecycle is None and "lifecycle" in self.model_fields_set:
+            _dict['lifecycle'] = None
+
         # set to None if attachments (nullable) is None
         # and model_fields_set contains the field
         if self.attachments is None and "attachments" in self.model_fields_set:
@@ -185,6 +195,7 @@ class RecallResult(BaseModel):
             "tags": obj.get("tags"),
             "source_fact_ids": obj.get("source_fact_ids"),
             "scores": RecallScores.from_dict(obj["scores"]) if obj.get("scores") is not None else None,
+            "lifecycle": RecallLifecycle.from_dict(obj["lifecycle"]) if obj.get("lifecycle") is not None else None,
             "attachments": [ChunkAttachment.from_dict(_item) for _item in obj["attachments"]] if obj.get("attachments") is not None else None
         })
         return _obj

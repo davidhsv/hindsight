@@ -633,12 +633,14 @@ if TYPE_CHECKING:
 
     from ..webhooks.url_guard import GuardedWebhookClient
     from . import bank_aliases as bank_aliases_mod
+    from .adaptive.views import MemoryLifecycle
     from .audit import AuditLogListResponse, AuditLogStatsResponse
     from .memories import MemoriesExtension, MemoryScopeWatermark
     from .memories.base import AttachmentRef, EntityResolverHandle, StoredMemory
     from .prompt_preview import PromptPreview
     from .retain.attachment_content import AttachmentOccurrence, LoadedAttachment, RetainAttachment
     from .retain.attachment_store import StoredAttachment
+    from .search.tracer import SearchTracer
     from .transfer import BankImportResult, ImportResult, TransferScope
     from .transfer.importer import Archive, OnConflict
     from .vector_index_health import CoverageTrigger
@@ -647,6 +649,40 @@ if TYPE_CHECKING:
 from enum import Enum
 
 from ..pg0 import EmbeddedPostgres, parse_pg0_url
+from .adaptive import clock as adaptive_clock
+from .adaptive.cues import detect_historical_cue
+from .adaptive.models import HOLD_EXEMPTION_REASON, ArchiveResult, Grounding, PruneCursor, TruthStatus
+from .adaptive.producers import (
+    BackgroundReinforcement,
+    mode_settings,
+    recall_reinforcement_allowed,
+    reflect_reinforcement_allowed,
+    usage_events,
+    write_settings,
+    write_settings_from_bank_config,
+)
+from .adaptive.scoring import (
+    AdaptiveRecall,
+    AdaptiveStateLoad,
+    CachedTokenCounter,
+    drop_superseded_raw_facts,
+    filter_min_scores,
+    observations_in_window,
+    superseded_source_ids,
+)
+from .adaptive.settings import AdaptiveSettings
+from .context_admission import (
+    PURPOSES,
+    AdmissionMode,
+    ContextAdmissionRecall,
+    ContextAdmissionSettings,
+    Purpose,
+    ScorerKind,
+    clean_task_context,
+    detect_reference_signal,
+    jev_client,
+    memory_metadata,
+)
 from .fact_budget import select_facts_within_budget
 from .llm_wrapper import (
     ConfiguredLLMProvider,
@@ -682,12 +718,13 @@ from .reflect import (
     ReflectToolTokenLimits,
     run_reflect_agent,
 )
-from .reflect.models import StructuredOutputResult
+from .reflect.models import ReflectAgentResult, StructuredOutputResult
 from .reflect.retractions import (
     RetractedGrounding,
     based_on_fact_ids,
     partition_retracted,
     prune_based_on,
+    retired_since_cited,
 )
 from .reflect.structured_doc import StructuredDocument
 from .reflect.tools import (
@@ -702,6 +739,7 @@ from .remote_retry import is_transient_remote_error
 from .response_models import (
     VALID_RECALL_FACT_TYPES,
     ConsolidationStrategiesPreview,
+    ContextAdmissionSummary,
     DryRunExtractionResult,
     EntityState,
     LLMCallTrace,
@@ -727,6 +765,18 @@ from .retain.attachment_content import (
 from .retain.fact_storage import _normalize_scopes
 from .retain.fold import FoldMemberRef
 from .retain.types import RetainBatchResult, RetainContentDict, merge_processed_content_tokens
+from .search.jev_rerank import jev_rerank, ranked_first
+from .search.lifecycle_filter import (
+    NAMED_VIEWS as LIFECYCLE_NAMED_VIEWS,
+)
+from .search.lifecycle_filter import (
+    ClaimStateUnavailable,
+    filter_candidates_by_claims,
+    in_trim_order,
+    resolve_view,
+)
+from .search.recall_checks import apply_result_checks, asks_current_state, recency_decay_for, resolve_recall_checks
+from .search.recall_guard import GuardedRanker
 from .search.reranking import CrossEncoderReranker, apply_combined_scoring
 from .search.tag_resolution import MAX_VOCABULARY, TagResolutionError, needs_resolution, resolve_tag_groups
 from .search.tags import (
@@ -744,7 +794,14 @@ from .search.tags import (
     tags_satisfy_groups,
     tags_writable,
 )
-from .search.types import ScoredResult
+from .search.trace import (
+    AdaptiveTraceInfo,
+    ContextAdmissionCandidateTrace,
+    ContextAdmissionTraceInfo,
+    LifecycleFilteredResult,
+    LifecycleTraceInfo,
+)
+from .search.types import MergedCandidate, ScoredResult
 from .source_facts import select_source_facts_within_budget
 from .source_scope import visible_document_ids
 from .task_backend import TaskBackend
@@ -2373,6 +2430,104 @@ class _MemoryRevertPlan:
     embedding: str | None = None
 
 
+#: How far past the server's clock a confirmation's ``event_time`` may lie and still count as now.
+#: Client and server clocks drift; a client stamping its own wall time must not be refused for a
+#: few seconds of skew. Anything later is a future event and is refused.
+_CONFIRM_CLOCK_SKEW = timedelta(minutes=5)
+_CONFIRM_SOURCE_KEY_MAX_LENGTH = 256
+_EXEMPTION_REASON_MAX_LENGTH = 500
+
+
+def _confirmation_time(event_time: datetime | None, now: datetime) -> datetime:
+    """When a confirmation happened: ``event_time`` in UTC (naive means UTC), capped at ``now``."""
+    if event_time is None:
+        return now
+    if event_time.tzinfo is None or event_time.utcoffset() is None:
+        event_time = event_time.replace(tzinfo=UTC)
+    if event_time > now + _CONFIRM_CLOCK_SKEW:
+        raise ValueError(f"event_time {event_time.isoformat()} is in the future.")
+    return min(event_time, now)
+
+
+#: How long the ``reason`` an explicit truth change records may be (it is stored on the claim).
+_TRUTH_REASON_MAX_LENGTH = 500
+
+
+def _explicit_successor_error(target: "StoredMemory", successor: "StoredMemory") -> str | None:
+    """Why ``successor`` cannot replace ``target`` in an explicit truth change, or None.
+
+    The same deterministic rules consolidation's lifecycle actions are validated against: the two
+    are different memories of the same bank (both read from it), in the same scope (identical tag
+    sets, so a claim is never retired across scopes), and the successor is not itself built on the
+    memory it would retire (an observation citing it as a source).
+    """
+    if successor.unit_id == target.unit_id:
+        return "A memory cannot supersede itself."
+    if set(successor.tags or []) != set(target.tags or []):
+        return (
+            f"Memory '{successor.unit_id}' is in a different scope (tags {sorted(set(successor.tags or []))}) from "
+            f"memory '{target.unit_id}' (tags {sorted(set(target.tags or []))}); a claim is only replaced within its scope."
+        )
+    if target.unit_id in {str(s) for s in (successor.source_memory_ids or [])}:
+        return f"Memory '{successor.unit_id}' is built on memory '{target.unit_id}', so it cannot replace it."
+    return None
+
+
+def _claim_change_instant(memory: "StoredMemory") -> datetime | None:
+    """When a memory's own evidence says its state began: ``mentioned_at``, else its dates."""
+    return memory.mentioned_at or memory.occurred_start or memory.event_date
+
+
+@dataclass(frozen=True)
+class _ExplicitTruthChange:
+    """What one explicit truth change did, for the work that follows its commit."""
+
+    #: False when the memory was not live in the bank (the PATCH answers 404).
+    found: bool
+    #: Raw facts went back to the consolidation queue (a sweep's survivors, or a restored fact).
+    requeued: bool = False
+    #: The claim actually changed (False for a no-op, e.g. restoring a memory that is active).
+    changed: bool = False
+
+
+@dataclass(frozen=True)
+class MemoryConfirmation:
+    """What :meth:`MemoryEngine.confirm_memory` did with one explicit confirmation.
+
+    ``outcome`` is the store's verdict on the event: ``applied`` (it reinforced the memory),
+    ``cooldown`` (recorded, but within the cooldown of the last reinforcement, so no gain) or
+    ``deduplicated`` (this ``source_key`` already confirmed the memory; nothing changed).
+    ``recorded`` is True when the event now has a ledger row. ``stability_days`` and
+    ``reinforcement_count`` are the memory's retention after the call.
+    """
+
+    memory_id: str
+    recorded: bool
+    deduplicated: bool
+    outcome: str
+    stability_days: float | None
+    reinforcement_count: int | None
+
+
+#: Prune deletes at most this many archived memories per ``delete_memory_units`` call (one
+#: transaction), and keeps calling until a page comes back short.
+_PRUNE_PAGE_SIZE = 500
+
+
+@dataclass(frozen=True)
+class AdaptiveMaintenanceResult:
+    """What one ``adaptive_memory_maintenance`` run did for a bank.
+
+    ``ran`` is False when the bank does not archive (archiving off on the server, or its effective
+    mode is not rank/lifecycle); then nothing was read. ``pruned`` counts the archived memories
+    deleted (prune on).
+    """
+
+    ran: bool
+    archive: ArchiveResult = field(default_factory=ArchiveResult)
+    pruned: int = 0
+
+
 @dataclass
 class KnowledgeBaseExportPage:
     """A single page's rendered inputs for a knowledge-base export bundle."""
@@ -3037,6 +3192,10 @@ class MemoryEngine(MemoryEngineInterface):
                 pool_getter=lambda: self._backend,
                 schema_getter=get_current_schema,
             )
+
+        # Recall and reflect reinforcement (adaptive memory), written off the response path on
+        # the primary backend and drained at close.
+        self._adaptive_reinforcement = BackgroundReinforcement(self._get_backend)
 
         # Audit logger for feature usage tracking
         config = get_config()
@@ -4237,6 +4396,8 @@ class MemoryEngine(MemoryEngineInterface):
             retain_content["event_date"] = None
         elif file_timestamp:
             retain_content["event_date"] = file_timestamp
+        if task_dict.get("document_id_minted"):
+            retain_content["document_id_minted"] = True
         # Same jsonb constraint as `submit_async_retain`: this row's task_payload
         # carries the item verbatim, and the caller-supplied metadata/tags on a
         # file upload never passed through that scrub.
@@ -4382,7 +4543,93 @@ class MemoryEngine(MemoryEngineInterface):
         # observations crossed the threshold here would otherwise wait for an
         # unrelated retain to notice (issue #3485).
         await self._submit_vector_index_maintenance_quietly(bank_id, internal_context, after="consolidation", grew=True)
+        # Consolidation is when retention moves most (observations reinforced, claims retired), so
+        # the bank's archive pass follows it. Best effort: the consolidation already committed.
+        try:
+            await self.submit_async_adaptive_memory_maintenance(bank_id=bank_id, request_context=internal_context)
+        except Exception as e:
+            logger.warning(
+                f"[ADAPTIVE] Failed to submit adaptive memory maintenance after consolidation for {bank_id}: {e}"
+            )
         return result
+
+    async def _handle_adaptive_memory_maintenance(self, task_dict: dict[str, Any]) -> AdaptiveMaintenanceResult:
+        """Handler for adaptive_memory_maintenance tasks: the bank's archive sweep, then prune."""
+        bank_id = task_dict.get("bank_id")
+        if not bank_id:
+            raise ValueError("bank_id is required for adaptive_memory_maintenance task")
+
+        from hindsight_api.models import RequestContext
+
+        internal_context = RequestContext(
+            internal=True,
+            tenant_id=task_dict.get("_tenant_id"),
+            api_key_id=task_dict.get("_api_key_id"),
+            retry_count=task_dict.get("_retry_count", 0),
+        )
+        return await self.run_adaptive_memory_maintenance(bank_id, request_context=internal_context)
+
+    async def run_adaptive_memory_maintenance(
+        self, bank_id: str, *, request_context: "RequestContext"
+    ) -> AdaptiveMaintenanceResult:
+        """Archive the bank's long-unretrievable memories, then (prune on) delete the long-archived ones.
+
+        Runs only while ``adaptive_memory_archive_enabled`` is on and the bank's effective mode is
+        rank or lifecycle. The sweep is the store's (``archive_sweep``: batched, a transaction per
+        page, rows held by a writer skipped). Prune (``adaptive_memory_prune_enabled``) asks the store
+        for the archived memories old enough to delete and removes them through
+        :meth:`delete_memory_units`, the engine's one bulk-delete seam (observation sweep, graph
+        queues, delete repair, post-commit side effects), a page at a time. Logs counts only, never
+        memory content.
+        """
+        from .memories import get_memories
+
+        await self._authenticate_tenant(request_context)
+        settings = await self._adaptive_settings_for_bank(bank_id, request_context)
+        if not (settings.archive_enabled and settings.effective_mode.applies_factor):
+            return AdaptiveMaintenanceResult(ran=False)
+        store = get_memories()
+        backend = await self._get_backend()
+        now = adaptive_clock.utcnow()
+        async with acquire_with_retry(backend) as conn:
+            sweep = await store.archive_sweep(conn, bank_id=bank_id, now=now, settings=settings)
+
+        pruned = 0
+        if settings.prune_enabled:
+
+            async def _still_prunable(conn, unit_ids: list[str]) -> list[str]:
+                # Re-read under the rows' locks inside the delete: the page was read without any,
+                # so a hold, an unarchiving reinforcement or new claim evidence may have landed since.
+                return await store.lock_prunable(conn, bank_id=bank_id, memory_ids=unit_ids, now=now, settings=settings)
+
+            after: PruneCursor | None = None
+            while True:
+                async with acquire_with_retry(backend) as conn:
+                    page = await store.prune_candidates(
+                        conn, bank_id=bank_id, now=now, settings=settings, limit=_PRUNE_PAGE_SIZE, after=after
+                    )
+                if page.memory_ids:
+                    deleted = await self.delete_memory_units(
+                        page.memory_ids, bank_id=bank_id, request_context=request_context, _recheck=_still_prunable
+                    )
+                    pruned += deleted["deleted"]
+                # The cursor moves past protected rows too, so they never stall the scan.
+                if page.next_after is None:
+                    break
+                after = page.next_after
+            if pruned and not settings.effective_mode.lifecycle:
+                # delete_memory_units already nudges grounded documents in lifecycle mode.
+                await self._submit_refreshes_for_retracted_grounding(bank_id, request_context=request_context)
+
+        get_metrics_collector().record_adaptive_archive_maintenance(
+            bank_id=bank_id, archived=sweep.archived, pruned=pruned
+        )
+        logger.info(
+            f"[ADAPTIVE] Maintenance for {bank_id}: scanned={sweep.scanned} marked={sweep.marked} "
+            f"cleared={sweep.cleared} archived={sweep.archived} protected={sweep.protected} "
+            f"skipped_locked={sweep.skipped_locked} pruned={pruned}"
+        )
+        return AdaptiveMaintenanceResult(ran=True, archive=sweep, pruned=pruned)
 
     async def _handle_graph_maintenance(self, task_dict: dict[str, Any]):
         """Handler for graph_maintenance tasks. Drains graph_maintenance_queue for the bank."""
@@ -4746,6 +4993,8 @@ class MemoryEngine(MemoryEngineInterface):
                     consolidation_result = await self._handle_consolidation(task_dict)
                 elif task_type == "graph_maintenance":
                     await self._handle_graph_maintenance(task_dict)
+                elif task_type == "adaptive_memory_maintenance":
+                    await self._handle_adaptive_memory_maintenance(task_dict)
                 elif task_type == "vector_index_maintenance":
                     await self._handle_vector_index_maintenance(task_dict)
                 elif task_type == "refresh_mental_model":
@@ -6333,6 +6582,8 @@ class MemoryEngine(MemoryEngineInterface):
         # The work that just finished schedules its audit rows as background
         # tasks; let them land before the pool they write through is closed below.
         await self._audit_logger.drain()
+        # Same for recall/reflect reinforcement writes (bounded, like the audit drain).
+        await self._adaptive_reinforcement.drain_all()
 
         # Release the memories store's own resources (client/pool). No-op for the
         # default Postgres store; symmetric with init_memories() at startup.
@@ -8939,6 +9190,13 @@ class MemoryEngine(MemoryEngineInterface):
         _connection_budget: int | None = None,
         _quiet: bool = False,
         reranking: RecallReranking = "cross_encoder",
+        recall_checks: bool = False,
+        lifecycle_view: str | None = None,
+        as_of: datetime | None = None,
+        purpose: str | None = None,
+        task_context: Mapping[str, Any] | None = None,
+        _external: bool = False,
+        _exclude_retired: bool = False,
     ) -> RecallResultModel:
         """
         Recall memories using N*4-way parallel retrieval (N fact types × 4 retrieval methods).
@@ -8986,6 +9244,41 @@ class MemoryEngine(MemoryEngineInterface):
                   extracting dates from ``query``. It ranks memories dated inside it
                   higher; it does not exclude memories dated outside it, and it does
                   nothing when the bank has ``enable_temporal_retrieval`` off.
+            recall_checks: Run the bank's recall checks (relevance flag, conditional recency,
+                  injection gate, Jev rerank; see search/recall_checks.py). The HTTP and MCP recall
+                  pass True; the recalls consolidation and reflect make for themselves leave them off.
+            lifecycle_view: Which claims a recall in a bank whose adaptive memory mode is
+                  ``lifecycle`` shows: ``"current"`` (superseded and refuted memories are left
+                  out), ``"historical"`` (superseded ones are shown, annotated; refuted and
+                  merge-retired ones are not) or the internal ``"all-with-status"`` (nothing is
+                  left out; consolidation's pool recall). None uses the bank's
+                  ``adaptive_memory_default_view``. Ignored in every other mode.
+            as_of: Show the claims as they stood at this instant (naive means UTC): a memory is
+                  kept iff its claim's validity interval contains it; refuted and merge-retired
+                  memories never are. Wins over ``lifecycle_view``. Lifecycle mode only. It does
+                  not move the ranking clock, which stays ``question_date``.
+            purpose: Why the caller recalls: ``"auto_context"`` (memories injected into an agent's
+                  context unasked; the context-admission gate favours precision), ``"explicit_search"``
+                  (the default; someone asked, so it favours recall) or ``"historical_search"`` (how
+                  things were: superseded memories are admissible, and in lifecycle mode the claim
+                  view is ``historical`` unless ``lifecycle_view`` or ``as_of`` names another).
+                  Anything else is a 422.
+            task_context: What the task is about: ``repository``, ``branch``, ``module``,
+                  ``environment`` (compared with the memories' metadata keys of the same names),
+                  ``task_intent`` and ``workspace``. Non-string and empty values are ignored. Read
+                  only by the context-admission gate, which runs only for an external recall in a
+                  bank whose ``context_admission_mode`` is not ``off``.
+            _external: This is a final, external recall (the HTTP and MCP recall endpoints pass
+                  True; nothing else may). Its returned memories may be reinforced as
+                  ``final_external_recall`` evidence, in the background, when the bank
+                  reinforces and the static recall-reinforcement switch is on; and with the bank's
+                  ``adaptive_memory_historical_cues`` on, a lifecycle-mode recall that names no view
+                  is checked for historical cues. Internal recalls (reflect tools, consolidation,
+                  extensions) never set it.
+            _exclude_retired: Internal (consolidation's live pool recall). In lifecycle mode the
+                  store drops superseded and refuted memories inside its retrieval arms, before
+                  their limits, so retired near-twins never take a live memory's slot; the claim
+                  view still runs on what comes back. Ignored in every other mode.
 
         Returns:
             RecallResultModel containing:
@@ -9053,6 +9346,27 @@ class MemoryEngine(MemoryEngineInterface):
                 status_code=422,
             )
 
+        if lifecycle_view is not None and lifecycle_view not in LIFECYCLE_NAMED_VIEWS:
+            from hindsight_api.extensions.operation_validator import OperationValidationError
+
+            raise OperationValidationError(
+                f"Invalid lifecycle_view '{lifecycle_view}'. Must be one of: {', '.join(LIFECYCLE_NAMED_VIEWS)}",
+                status_code=422,
+            )
+        if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
+            as_of = as_of.replace(tzinfo=UTC)
+        if purpose is not None and purpose not in PURPOSES:
+            from hindsight_api.extensions.operation_validator import OperationValidationError
+
+            raise OperationValidationError(
+                f"Invalid purpose '{purpose}'. Must be one of: {', '.join(PURPOSES)}",
+                status_code=422,
+            )
+        request_purpose = Purpose(purpose) if purpose is not None else Purpose.EXPLICIT_SEARCH
+        # A historical search reads the claims' history unless the request names a view itself.
+        if request_purpose is Purpose.HISTORICAL_SEARCH and lifecycle_view is None and as_of is None:
+            lifecycle_view = "historical"
+
         if (
             min_scores is not None
             and min_scores.reranker is not None
@@ -9089,6 +9403,10 @@ class MemoryEngine(MemoryEngineInterface):
                 tags=tags,
                 tags_match=tags_match,
                 tag_groups=tag_groups,
+                lifecycle_view=lifecycle_view,
+                as_of=as_of,
+                purpose=purpose,
+                task_context=dict(task_context) if task_context is not None else None,
             )
             _t0 = time.perf_counter()
             result = await self._validate_operation(self._operation_validator.validate_recall(ctx))
@@ -9138,9 +9456,10 @@ class MemoryEngine(MemoryEngineInterface):
         if _d > 0.100:
             logger.info("[RECALL PHASE] bank_config=%.3fs bank=%s", _d, bank_id)
         thinking_budget = _resolve_thinking_budget(budget_config_dict, budget, max_tokens)
+        static_config = get_config()
         # Reranker candidate cap, optionally scaled by the same budget level (env-configured,
         # 0/unset → flat reranker_max_candidates). Static config, so read from get_config().
-        reranker_max_candidates = _resolve_reranker_max_candidates(get_config(), budget)
+        reranker_max_candidates = _resolve_reranker_max_candidates(static_config, budget)
 
         # Recall pipeline stages, resolved per bank. A bank can switch off arms its
         # content cannot use, trading recall breadth for latency.
@@ -9150,6 +9469,48 @@ class MemoryEngine(MemoryEngineInterface):
         reranking = _resolve_reranking(budget_config_dict, reranking)
         if prefer_observations is None:
             prefer_observations = bool(budget_config_dict.get("recall_prefer_observations", False))
+        checks = resolve_recall_checks(budget_config_dict) if recall_checks else None
+        # Adaptive memory, from the config dict already in hand (no second resolve). None unless
+        # the effective mode loads state -- a store that cannot hold it makes every mode "off" --
+        # so a mode-off recall carries nothing new down the pipeline. The mode is checked first so
+        # the default (off) costs one lookup; stored values are already normalized to lower case.
+        adaptive_settings: AdaptiveSettings | None = None
+        if budget_config_dict.get("adaptive_memory_mode") not in (None, "off"):
+            from .memories import get_memories as _get_memories_for_adaptive
+
+            _adaptive = AdaptiveSettings.resolve(
+                budget_config_dict,
+                static_config,
+                store_supports=_get_memories_for_adaptive().supports_adaptive_state_for(bank_id),
+            )
+            if _adaptive.effective_mode.loads_state:
+                adaptive_settings = _adaptive
+        # Context admission, likewise from the config dict in hand: only for an external recall,
+        # and None unless the bank's mode is not off, so a mode-off recall pays one lookup.
+        context_admission: ContextAdmissionRecall | None = None
+        if _external and budget_config_dict.get("context_admission_mode") not in (None, "off"):
+            _admission_settings = ContextAdmissionSettings.resolve(budget_config_dict, static_config)
+            if _admission_settings.mode is not AdmissionMode.OFF:
+                context_admission = ContextAdmissionRecall(
+                    settings=_admission_settings,
+                    purpose=request_purpose,
+                    task_context=clean_task_context(task_context),
+                    query=query,
+                    reference_signal=(
+                        detect_reference_signal(query) if request_purpose is Purpose.AUTO_CONTEXT else None
+                    ),
+                    count_tokens=CachedTokenCounter(count_tokens),
+                )
+        # The historical-cue detector runs only for an external lifecycle-mode recall that named
+        # no view of its own, in a bank that switched it on (adaptive_memory_historical_cues).
+        detect_historical_cues = bool(
+            _external
+            and adaptive_settings is not None
+            and adaptive_settings.effective_mode.lifecycle
+            and adaptive_settings.historical_cues
+            and lifecycle_view is None
+            and as_of is None
+        )
 
         # Log recall start with tags if present (skip if quiet mode for internal operations)
         if not _quiet:
@@ -9169,7 +9530,21 @@ class MemoryEngine(MemoryEngineInterface):
         recall_span.set_attribute("hindsight.thinking_budget", thinking_budget)
         recall_span.set_attribute("hindsight.max_tokens", max_tokens)
 
+        recency_route: asyncio.Task[bool | None] | None = None
         try:
+            # Conditional recency is asked as retrieval starts, not before it: the answer is only
+            # read once candidates are scored. Skipped where nothing would read it: recency
+            # already off, the interleave order (never re-scored), or a decision model reranking
+            # recall (its order is final, with no boosts applied).
+            if (
+                checks is not None
+                and checks.conditional_recency
+                and reranking != "interleave"
+                and get_config().recency_decay_function != "none"
+                and get_config().decision_model_config("recall") is None
+            ):
+                recency_route = asyncio.create_task(asks_current_state(checks.model, query))
+
             # Backpressure: limit concurrent recalls to prevent overwhelming the database
             result = None
             error_msg = None
@@ -9214,6 +9589,22 @@ class MemoryEngine(MemoryEngineInterface):
                             enable_text_search=enable_text_search,
                             enable_temporal_retrieval=enable_temporal_retrieval,
                             enable_graph_retrieval=enable_graph_retrieval,
+                            recency_route=recency_route,
+                            jev_reranker=checks.jev_reranker if checks is not None else None,
+                            adaptive_settings=adaptive_settings,
+                            lifecycle_view=lifecycle_view,
+                            as_of=as_of,
+                            detect_historical_cues=detect_historical_cues,
+                            # Internal (consolidation's live pool), and only in lifecycle mode: the
+                            # retired claims leave the arms in the store's SQL, before their limits.
+                            **(
+                                {"exclude_retired": True}
+                                if _exclude_retired
+                                and adaptive_settings is not None
+                                and adaptive_settings.effective_mode.lifecycle
+                                else {}
+                            ),
+                            **({"context_admission": context_admission} if context_admission is not None else {}),
                         )
                         get_metrics_collector().record_recall_phase(
                             "search_with_retries", time.perf_counter() - _t0_swr2, diagnostic=True
@@ -9312,6 +9703,16 @@ class MemoryEngine(MemoryEngineInterface):
                             logger.warning(f"Post-recall hook error (non-fatal): {hook_err}")
                     raise Exception(error_msg)
 
+            # Filter and strict say what the gate decided, so an abstention reads differently from
+            # an empty bank; off and observe leave the payload as it was.
+            if result is not None and context_admission is not None and context_admission.mode.changes_results:
+                admission_outcome = context_admission.outcome
+                result.context_admission = ContextAdmissionSummary(
+                    abstained=admission_outcome.abstained if admission_outcome is not None else False,
+                    candidates=len(admission_outcome.decisions) if admission_outcome is not None else 0,
+                    admitted=len(admission_outcome.admitted_ids) if admission_outcome is not None else 0,
+                )
+
             # The SQL-store half of the failure-path re-check above. A bank deleted by another
             # process within the cache TTL does not FAIL here -- its rows are gone, so the recall
             # answers empty, indistinguishable from a healthy empty bank. Only an empty SQL recall
@@ -9323,6 +9724,22 @@ class MemoryEngine(MemoryEngineInterface):
 
                 if not get_memories().store_owned_for(bank_id):
                     await self._raise_if_bank_deleted(bank_id)
+
+            # After the existence re-check above, which reads an empty result as a possibly deleted
+            # bank: a gate that withheld every result must not trigger it.
+            if checks is not None and checks.on_results and result is not None:
+                _t0 = time.perf_counter()
+                result = await apply_result_checks(checks, query, result, bank_id)
+                get_metrics_collector().record_recall_phase("recall_checks", time.perf_counter() - _t0)
+            # Once, after the retry loop, for what the caller actually receives.
+            if _external and adaptive_settings is not None and result is not None and result.results:
+                self._submit_recall_reinforcement(
+                    bank_id,
+                    result.results,
+                    adaptive_settings,
+                    question_date,
+                    context_admission_mode=context_admission.mode.value if context_admission is not None else None,
+                )
 
             # Call post-operation hook for success
             if self._operation_validator and result is not None:
@@ -9354,7 +9771,430 @@ class MemoryEngine(MemoryEngineInterface):
 
             return result
         finally:
+            if recency_route is not None and not recency_route.done():
+                recency_route.cancel()
             recall_span_context.__exit__(None, None, None)
+
+    def _submit_recall_reinforcement(
+        self,
+        bank_id: str,
+        results: list[MemoryFact],
+        settings: AdaptiveSettings,
+        question_date: datetime | None,
+        *,
+        context_admission_mode: str | None = None,
+    ) -> None:
+        """Schedule ``final_external_recall`` events for a final recall's results; never raises.
+
+        Timed at the recall's scoring clock, capped at the wall clock: a historical
+        ``query_timestamp`` dates the evidence when the question was asked, and a future one cannot
+        reinforce a memory ahead of now. Never while context admission filters the recall.
+        """
+        try:
+            if not recall_reinforcement_allowed(settings, context_admission_mode=context_admission_mode):
+                return
+            event_time = min(_recall_scoring_now(question_date), adaptive_clock.utcnow())
+            events = usage_events(
+                [fact.id for fact in results],
+                source_type="final_external_recall",
+                event_time=event_time,
+                settings=settings,
+            )
+            self._adaptive_reinforcement.submit(producer="recall", bank_id=bank_id, events=events, settings=settings)
+        except Exception as exc:
+            logger.warning(f"[RECALL {bank_id[:8]}] could not schedule recall reinforcement: {exc!r}")
+            get_metrics_collector().record_adaptive_reinforcement_dropped(
+                producer="recall", reason="error", bank_id=bank_id
+            )
+
+    def _submit_reflect_reinforcement(
+        self,
+        bank_id: str,
+        agent_result: ReflectAgentResult,
+        bank_config: dict[str, Any],
+        *,
+        is_refresh: bool,
+        answer_as_document: bool,
+    ) -> None:
+        """Schedule ``successful_reflect_use`` events for what a successful answer cited; never raises.
+
+        Only the memories and observations the agent declared it used (never ``based_on``, which
+        holds everything retrieved when it declared nothing), and never for a mental-model refresh,
+        a document answer or an answer the agent itself reported as not found.
+        """
+        try:
+            if is_refresh or answer_as_document or agent_result.answer_found is False:
+                return
+            memory_ids = [*agent_result.used_memory_ids, *agent_result.used_observation_ids]
+            if not memory_ids:
+                return
+            settings = write_settings_from_bank_config(bank_config, bank_id=bank_id)
+            if settings is None or not reflect_reinforcement_allowed(settings):
+                return
+            events = usage_events(
+                memory_ids,
+                source_type="successful_reflect_use",
+                event_time=adaptive_clock.utcnow(),
+                settings=settings,
+            )
+            self._adaptive_reinforcement.submit(producer="reflect", bank_id=bank_id, events=events, settings=settings)
+        except Exception as exc:
+            logger.warning(f"[REFLECT {bank_id[:8]}] could not schedule reflect reinforcement: {exc!r}")
+            get_metrics_collector().record_adaptive_reinforcement_dropped(
+                producer="reflect", reason="error", bank_id=bank_id
+            )
+
+    async def _load_adaptive_state(self, backend, bank_id: str, memory_ids: list[str]) -> AdaptiveStateLoad:
+        """Read the adaptive state of a recall's candidates; a failure is returned, never raised.
+
+        Runs as a task beside the cross-encoder, on its own connection from the read backend and
+        outside the budgeted retrieval block (that block has closed by now). Returning the error
+        instead of raising keeps a failed read from surfacing as an un-retrieved task exception
+        when the recall is cancelled before awaiting it.
+        """
+        from .memories import get_memories
+
+        start = time.perf_counter()
+        try:
+            async with acquire_with_retry(backend) as conn:
+                states = await get_memories().load_adaptive_state(conn, bank_id=bank_id, memory_ids=memory_ids)
+        except Exception as e:
+            return AdaptiveStateLoad(states=None, error=e, seconds=time.perf_counter() - start)
+        return AdaptiveStateLoad(states=states, error=None, seconds=time.perf_counter() - start)
+
+    def _finish_adaptive_recall(
+        self,
+        adaptive: AdaptiveRecall,
+        tracer: "SearchTracer",
+        *,
+        enable_trace: bool,
+        bank_id: str,
+        top_scored: list[ScoredResult],
+        min_reranker: float | None,
+        min_final: float | None,
+        prefer_observations: bool,
+        rerank_limit: int,
+        max_tokens: int,
+    ) -> None:
+        """Replay the recall tail over the counterfactual order; record metrics and the trace summary.
+
+        Pure apart from the metric and trace writes: the replay reuses the sources the dedup read
+        already resolved and the memoised token counts.
+        """
+        start = time.perf_counter()
+        mode = adaptive.settings.effective_mode
+        final_ids = [sr.id for sr in top_scored]
+        outcome = adaptive.finish(
+            final_ids,
+            min_reranker=min_reranker,
+            min_final=min_final,
+            prefer_observations=prefer_observations,
+            rerank_limit=rerank_limit,
+            max_tokens=max_tokens,
+        )
+        rerank_changed = outcome.changed if outcome is not None and mode.applies_factor else None
+        top_k_changed = outcome.changed if outcome is not None and not mode.applies_factor else None
+        if adaptive.archive_suppressed:
+            get_metrics_collector().record_adaptive_archive_suppressed(
+                bank_id=bank_id, count=len(adaptive.archive_suppressed)
+            )
+        if outcome is not None:
+            get_metrics_collector().record_adaptive_recall(
+                mode=mode.value,
+                bank_id=bank_id,
+                retrievability=[sr.retrievability for sr in top_scored if sr.retrievability is not None],
+                stability_days=[sr.stability_days for sr in top_scored if sr.stability_days is not None],
+                rerank_changed=rerank_changed,
+                top_k_changed=top_k_changed,
+            )
+        # `enable_trace`, NOT `if tracer`: see the tracer construction in _search_with_retries.
+        if enable_trace:
+            tracer.adaptive = AdaptiveTraceInfo(
+                mode=mode.value,
+                alpha=adaptive.settings.score_alpha,
+                floor=adaptive.settings.score_floor,
+                scored=outcome is not None,
+                states_loaded=len(adaptive.states) if adaptive.states is not None else None,
+                simulated_final_ids=outcome.ids if outcome is not None and not mode.applies_factor else None,
+                top_k_changed=top_k_changed,
+                rerank_changed=rerank_changed,
+                state_load_error=type(adaptive.load_error).__name__ if adaptive.load_error is not None else None,
+                archive_suppressed=list(adaptive.archive_suppressed) or None,
+            )
+        adaptive.scoring_seconds += time.perf_counter() - start
+
+    async def _apply_context_admission(
+        self,
+        admission: ContextAdmissionRecall,
+        bank_id: str,
+        backend,
+        tracer: "SearchTracer",
+        scored_results: list[ScoredResult],
+        *,
+        historical: bool,
+        rank_based_relevance: bool,
+        adaptive: AdaptiveRecall | None,
+        log_buffer: list[str],
+    ) -> list[ScoredResult]:
+        """Judge the top candidates and return the list the recall tail continues with.
+
+        Filter and strict return the admitted candidates (possibly none); observe returns
+        ``scored_results`` unchanged and keeps the admitted ones as its shadow. The embeddings for
+        redundancy suppression, and the source facts an observation's scope is derived from, are
+        read on their own connections, outside the budgeted retrieval block, and only for the
+        candidates that need them. Timed as the ``context_admission`` phase.
+        """
+        from .memories import get_memories
+
+        start = time.perf_counter()
+        store = get_memories()
+
+        async def load_embeddings(memory_ids: list[str]) -> dict[str, list[float]]:
+            async with acquire_with_retry(backend) as conn:
+                return await store.load_embeddings(conn, bank_id=bank_id, memory_ids=memory_ids)
+
+        async def load_source_metadata(observations: list[ScoredResult]) -> dict[str, list[dict]]:
+            # Source ids a backend already carried on the result are used as they are; the rest
+            # come from one read of the observations, and every source's metadata from one more.
+            sources_by_obs = {
+                sr.id: [str(s) for s in sr.retrieval.source_memory_ids]
+                for sr in observations
+                if sr.retrieval.source_memory_ids is not None
+            }
+            async with self._store_read_conn(bank_id) as conn:
+                missing = [str(uuid.UUID(sr.id)) for sr in observations if sr.id not in sources_by_obs]
+                if missing:
+                    for m in await store.get_memories(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=missing):
+                        if m.fact_type == "observation":
+                            sources_by_obs[m.unit_id] = [str(s) for s in m.source_memory_ids or []]
+                source_ids = sorted({s for ids in sources_by_obs.values() for s in ids})
+                metadata_by_id = (
+                    {
+                        m.unit_id: memory_metadata(m.metadata)
+                        for m in await store.get_memories(
+                            conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=source_ids
+                        )
+                    }
+                    if source_ids
+                    else {}
+                )
+            return {
+                obs_id: [dict(metadata_by_id[s]) for s in ids if s in metadata_by_id]
+                for obs_id, ids in sources_by_obs.items()
+            }
+
+        settings = admission.settings
+        outcome = await admission.decide(
+            scored_results,
+            historical=historical,
+            load_embeddings=load_embeddings,
+            jev=jev_client() if settings.scorer is not ScorerKind.DETERMINISTIC else None,
+            load_source_metadata=load_source_metadata,
+            rank_based_relevance=rank_based_relevance,
+        )
+        kept = admission.apply(scored_results)
+        if admission.mode.changes_results and adaptive is not None and adaptive.counterfactual is not None:
+            # The factor-free replay is compared over the same admitted set the recall returns.
+            admitted = set(outcome.admitted_ids)
+            adaptive.counterfactual = [sr for sr in adaptive.counterfactual if sr.id in admitted]
+        tracer.add_phase_metric(
+            "context_admission",
+            time.perf_counter() - start,
+            {
+                "mode": admission.mode.value,
+                "scorer": settings.scorer.value,
+                "candidates": len(outcome.decisions),
+                "admitted": len(outcome.admitted_ids),
+                "abstained": outcome.abstained,
+            },
+        )
+        log_buffer.append(
+            f"  [4.95] Context admission [{admission.mode.value}, {settings.scorer.value}"
+            f"{', relevance from semantic' if rank_based_relevance else ''}"
+            f"{', jev failed: ' + outcome.jev_error if outcome.jev_error else ''}]: admitted "
+            f"{len(outcome.admitted_ids)} of {len(outcome.decisions)} (threshold {outcome.threshold:.2f}"
+            f"{', abstained' if outcome.abstained else ''})"
+        )
+        return kept
+
+    def _finish_context_admission(
+        self,
+        admission: ContextAdmissionRecall,
+        tracer: "SearchTracer",
+        *,
+        enable_trace: bool,
+        bank_id: str,
+        final_ids: list[str],
+        prefer_observations: bool,
+        rerank_limit: int,
+        max_tokens: int,
+    ) -> None:
+        """Record the gate's metrics (and, observe mode, its replayed tail) and the trace summary."""
+        outcome = admission.outcome
+        if outcome is None:
+            return
+        observed = admission.finish(
+            final_ids, prefer_observations=prefer_observations, rerank_limit=rerank_limit, max_tokens=max_tokens
+        )
+        reasons = outcome.reason_counts()
+        cross_scope = outcome.cross_scope_candidates(admission.settings.hard_scope_keys)
+        get_metrics_collector().record_context_admission(
+            mode=admission.mode.value,
+            scorer=outcome.scorer.value,
+            bank_id=bank_id,
+            candidates=len(outcome.decisions),
+            admitted=len(outcome.admitted_ids),
+            abstained=outcome.abstained,
+            rejected=reasons,
+            cross_scope_candidates=cross_scope,
+            would_drop=observed.would_drop if observed is not None else None,
+            would_abstain=observed.would_abstain if observed is not None else None,
+            would_change_top_k=observed.would_change_top_k if observed is not None else None,
+        )
+        # `enable_trace`, NOT `if tracer`: see the tracer construction in _search_with_retries.
+        if enable_trace:
+            tracer.context_admission = ContextAdmissionTraceInfo(
+                mode=admission.mode.value,
+                scorer=outcome.scorer.value,
+                purpose=admission.purpose.value,
+                threshold=outcome.threshold,
+                historical=admission.historical,
+                reference_signal=outcome.reference_signal,
+                candidates=len(outcome.decisions),
+                admitted=len(outcome.admitted_ids),
+                abstained=outcome.abstained,
+                reasons=reasons,
+                cross_scope_candidates=cross_scope,
+                decisions=[
+                    ContextAdmissionCandidateTrace(
+                        memory_id=d.memory_id,
+                        base_retrieval_score=d.base_retrieval_score,
+                        scope_score=d.scope_score,
+                        task_relevance=d.task_relevance,
+                        expected_utility=d.expected_utility,
+                        truth_status=d.truth_status,
+                        retrievability=d.retrievability,
+                        admission_score=d.admission_score,
+                        admitted=d.admitted,
+                        reason=d.reason.value,
+                        tokens=d.tokens,
+                        duplicates=d.duplicates,
+                        scope={k: v.value for k, v in d.scope.items()},
+                        features=dict(d.features),
+                    )
+                    for d in outcome.decisions
+                ],
+                shadow_final_ids=observed.shadow_ids if observed is not None else None,
+                would_change_top_k=observed.would_change_top_k if observed is not None else None,
+                would_drop=observed.would_drop if observed is not None else None,
+                jev_error=outcome.jev_error,
+                embeddings_error=outcome.embeddings_error,
+                relevance_source=outcome.relevance_source,
+                scope_error=outcome.scope_error,
+            )
+
+    async def _apply_lifecycle_view(
+        self,
+        bank_id: str,
+        backend,
+        tracer: "SearchTracer",
+        merged_candidates: list[MergedCandidate],
+        *,
+        query: str,
+        settings: AdaptiveSettings,
+        lifecycle_view: str | None,
+        as_of: datetime | None,
+        detect_historical_cues: bool,
+        detected_temporal_constraint: tuple[datetime, datetime] | None,
+        max_candidates: int,
+        enable_trace: bool,
+        log_buffer: list[str],
+    ) -> list[MergedCandidate]:
+        """Remove the merged candidates the recall's claim view does not show (lifecycle mode).
+
+        Returns the kept candidates, annotated, in the order the reranker trim keeps them. Fails
+        closed: a claim read that raises fails the recall with :class:`ClaimStateUnavailable` (HTTP
+        503) rather than show claims it could not check, for every view (consolidation's internal
+        one included). Timed as the non-diagnostic ``lifecycle_claim_load`` phase.
+        """
+        from .memories import get_memories
+
+        start = time.perf_counter()
+        cue = None
+        if detect_historical_cues:
+            cue = detect_historical_cue(
+                query, detected_temporal_constraint[0] if detected_temporal_constraint is not None else None
+            )
+            if cue is not None:
+                get_metrics_collector().record_adaptive_historical_cue(bank_id=bank_id, cue=cue.cue)
+        view = resolve_view(
+            requested=lifecycle_view,
+            as_of=as_of,
+            default_view=settings.default_view,
+            cue_name=cue.cue if cue is not None else None,
+            cue_as_of=cue.as_of if cue is not None else None,
+        )
+        store = get_memories()
+
+        async def load_claims(memory_ids: list[str]):
+            async with acquire_with_retry(backend) as conn:
+                return await store.claims_for(conn, bank_id=bank_id, memory_ids=memory_ids)
+
+        try:
+            outcome = await filter_candidates_by_claims(
+                in_trim_order(merged_candidates, max_candidates, get_config().recall_strategy_boosts),
+                view=view,
+                target=max_candidates,
+                load_claims=load_claims,
+            )
+        except Exception as e:
+            logger.error(f"[RECALL {bank_id[:8]}] claim lifecycle state could not be read ({type(e).__name__}: {e})")
+            raise ClaimStateUnavailable(
+                "The memories' claim lifecycle state could not be read, so the recall cannot tell current "
+                "memories from retired ones; try again."
+            ) from e
+
+        superseded = sum(1 for r in outcome.removed if r.claim.truth_status is TruthStatus.SUPERSEDED)
+        refuted = sum(1 for r in outcome.removed if r.claim.truth_status is TruthStatus.REFUTED)
+        get_metrics_collector().record_adaptive_lifecycle_filtered(
+            bank_id=bank_id, view=view.name, superseded=superseded, refuted=refuted
+        )
+        if outcome.removed or outcome.unchecked:
+            log_buffer.append(
+                f"  [3.5] Lifecycle view [{view.name}{f', cue={view.cue}' if view.cue else ''}]: removed "
+                f"{len(outcome.removed)} of {outcome.claims_checked} checked "
+                f"({superseded} superseded, {refuted} refuted), {outcome.unchecked} unchecked dropped"
+            )
+        # `enable_trace`, NOT `if tracer`: see the tracer construction in _search_with_retries.
+        if enable_trace:
+            tracer.lifecycle = LifecycleTraceInfo(
+                view=view.name,
+                as_of=view.as_of,
+                historical_cue=view.cue,
+                claims_checked=outcome.claims_checked,
+                refill_rounds=outcome.refill_rounds,
+            )
+            tracer.lifecycle_filtered = [
+                LifecycleFilteredResult(
+                    node_id=r.memory_id,
+                    truth_status=r.claim.truth_status.value,
+                    retired_via=r.claim.retired_via,
+                    superseded_by=r.claim.superseded_by_id,
+                )
+                for r in outcome.removed
+            ]
+        tracer.add_phase_metric(
+            "lifecycle_claim_load",
+            time.perf_counter() - start,
+            {
+                "view": view.name,
+                "claims_checked": outcome.claims_checked,
+                "removed": len(outcome.removed),
+                "refill_rounds": outcome.refill_rounds,
+                "unchecked": outcome.unchecked,
+            },
+        )
+        return outcome.kept
 
     async def _search_with_retries(
         self,
@@ -9389,6 +10229,14 @@ class MemoryEngine(MemoryEngineInterface):
         enable_text_search: bool = True,
         enable_temporal_retrieval: bool = True,
         enable_graph_retrieval: bool = True,
+        recency_route: "asyncio.Task[bool | None] | None" = None,
+        jev_reranker: GuardedRanker | None = None,
+        adaptive_settings: AdaptiveSettings | None = None,
+        lifecycle_view: str | None = None,
+        as_of: datetime | None = None,
+        detect_historical_cues: bool = False,
+        exclude_retired: bool = False,
+        context_admission: ContextAdmissionRecall | None = None,
     ) -> RecallResultModel:
         """
         Search implementation with modular retrieval and reranking.
@@ -9415,6 +10263,18 @@ class MemoryEngine(MemoryEngineInterface):
             max_entity_tokens: Maximum tokens for entity observations
             include_chunks: Whether to include raw chunks (fetched before max_tokens filtering)
             max_chunk_tokens: Maximum tokens for chunks
+            adaptive_settings: The bank's adaptive-memory settings, or None when its effective
+                mode is off (nothing adaptive runs then)
+            lifecycle_view: The caller's claim view (see :meth:`recall_async`); lifecycle mode only
+            as_of: The caller's validity instant (see :meth:`recall_async`); lifecycle mode only
+            detect_historical_cues: Check the query for historical cues before the claim view is
+                chosen (an external lifecycle-mode recall that named no view, in a bank with
+                ``adaptive_memory_historical_cues`` on)
+            exclude_retired: Drop superseded and refuted memories inside the store's retrieval
+                arms, before their limits (lifecycle mode; consolidation's live pool), so retired
+                near-twins cannot take the slots of live ones
+            context_admission: The recall's context-admission gate, or None when it does not run
+                (an internal recall, or a bank whose context_admission_mode is off)
 
         Returns:
             RecallResultModel with results, trace, optional entities, and optional chunks
@@ -9446,6 +10306,8 @@ class MemoryEngine(MemoryEngineInterface):
         )
         tracer.phases_only = not enable_trace
         tracer.start()
+        if context_admission is not None:
+            context_admission.reset()
 
         backend_acquire_start = time.perf_counter()
         backend = await self._get_read_backend()
@@ -9521,61 +10383,82 @@ class MemoryEngine(MemoryEngineInterface):
             from .memories import get_memories as _get_memories_for_full_recall
 
             _full_start = time.perf_counter()
-            _store_result = await _get_memories_for_full_recall().full_recall(
-                FullRecallRequest(
-                    bank_id=bank_id,
-                    fact_types=list(fact_type),
-                    query_embedding=str(query_embedding),
-                    query_text=query,
-                    limit=thinking_budget,
-                    # The field is declared `tuple[datetime, datetime] | None`, and a store that
-                    # claims the recall reads it as one. `temporal_window` is a `TemporalWindow`
-                    # here, so it is unpacked at the boundary rather than handed over as the model
-                    # -- the same conversion the pipeline below does for `recall_unified`.
-                    # `FullRecallRequest` does not validate at construction, so passing the model
-                    # through surfaces only inside the store, as a TypeError on the first index.
-                    temporal_window=(
-                        (temporal_window.start, temporal_window.end) if temporal_window is not None else None
-                    ),
-                    tags=tags,
-                    tags_match=tags_match,
-                    tag_groups=tag_groups,
-                    created_after=created_after,
-                    created_before=created_before,
-                    min_semantic=min_scores.semantic if min_scores else None,
-                    min_keyword=min_scores.keyword if min_scores else None,
-                    enable_text_search=enable_text_search,
-                    enable_graph=enable_graph_retrieval,
-                    reranking=reranking,
-                    reranker_provider=getattr(self._cross_encoder_reranker.cross_encoder, "primary_provider_name", ""),
-                    reranker_max_candidates=(
-                        reranker_max_candidates
-                        if reranker_max_candidates is not None
-                        else get_config().reranker_max_candidates
-                    ),
-                    per_source_cap=get_config().recall_max_candidates_per_source,
-                    strategy_boosts=get_config().recall_strategy_boosts,
-                    recency_decay_function=get_config().recency_decay_function,
-                    recency_decay_linear_window_days=get_config().recency_decay_linear_window_days,
-                    recency_decay_halflife_days=get_config().recency_decay_halflife_days,
-                    # Resolved here, not in the store: `question_date` overrides "now", and two
-                    # clocks would make an identical request score differently on the two paths.
-                    now=_recall_scoring_now(question_date),
-                    min_reranker=min_scores.reranker if min_scores else None,
-                    min_final=min_scores.final if min_scores else None,
-                    truncate_to=thinking_budget * 2,
-                    max_tokens=max_tokens,
-                    tokenizer_encoding=get_config().tokenizer_encoding,
-                    include_entities=include_entities,
-                    include_chunks=include_chunks,
-                    max_chunk_tokens=max_chunk_tokens,
-                    # An observation carries its source ids, so the store answers all three of
-                    # these itself: the dedup, the provenance, and the chunks an observation has
-                    # none of and inherits from its sources.
-                    prefer_observations=prefer_observations,
-                    include_source_facts=include_source_facts,
-                    max_source_facts_tokens=max_source_facts_tokens,
-                    max_source_facts_tokens_per_observation=max_source_facts_tokens_per_observation,
+            # A gated recall is never offered: the admission gate judges the candidates this
+            # pipeline holds, so a store answering the whole recall would skip it.
+            _store_result = (
+                None
+                if context_admission is not None
+                else await _get_memories_for_full_recall().full_recall(
+                    FullRecallRequest(
+                        bank_id=bank_id,
+                        fact_types=list(fact_type),
+                        query_embedding=str(query_embedding),
+                        query_text=query,
+                        limit=thinking_budget,
+                        # The field is declared `tuple[datetime, datetime] | None`, and a store that
+                        # claims the recall reads it as one. `temporal_window` is a `TemporalWindow`
+                        # here, so it is unpacked at the boundary rather than handed over as the model
+                        # -- the same conversion the pipeline below does for `recall_unified`.
+                        # `FullRecallRequest` does not validate at construction, so passing the model
+                        # through surfaces only inside the store, as a TypeError on the first index.
+                        temporal_window=(
+                            (temporal_window.start, temporal_window.end) if temporal_window is not None else None
+                        ),
+                        tags=tags,
+                        tags_match=tags_match,
+                        tag_groups=tag_groups,
+                        created_after=created_after,
+                        created_before=created_before,
+                        min_semantic=min_scores.semantic if min_scores else None,
+                        min_keyword=min_scores.keyword if min_scores else None,
+                        enable_text_search=enable_text_search,
+                        enable_graph=enable_graph_retrieval,
+                        reranking=reranking,
+                        reranker_provider=getattr(
+                            self._cross_encoder_reranker.cross_encoder, "primary_provider_name", ""
+                        ),
+                        reranker_max_candidates=(
+                            reranker_max_candidates
+                            if reranker_max_candidates is not None
+                            else get_config().reranker_max_candidates
+                        ),
+                        per_source_cap=get_config().recall_max_candidates_per_source,
+                        strategy_boosts=get_config().recall_strategy_boosts,
+                        recency_decay_function=await recency_decay_for(
+                            recency_route, get_config().recency_decay_function
+                        ),
+                        recency_decay_linear_window_days=get_config().recency_decay_linear_window_days,
+                        recency_decay_halflife_days=get_config().recency_decay_halflife_days,
+                        # Resolved here, not in the store: `question_date` overrides "now", and two
+                        # clocks would make an identical request score differently on the two paths.
+                        now=_recall_scoring_now(question_date),
+                        min_reranker=min_scores.reranker if min_scores else None,
+                        min_final=min_scores.final if min_scores else None,
+                        truncate_to=thinking_budget * 2,
+                        max_tokens=max_tokens,
+                        tokenizer_encoding=get_config().tokenizer_encoding,
+                        include_entities=include_entities,
+                        include_chunks=include_chunks,
+                        max_chunk_tokens=max_chunk_tokens,
+                        # An observation carries its source ids, so the store answers all three of
+                        # these itself: the dedup, the provenance, and the chunks an observation has
+                        # none of and inherits from its sources.
+                        prefer_observations=prefer_observations,
+                        include_source_facts=include_source_facts,
+                        max_source_facts_tokens=max_source_facts_tokens,
+                        max_source_facts_tokens_per_observation=max_source_facts_tokens_per_observation,
+                        # Lifecycle mode only (None/False otherwise, so every other request is the one
+                        # a store already answers). A store that cannot apply the claim view declines.
+                        lifecycle_view=(
+                            (lifecycle_view or adaptive_settings.default_view)
+                            if adaptive_settings is not None and adaptive_settings.effective_mode.lifecycle
+                            else None
+                        ),
+                        as_of=as_of
+                        if adaptive_settings is not None and adaptive_settings.effective_mode.lifecycle
+                        else None,
+                        historical_cues=detect_historical_cues,
+                    )
                 )
             )
             if _store_result is not None:
@@ -9668,6 +10551,7 @@ class MemoryEngine(MemoryEngineInterface):
                         enable_text_search=enable_text_search,
                         enable_temporal_retrieval=enable_temporal_retrieval,
                         enable_graph_retrieval=enable_graph_retrieval,
+                        **({"exclude_retired": True} if exclude_retired else {}),
                     )
                     parallel_duration = time.perf_counter() - parallel_start
             finally:
@@ -9977,6 +10861,32 @@ class MemoryEngine(MemoryEngineInterface):
                 tracer.add_rrf_merged(tracer_merged)
             tracer.add_phase_metric("rrf_merge", step_duration, {"candidates_merged": len(merged_candidates)})
 
+            # Step 3.5: the claim view (adaptive memory lifecycle mode). Claims are read for the
+            # candidates the reranker trim would keep, plus a slack, in the trim's own order; the
+            # ones the view does not show are removed HERE, so the trim backfills from the fusion
+            # tail and the reranker never scores a retired claim. A removal, so it applies on every
+            # ranking branch below (decision model and interleave included).
+            if adaptive_settings is not None and adaptive_settings.effective_mode.lifecycle:
+                merged_candidates = await self._apply_lifecycle_view(
+                    bank_id,
+                    backend,
+                    tracer,
+                    merged_candidates,
+                    query=query,
+                    settings=adaptive_settings,
+                    lifecycle_view=lifecycle_view,
+                    as_of=as_of,
+                    detect_historical_cues=detect_historical_cues,
+                    detected_temporal_constraint=detected_temporal_constraint,
+                    max_candidates=(
+                        reranker_max_candidates
+                        if reranker_max_candidates is not None
+                        else get_config().reranker_max_candidates
+                    ),
+                    enable_trace=enable_trace,
+                    log_buffer=log_buffer,
+                )
+
             # Step 4: Rerank using cross-encoder (MergedCandidate -> ScoredResult)
             step_start = time.perf_counter()
             reranker_instance = self._cross_encoder_reranker
@@ -9991,6 +10901,17 @@ class MemoryEngine(MemoryEngineInterface):
             served_provider: str | None = None
             pre_filtered_count = 0
             rerank_kind = "cross-encoder"
+            # Adaptive memory: per-recall state, and the state load running beside the reranker.
+            adaptive = (
+                AdaptiveRecall(
+                    settings=adaptive_settings,
+                    now=_recall_scoring_now(question_date),
+                    count_tokens=CachedTokenCounter(count_tokens),
+                )
+                if adaptive_settings is not None
+                else None
+            )
+            adaptive_load_task: asyncio.Task[AdaptiveStateLoad] | None = None
             try:
                 # Pre-filter candidates by RRF before the (optional) cross-encoder.
                 # RRF already provides good ranking; this caps cross-encoder cost.
@@ -10053,6 +10974,25 @@ class MemoryEngine(MemoryEngineInterface):
                     {"candidates": len(merged_candidates)},
                 )
 
+                # Adaptive state for the post-trim ids, read on its own connection while the
+                # cross-encoder runs (the candidate set is final here, and the read needs nothing
+                # the reranker produces). Only for the combined-scoring branch: interleave and a
+                # decision model keep their order authoritative and never get a factor, so they
+                # never pay for the read.
+                if (
+                    adaptive is not None
+                    and merged_candidates
+                    and reranking != "interleave"
+                    and not (
+                        reranking == "cross_encoder"
+                        and getattr(reranker_instance.cross_encoder, "primary_provider_name", "")
+                        == DECISION_MODEL_RERANKER
+                    )
+                ):
+                    adaptive_load_task = asyncio.create_task(
+                        self._load_adaptive_state(backend, bank_id, [mc.id for mc in merged_candidates])
+                    )
+
                 if reranking == "cross_encoder":
                     # Cancellation checkpoint: the cross-encoder rerank is the
                     # single most CPU-expensive stage and runs in a worker thread
@@ -10090,12 +11030,36 @@ class MemoryEngine(MemoryEngineInterface):
                         for mc in sorted(merged_candidates, key=lambda mc: mc.rrf_score, reverse=True)
                     ]
 
+                if adaptive is not None and adaptive_load_task is not None:
+                    # A failover onto the decision model makes its order authoritative after all.
+                    if scored_results and served_provider != DECISION_MODEL_RERANKER:
+                        adaptive.receive(await adaptive_load_task)
+                        if adaptive.load_error is not None:
+                            # The retention read has no fail-closed path: ranking continues with factor 1.
+                            logger.warning(
+                                "[RECALL %s] adaptive state load failed (%s: %s); continuing with factor 1",
+                                recall_id,
+                                type(adaptive.load_error).__name__,
+                                adaptive.load_error,
+                            )
+                            get_metrics_collector().record_adaptive_state_load_error(
+                                mode=adaptive.settings.effective_mode.value, bank_id=bank_id
+                            )
+                    else:
+                        adaptive_load_task.cancel()
+                    adaptive_load_task = None
+
                 step_duration = time.perf_counter() - step_start
                 pre_filter_note = f" (pre-filtered {pre_filtered_count})" if pre_filtered_count > 0 else ""
                 log_buffer.append(
                     f"  [4] Reranking [{rerank_kind}]: {len(scored_results)} candidates "
                     f"scored in {step_duration:.3f}s{pre_filter_note}"
                 )
+            except BaseException:
+                # The state read must not outlive a rerank that failed or was cancelled.
+                if adaptive_load_task is not None:
+                    adaptive_load_task.cancel()
+                raise
             finally:
                 rerank_span.set_attribute("hindsight.scored_count", len(scored_results))
                 if pre_filtered_count > 0:
@@ -10133,11 +11097,14 @@ class MemoryEngine(MemoryEngineInterface):
 
                 is_passthrough = stage2_passthrough(reranking, served_provider)
                 scoring_config = get_config()
+                recency_decay_function = await recency_decay_for(recency_route, scoring_config.recency_decay_function)
+                if recency_decay_function != scoring_config.recency_decay_function:
+                    log_buffer.append("  [4.5] Conditional recency: off, the query is not about the current state")
                 apply_combined_scoring(
                     scored_results,
                     now=_recall_scoring_now(question_date),
                     is_passthrough_reranker=is_passthrough,
-                    recency_decay_function=scoring_config.recency_decay_function,
+                    recency_decay_function=recency_decay_function,
                     recency_decay_linear_window_days=scoring_config.recency_decay_linear_window_days,
                     recency_decay_halflife_days=scoring_config.recency_decay_halflife_days,
                 )
@@ -10151,10 +11118,25 @@ class MemoryEngine(MemoryEngineInterface):
                     from .search.recall_boost import apply_post_rerank_boost
 
                     stage2 = apply_post_rerank_boost(scored_results, strategy_boosts, passthrough=is_passthrough)
+                # Adaptive factor: after every boost, before the sort. Observe
+                # computes it and the counterfactual without touching `weight`.
+                adaptive_scored = False
+                if adaptive is not None:
+                    _t0_adaptive = time.perf_counter()
+                    adaptive_scored = adaptive.score(scored_results)
+                    adaptive.scoring_seconds += time.perf_counter() - _t0_adaptive
                 scored_results.sort(key=lambda x: x.weight, reverse=True)
+                if adaptive_scored and adaptive is not None:
+                    # Archived memories were scored with the rest; only a strong cue keeps them.
+                    scored_results = adaptive.suppress_archived(scored_results)
                 log_buffer.append("  [4.6] Combined scoring: ce * recency_boost(0.2) * temporal_boost(0.2)")
                 if strategy_boosts:
                     log_buffer.append(f"  [4.7] Strategy boosts applied: {strategy_boosts} {stage2}")
+                if adaptive_scored and adaptive is not None:
+                    log_buffer.append(
+                        f"  [4.75] Adaptive memory [{adaptive.settings.effective_mode.value}]: "
+                        f"{len(adaptive.states or {})} stored states, alpha={adaptive.settings.score_alpha}"
+                    )
 
             # Step 4.9: post-query min_scores filters (reranker + final). The
             # semantic/text floors are applied earlier inside the SQL arms (see
@@ -10176,16 +11158,41 @@ class MemoryEngine(MemoryEngineInterface):
                 min_reranker = None
             if (min_reranker is not None or min_final is not None) and scored_results:
                 before_min_score = len(scored_results)
-                scored_results = [
-                    sr
-                    for sr in scored_results
-                    if (min_reranker is None or sr.cross_encoder_score_normalized >= min_reranker)
-                    and (min_final is None or sr.weight >= min_final)
-                ]
+                scored_results = filter_min_scores(scored_results, min_reranker=min_reranker, min_final=min_final)
                 log_buffer.append(
                     f"  [4.9] min_scores(reranker={min_reranker}, final={min_final}): "
                     f"{before_min_score}->{len(scored_results)} results"
                 )
+
+            # Step 4.92: the Jev rerank (a recall check, see search/jev_rerank.py). After the floors,
+            # so the pool is the top of what survives them; before the trace and everything below,
+            # which then read the final order. Not for a reranker that already scored the pool by
+            # rank (typesafe, a decision model), nor for the rrf / interleave orders.
+            if (
+                jev_reranker is not None
+                and scored_results
+                and reranking == "cross_encoder"
+                and served_provider not in RANK_SCORE_PROVIDERS
+            ):
+                jev_start = time.perf_counter()
+                jev = await jev_rerank(jev_reranker, query, scored_results, _recall_scoring_now(question_date))
+                scored_results = jev.results
+                if jev.ranked_ids and adaptive is not None and adaptive.counterfactual is not None:
+                    # The counterfactual takes the same order, so adaptive memory still compares
+                    # like with like (exact while its factor leaves the top of the list as it is).
+                    adaptive.counterfactual = ranked_first(adaptive.counterfactual, jev.ranked_ids)
+                jev_seconds = time.perf_counter() - jev_start
+                log_buffer.append(
+                    f"  [4.92] Jev rerank: top {len(jev.ranked_ids)} reordered by {jev_reranker.model}"
+                    if jev.ranked_ids
+                    else f"  [4.92] Jev rerank: local order kept ({jev.error or 'nothing to order'})"
+                )
+                tracer.add_phase_metric(
+                    "jev_rerank",
+                    jev_seconds,
+                    {"model": jev_reranker.model, "reordered": len(jev.ranked_ids), "error": jev.error},
+                )
+                get_metrics_collector().record_recall_phase("jev_rerank", jev_seconds, diagnostic=True)
 
             # Add reranked results to tracer AFTER combined scoring (so normalized values are included)
             # `enable_trace`, NOT `if tracer`: see the retrieval-results guard above.
@@ -10209,6 +11216,42 @@ class MemoryEngine(MemoryEngineInterface):
                 {"candidates_scored": len(scored_results)},
             )
 
+            # True when the reranker is a passthrough (rrf / interleave modes, or the
+            # RRFPassthroughCrossEncoder) or scores by rank position (RANK_SCORE_PROVIDERS, #4901): its
+            # cross_encoder_score_normalized is then a rank-derived placeholder, not a true
+            # relevance score. Read by context admission below and by the result scores.
+            reranker_passthrough = (
+                (reranking != "cross_encoder") or served_provider == "rrf" or served_provider in RANK_SCORE_PROVIDERS
+            )
+
+            # Step 4.95: context admission. After the min_scores floors and before the
+            # prefer-observations dedup, so the dedup, the truncation and the token budget run on
+            # the admitted set (filter, strict) and the observe-mode shadow replays that same tail.
+            if context_admission is not None and scored_results:
+                scored_results = await self._apply_context_admission(
+                    context_admission,
+                    bank_id,
+                    backend,
+                    tracer,
+                    scored_results,
+                    historical=(
+                        context_admission.purpose is Purpose.HISTORICAL_SEARCH
+                        or lifecycle_view in ("historical", "all-with-status")
+                        or as_of is not None
+                        or (
+                            detect_historical_cues
+                            and detect_historical_cue(
+                                query,
+                                detected_temporal_constraint[0] if detected_temporal_constraint is not None else None,
+                            )
+                            is not None
+                        )
+                    ),
+                    rank_based_relevance=reranker_passthrough,
+                    adaptive=adaptive,
+                    log_buffer=log_buffer,
+                )
+
             # Cancellation checkpoint: reranking is done; skip the remaining
             # enrichment (chunk/entity/source-fact fetches, each its own DB work)
             # if the client disconnected while we were reranking (issue #2122).
@@ -10222,19 +11265,42 @@ class MemoryEngine(MemoryEngineInterface):
             # the next-best results, keeping the result count at the budget. No-op unless
             # 'observation' and at least one raw type were both requested.
             raw_types_requested = {"world", "experience"} & set(fact_type)
-            if prefer_observations and "observation" in fact_type and raw_types_requested:
+            dedup_observations = bool(prefer_observations and "observation" in fact_type and raw_types_requested)
+            if dedup_observations:
                 # "The observation list" = observations within the window we would return.
                 # Only those can supersede a raw fact; a far-down observation should not
                 # suppress a top raw fact it merely happens to reference.
-                observation_srs = [
-                    sr for sr in scored_results[: thinking_budget * 2] if sr.retrieval.fact_type == "observation"
-                ]
+                observation_srs = observations_in_window(scored_results, thinking_budget * 2)
                 observation_ids = [uuid.UUID(sr.id) for sr in observation_srs]
-                if observation_ids:
+                # Adaptive memory replays this dedup over its counterfactual order, whose window
+                # can hold observations this one does not. Their sources ride on the same read
+                # (the copies share `retrieval` with these results), so the replay needs no query
+                # of its own. Empty when adaptive memory is off: the read is exactly as before.
+                in_window = {sr.id for sr in observation_srs}
+                counterfactual_srs = (
+                    [
+                        sr
+                        for sr in adaptive.counterfactual_window_observations(
+                            min_reranker=min_reranker, min_final=min_final, window=thinking_budget * 2
+                        )
+                        if sr.id not in in_window
+                    ]
+                    if adaptive is not None
+                    else []
+                )
+                # The observe-mode admission shadow replays the dedup too; same rule.
+                if context_admission is not None and context_admission.shadow is not None:
+                    _read_ids = in_window | {sr.id for sr in counterfactual_srs}
+                    counterfactual_srs += [
+                        sr
+                        for sr in observations_in_window(context_admission.shadow, thinking_budget * 2)
+                        if sr.id not in _read_ids
+                    ]
+                if observation_ids or counterfactual_srs:
                     dedup_start = time.perf_counter()
-                    superseded_ids: set[str] = set()
                     from .memories import get_memories
 
+                    read_srs = observation_srs + counterfactual_srs
                     # A backend that carries an observation's sources on the recalled result has
                     # already paid for this record — hydration fetched it whole, so skip the read.
                     # Same all-or-nothing shape as the entity fast path: one observation that did
@@ -10242,7 +11308,7 @@ class MemoryEngine(MemoryEngineInterface):
                     # all. The resolved sources are written back onto sr.retrieval (previously they
                     # were read into a local and discarded), so the store-owned chunk walk in Step
                     # 5.5 and the source-facts step reuse them instead of reading them a second time.
-                    if not all(sr.retrieval.source_memory_ids is not None for sr in observation_srs):
+                    if not all(sr.retrieval.source_memory_ids is not None for sr in read_srs):
                         async with self._store_read_conn(bank_id) as dedup_conn:
                             obs_by_id = {
                                 m.unit_id: [str(s) for s in (m.source_memory_ids or [])]
@@ -10250,11 +11316,11 @@ class MemoryEngine(MemoryEngineInterface):
                                     conn=dedup_conn,
                                     fq_table=fq_table,
                                     bank_id=bank_id,
-                                    unit_ids=[str(o) for o in observation_ids],
+                                    unit_ids=[str(uuid.UUID(sr.id)) for sr in read_srs],
                                 )
                                 if m.fact_type == "observation"
                             }
-                            for sr in observation_srs:
+                            for sr in read_srs:
                                 if sr.id in obs_by_id:
                                     sr.retrieval.source_memory_ids = obs_by_id[sr.id]
                     tracer.add_phase_metric(
@@ -10262,16 +11328,10 @@ class MemoryEngine(MemoryEngineInterface):
                         time.perf_counter() - dedup_start,
                         {"observations_considered": len(observation_ids)},
                     )
-                    for sr in observation_srs:
-                        for sid in sr.retrieval.source_memory_ids or []:
-                            superseded_ids.add(str(sid))
+                    superseded_ids = superseded_source_ids(observation_srs)
                     if superseded_ids:
                         before_count = len(scored_results)
-                        scored_results = [
-                            sr
-                            for sr in scored_results
-                            if not (sr.retrieval.fact_type in ("world", "experience") and sr.id in superseded_ids)
-                        ]
+                        scored_results = drop_superseded_raw_facts(scored_results, superseded_ids)
                         log_buffer.append(
                             f"  [4.8] prefer_observations: dropped {before_count - len(scored_results)} "
                             f"raw fact(s) superseded by {len(observation_ids)} observation(s)"
@@ -10416,11 +11476,42 @@ class MemoryEngine(MemoryEngineInterface):
                 fact_ids_ordered=[sr.id for sr in top_scored],
                 text_by_id={sr.id: sr.retrieval.text for sr in top_scored},
                 max_tokens=max_tokens,
-                count_tokens=count_tokens,
+                # The memoised counter only when adaptive memory or admission will replay this budget.
+                count_tokens=(
+                    adaptive.count_tokens
+                    if adaptive is not None
+                    else context_admission.count_tokens
+                    if context_admission is not None
+                    else count_tokens
+                ),
             )
             total_tokens = selection.total_tokens
             selected_ids = set(selection.ids)
             top_scored = [sr for sr in top_scored if sr.id in selected_ids]
+            if adaptive is not None:
+                self._finish_adaptive_recall(
+                    adaptive,
+                    tracer,
+                    enable_trace=enable_trace,
+                    bank_id=bank_id,
+                    top_scored=top_scored,
+                    min_reranker=min_reranker,
+                    min_final=min_final,
+                    prefer_observations=dedup_observations,
+                    rerank_limit=rerank_limit,
+                    max_tokens=max_tokens,
+                )
+            if context_admission is not None:
+                self._finish_context_admission(
+                    context_admission,
+                    tracer,
+                    enable_trace=enable_trace,
+                    bank_id=bank_id,
+                    final_ids=[sr.id for sr in top_scored],
+                    prefer_observations=dedup_observations,
+                    rerank_limit=rerank_limit,
+                    max_tokens=max_tokens,
+                )
 
             step_duration = time.perf_counter() - step_start
             truncated_note = " (truncated)" if selection.truncated else ""
@@ -10632,14 +11723,8 @@ class MemoryEngine(MemoryEngineInterface):
 
             # Convert results to MemoryFact objects
             # Build per-result scores (final/reranker/semantic/text) keyed by id.
-            # reranker is None when the configured reranker is a passthrough (rrf /
-            # interleave modes, or the RRFPassthroughCrossEncoder) or scores by rank
-            # position (RANK_SCORE_PROVIDERS, #4901), since its
-            # cross_encoder_score_normalized is then a rank-derived placeholder, not a
-            # true relevance score.
-            reranker_passthrough = (
-                (reranking != "cross_encoder") or served_provider == "rrf" or served_provider in RANK_SCORE_PROVIDERS
-            )
+            # reranker is None when the reranker is a passthrough or scores by rank
+            # (reranker_passthrough, at Step 4.95).
             scores_by_id: dict[str, RecallScores] = {
                 sr.id: RecallScores(
                     final=sr.weight,
@@ -10650,6 +11735,8 @@ class MemoryEngine(MemoryEngineInterface):
                 for sr in top_scored
             }
 
+            # Claim annotations (lifecycle mode; empty otherwise), set by the pre-trim claim view.
+            lifecycle_by_id = {sr.id: sr.candidate.lifecycle for sr in top_scored if sr.candidate.lifecycle is not None}
             memory_facts = []
             for result_dict in top_results_dicts:
                 result_id = str(result_dict.get("id"))
@@ -10675,6 +11762,7 @@ class MemoryEngine(MemoryEngineInterface):
                         source_fact_ids=source_fact_ids_by_obs.get(result_id) if include_source_facts else None,
                         scores=scores_by_id.get(result_id),
                         attachment_ids=result_dict.get("attachment_ids"),
+                        lifecycle=lifecycle_by_id.get(result_id),
                     )
                 )
 
@@ -10720,6 +11808,14 @@ class MemoryEngine(MemoryEngineInterface):
                 tracer.add_phase_metric("semaphore_wait", semaphore_wait, {"diagnostic": True})
             if max_conn_wait > 0:
                 tracer.add_phase_metric("connection_wait", max_conn_wait, {"diagnostic": True})
+            # Adaptive memory: the state load runs beside the cross-encoder (a subset of
+            # `reranking`), and its scoring is spread over `combined_scoring` and
+            # `token_filtering` (the counterfactual replay), so both are subsets too.
+            if adaptive is not None:
+                if adaptive.load_seconds > 0:
+                    tracer.add_phase_metric("adaptive_state_load", adaptive.load_seconds, {"diagnostic": True})
+                if adaptive.scoring_seconds > 0:
+                    tracer.add_phase_metric("adaptive_scoring", adaptive.scoring_seconds, {"diagnostic": True})
 
             # Finalize trace if enabled. finalize() snapshots total_duration_seconds at
             # entry, so its own object construction + to_dict() serialization fall outside
@@ -10813,10 +11909,12 @@ class MemoryEngine(MemoryEngineInterface):
                 source_facts_truncated=source_facts_truncated if include_source_facts else None,
             )
 
-        except OperationCancelledError:
+        except (OperationCancelledError, ClaimStateUnavailable):
             # Client disconnected mid-recall — propagate the cancellation so the
             # HTTP layer can return 499. Must precede the broad handler below,
             # which would otherwise bury it inside a RuntimeError (issue #2122).
+            # A lifecycle-mode claim read that failed propagates the same way, so the
+            # HTTP layer can answer 503 (fail closed) rather than an opaque 500.
             raise
         except Exception as e:
             # Use repr(e) so exceptions with empty __str__ (e.g. raise SomeError())
@@ -11373,6 +12471,7 @@ class MemoryEngine(MemoryEngineInterface):
         *,
         bank_id: str | None = None,
         request_context: "RequestContext",
+        _recheck: Callable[[Any, list[str]], Awaitable[list[str]]] | None = None,
     ) -> dict[str, Any]:
         """Bulk delete memory units, keeping the same lifecycle as the single-id path.
 
@@ -11422,6 +12521,10 @@ class MemoryEngine(MemoryEngineInterface):
                 any other bank are left alone.
             request_context: Request context for authentication (tenant
                 resolution runs before any writes).
+            _recheck: Internal. Called inside the delete transaction, before any
+                write, with the connection and the located ids; only the ids it
+                returns are deleted. Prune passes its eligibility check here, so
+                the decision and the delete see the same locked rows.
 
         Returns:
             Dict with:
@@ -11469,6 +12572,9 @@ class MemoryEngine(MemoryEngineInterface):
                 locations = await store.locate_memories(
                     conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=validated_ids
                 )
+                if _recheck is not None:
+                    keep = set(await _recheck(conn, [loc.unit_id for loc in locations]))
+                    locations = [loc for loc in locations if loc.unit_id in keep]
 
                 # Step 2 — group by bank.
                 by_bank: dict[str, list[str]] = {}
@@ -11556,6 +12662,13 @@ class MemoryEngine(MemoryEngineInterface):
             await self._submit_vector_index_maintenance_quietly(
                 target_bank, request_context, after="bulk memory deletion", grew=False
             )
+
+        # Lifecycle mode: the delete repair may have reverted claims and the deleted memories may
+        # ground documents, so nudge them the way the single-id delete does. Other modes keep the
+        # bulk path as it was (a later consolidation or the cron loop notices).
+        for target_bank, counts in per_bank.items():
+            if counts["deleted"] > 0 and await self._lifecycle_grounding_enabled(target_bank, request_context):
+                await self._submit_refreshes_for_retracted_grounding(target_bank, request_context=request_context)
 
         return {
             "requested": len(unit_ids),
@@ -12669,6 +13782,535 @@ class MemoryEngine(MemoryEngineInterface):
 
         return await self.get_memory_unit(bank_id=bank_id, memory_id=memory_id, request_context=request_context)
 
+    async def _adaptive_settings_for_bank(self, bank_id: str, request_context: "RequestContext") -> AdaptiveSettings:
+        """The bank's adaptive-memory settings, from its resolved config and the static config."""
+        from .memories import get_memories
+
+        bank_config = await self._config_resolver.get_bank_config(bank_id, request_context)
+        return AdaptiveSettings.resolve(
+            bank_config, get_config(), store_supports=get_memories().supports_adaptive_state_for(bank_id)
+        )
+
+    async def records_minted_document_ids(self, bank_id: str, *, request_context: "RequestContext") -> bool:
+        """Whether a retain into this bank records a server-minted document id as such.
+
+        ``retain_batch`` marks the ids it mints itself (``document_id_minted``), but the HTTP layer
+        mints some before the engine sees the item: ``retain_<uuid>`` for an item with attachments
+        and ``file_<uuid>`` for an uploaded file, because the bytes are stored under the document's
+        key first. It asks this before setting the same mark on the item, so the rule is the one
+        ``retain_batch`` applies: only while the bank's adaptive mode writes state (rank/lifecycle).
+        An off or observe bank's items, operation payloads and ``retain_params`` stay unchanged.
+        """
+        await self._authenticate_tenant(request_context)
+        config = await self._config_resolver.resolve_full_config(bank_id, request_context)
+        return write_settings(config, bank_id=bank_id) is not None
+
+    async def _authorize_lifecycle_write(
+        self, bank_id: str, memory_id: str, operation: "BankWriteOperation", request_context: "RequestContext"
+    ) -> None:
+        """The access checks of a by-id adaptive-memory write, the same ones curation runs."""
+        await self._authenticate_tenant(request_context)
+        if self._operation_validator:
+            from hindsight_api.extensions import BankWriteContext
+
+            ctx = BankWriteContext(bank_id=bank_id, operation=operation, request_context=request_context)
+            await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
+        await self._require_writable(bank_id, request_context, memory_id=memory_id)
+
+    async def confirm_memory(
+        self,
+        bank_id: str,
+        memory_id: str,
+        *,
+        source_key: str | None = None,
+        event_time: datetime | None = None,
+        request_context: "RequestContext",
+    ) -> MemoryConfirmation | None:
+        """Record an explicit confirmation that a memory still holds (an ``explicit_confirmation`` event).
+
+        The event goes through the reinforcement ledger, so a ``source_key`` confirms a memory at
+        most once: re-sending it is ``deduplicated`` and changes nothing, which makes a retried
+        request safe. Without a key every call is its own piece of evidence. ``event_time`` (naive
+        means UTC) dates the confirmation, default now; it may lie in the past (an evaluation
+        replaying history) but not in the future, beyond :data:`_CONFIRM_CLOCK_SKEW` of clock skew,
+        which counts as now. Observations can be confirmed too.
+
+        Returns None when the memory is not live in the bank (missing, or curation-invalidated).
+        Raises ``OperationValidationError`` (409) when the bank's adaptive-memory mode is not
+        ``rank``/``lifecycle`` or its reinforcement is switched off: observe mode must not change
+        state, so nothing is recorded. ``ValueError`` for a malformed id, key or time.
+        """
+        try:
+            memory_uuid = uuid.UUID(memory_id)
+        except ValueError:
+            raise ValueError(f"Invalid memory_id: '{memory_id}' is not a valid UUID")
+        if source_key is not None:
+            source_key = source_key.strip()
+            if not source_key:
+                raise ValueError("source_key must not be blank.")
+            if len(source_key) > _CONFIRM_SOURCE_KEY_MAX_LENGTH:
+                raise ValueError(f"source_key must be at most {_CONFIRM_SOURCE_KEY_MAX_LENGTH} characters.")
+        unit_id = str(memory_uuid)
+
+        from hindsight_api.extensions import BankWriteOperation, OperationValidationError
+
+        await self._authorize_lifecycle_write(bank_id, unit_id, BankWriteOperation.CONFIRM_MEMORY, request_context)
+        settings = await self._adaptive_settings_for_bank(bank_id, request_context)
+        if not (settings.effective_mode.applies_factor and settings.reinforcement_enabled):
+            raise OperationValidationError(
+                f"Bank '{bank_id}' does not record reinforcement (adaptive memory mode "
+                f"'{settings.effective_mode.value}', reinforcement "
+                f"{'on' if settings.reinforcement_enabled else 'off'}); confirming a memory needs mode "
+                "'rank' or 'lifecycle' with reinforcement enabled.",
+                status_code=409,
+            )
+
+        from .adaptive import clock
+        from .adaptive.evidence import reinforcement_event
+        from .memories import get_memories
+
+        now = clock.utcnow()
+        event = reinforcement_event(
+            memory_id=unit_id,
+            source_type="explicit_confirmation",
+            source_key=source_key if source_key is not None else f"explicit:{uuid.uuid4()}",
+            event_time=_confirmation_time(event_time, now),
+            settings=settings,
+        )
+        async with acquire_with_retry(await self._get_backend()) as conn:
+            result = await get_memories().record_reinforcement(
+                conn, bank_id=bank_id, events=[event], settings=settings, now=now, background=False
+            )
+        if len(result.events) != 1:
+            raise RuntimeError(f"The memories store reported {len(result.events)} outcomes for one confirmation event")
+        recorded = result.events[0]
+        if recorded.outcome == "skipped_missing":
+            return None
+        if recorded.outcome == "disabled":
+            raise OperationValidationError(f"Bank '{bank_id}' does not record reinforcement.", status_code=409)
+        state = result.states.get(unit_id)
+        return MemoryConfirmation(
+            memory_id=unit_id,
+            recorded=recorded.persisted,
+            deduplicated=recorded.outcome == "deduplicated",
+            outcome=recorded.outcome,
+            stability_days=state.stability_days if state is not None else None,
+            reinforcement_count=state.reinforcement_count if state is not None else None,
+        )
+
+    async def update_memory_lifecycle(
+        self,
+        bank_id: str,
+        memory_id: str,
+        *,
+        importance: float | None = None,
+        forgetting_exempt: bool | None = None,
+        exemption_reason: str | None = None,
+        truth_status: str | None = None,
+        superseded_by: str | None = None,
+        reason: str | None = None,
+        hold: bool | None = None,
+        retention_state: str | None = None,
+        request_context: "RequestContext",
+    ) -> "MemoryLifecycle | None":
+        """Change a memory's retention policy and/or what should be believed about it; returns its
+        lifecycle view after.
+
+        ``hold=True`` is an exemption whose reason is ``hold`` (never archived, never pruned);
+        ``hold=False`` lifts the exemption. ``retention_state='active'`` returns an archived memory
+        to normal recall. Both are retention changes.
+
+        Retention (``rank`` or ``lifecycle`` mode): ``importance`` in [0, 1] (0.5 is neutral)
+        rescales the stability the memory has learned by the ratio of the importance multipliers,
+        so earlier reinforcement is kept. An exempt memory always reads as fully retrievable.
+        Turning the exemption off clears its reason.
+
+        Truth (``lifecycle`` mode only), ``truth_status``:
+
+        - ``superseded`` / ``refuted``: retire the claim (it must be active or uncertain; 409
+          otherwise). ``superseded_by`` names the memory that replaces it, validated as
+          consolidation validates its own actions (live in the same bank, identical tags, not the
+          memory itself). On an observation its raw sources inherit the status, unless another
+          live observation still stands on them; on a raw fact the observations built on it are
+          rebuilt from their remaining sources (the sweep invalidation runs), while the fact itself
+          stays out of consolidation.
+        - ``active``: restore a retired or uncertain claim (and, for an observation, the raw facts
+          that inherited its retirement); a restored raw fact is consolidated again.
+        - ``uncertain``: mark the claim contested.
+
+        Every retirement writes an ``explicit`` lifecycle relation; mental models whose grounding
+        changed are refreshed after the commit. ``reason`` is recorded on the claim. ``None``
+        leaves a field as it is, and at least one must be set.
+
+        Returns None when the memory is not live in the bank. Raises ``OperationValidationError``
+        (409) when the bank's mode does not allow the change, or a retirement loses to a claim
+        that is already retired. ``ValueError`` for a malformed id or value, or a successor that
+        cannot replace the memory.
+        """
+        try:
+            memory_uuid = uuid.UUID(memory_id)
+        except ValueError:
+            raise ValueError(f"Invalid memory_id: '{memory_id}' is not a valid UUID")
+        if hold is not None:
+            if forgetting_exempt is not None or exemption_reason is not None:
+                raise ValueError("hold cannot be combined with forgetting_exempt or exemption_reason.")
+            forgetting_exempt = bool(hold)
+            exemption_reason = HOLD_EXEMPTION_REASON if hold else None
+        if retention_state not in (None, "active"):
+            raise ValueError(f"retention_state can only be set to 'active', got {retention_state!r}")
+        policy_change = importance is not None or forgetting_exempt is not None or exemption_reason is not None
+        retention_change = policy_change or retention_state is not None
+        if not retention_change and truth_status is None:
+            raise ValueError(
+                "Set at least one of importance, forgetting_exempt, exemption_reason, hold, retention_state "
+                "or truth_status."
+            )
+        if importance is not None and (
+            isinstance(importance, bool)
+            or not isinstance(importance, (int, float))
+            or not 0.0 <= importance <= 1.0  # also rejects NaN
+        ):
+            raise ValueError(f"importance must be a number in [0, 1], got {importance!r}")
+        if exemption_reason is not None:
+            if forgetting_exempt is False:
+                raise ValueError("exemption_reason cannot be set while turning forgetting_exempt off.")
+            if not exemption_reason.strip():
+                raise ValueError("exemption_reason must not be blank.")
+            if len(exemption_reason) > _EXEMPTION_REASON_MAX_LENGTH:
+                raise ValueError(f"exemption_reason must be at most {_EXEMPTION_REASON_MAX_LENGTH} characters.")
+        status: TruthStatus | None = None
+        if truth_status is not None:
+            try:
+                status = TruthStatus(truth_status)
+            except ValueError:
+                raise ValueError(
+                    f"truth_status must be one of {', '.join(s.value for s in TruthStatus)}, got {truth_status!r}"
+                )
+        successor_id: str | None = None
+        if superseded_by is not None:
+            if status not in (TruthStatus.SUPERSEDED, TruthStatus.REFUTED):
+                raise ValueError("superseded_by needs truth_status 'superseded' or 'refuted'.")
+            try:
+                successor_id = str(uuid.UUID(superseded_by))
+            except ValueError:
+                raise ValueError(f"Invalid superseded_by: '{superseded_by}' is not a valid UUID")
+        if reason is not None:
+            if status is None:
+                raise ValueError("reason is recorded with a truth_status change; set truth_status too.")
+            if not reason.strip():
+                raise ValueError("reason must not be blank.")
+            if len(reason) > _TRUTH_REASON_MAX_LENGTH:
+                raise ValueError(f"reason must be at most {_TRUTH_REASON_MAX_LENGTH} characters.")
+        unit_id = str(memory_uuid)
+        if successor_id == unit_id:
+            raise ValueError("A memory cannot supersede itself.")
+
+        from hindsight_api.extensions import BankWriteOperation, OperationValidationError
+
+        await self._authorize_lifecycle_write(
+            bank_id, unit_id, BankWriteOperation.UPDATE_MEMORY_LIFECYCLE, request_context
+        )
+        if successor_id is not None:
+            # Outside the caller's scope the successor reads as missing, like the target would.
+            await self._require_writable(bank_id, request_context, memory_id=successor_id)
+        settings = await self._adaptive_settings_for_bank(bank_id, request_context)
+        if status is not None and not settings.effective_mode.lifecycle:
+            raise OperationValidationError(
+                f"Bank '{bank_id}' does not keep claim lifecycle (adaptive memory mode "
+                f"'{settings.effective_mode.value}'); changing truth_status needs mode 'lifecycle'.",
+                status_code=409,
+            )
+        if retention_change and not settings.effective_mode.applies_factor:
+            raise OperationValidationError(
+                f"Bank '{bank_id}' does not keep retention policy (adaptive memory mode "
+                f"'{settings.effective_mode.value}'); it needs mode 'rank' or 'lifecycle'.",
+                status_code=409,
+            )
+
+        from .adaptive import clock
+        from .memories import get_memories
+
+        store = get_memories()
+        now = clock.utcnow()
+        change = _ExplicitTruthChange(found=True)
+        async with acquire_with_retry(await self._get_backend()) as conn:
+            # One transaction: a truth change that loses its compare-and-set (409) also undoes the
+            # retention change sent with it.
+            async with conn.transaction():
+                if policy_change:
+                    state = await store.set_retention_policy(
+                        conn,
+                        bank_id=bank_id,
+                        memory_id=unit_id,
+                        importance=None if importance is None else float(importance),
+                        forgetting_exempt=forgetting_exempt,
+                        exemption_reason=exemption_reason,
+                        settings=settings,
+                        now=now,
+                    )
+                    if state is None:
+                        return None
+                    if state.retention_state == "archived" and (
+                        state.forgetting_exempt or state.importance >= settings.archive_protect_importance
+                    ):
+                        # Protected now (a hold, an exemption, or importance at the protection level),
+                        # so the sweep would not archive it again: bring it back rather than leave a
+                        # protected memory suppressed in recall.
+                        await store.unarchive_memories(conn, bank_id=bank_id, memory_ids=[unit_id], now=now)
+                if retention_state == "active":
+                    if not await store.live_memory_ids(
+                        conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[unit_id]
+                    ):
+                        return None
+                    await store.unarchive_memories(conn, bank_id=bank_id, memory_ids=[unit_id], now=now)
+                if status is not None:
+                    change = await self._apply_explicit_truth(
+                        conn,
+                        store,
+                        bank_id,
+                        unit_id,
+                        status=status,
+                        successor_id=successor_id,
+                        reason=reason,
+                        now=now,
+                    )
+                    if not change.found:
+                        return None
+                view = await store.get_memory_lifecycle(
+                    conn, bank_id=bank_id, memory_id=unit_id, now=now, settings=settings
+                )
+
+        if change.requeued:
+            config = await self._config_resolver.resolve_full_config(bank_id, request_context)
+            if config.enable_auto_consolidation:
+                try:
+                    await self.submit_async_consolidation(bank_id=bank_id, request_context=request_context)
+                except Exception as e:
+                    logger.warning(f"Failed to submit consolidation after a truth change in bank {bank_id}: {e}")
+        if change.changed:
+            # A retired (or restored) memory changes what grounded documents may cite. Best effort,
+            # after the commit, like curation's own call.
+            await self._submit_refreshes_for_retracted_grounding(bank_id, request_context=request_context)
+        return view
+
+    async def _apply_explicit_truth(
+        self,
+        conn,
+        store: "MemoriesExtension",
+        bank_id: str,
+        unit_id: str,
+        *,
+        status: TruthStatus,
+        successor_id: str | None,
+        reason: str | None,
+        now: datetime,
+    ) -> _ExplicitTruthChange:
+        """Apply one explicit ``truth_status`` change inside the caller's transaction.
+
+        Lock order: a raw fact's observations are swept first (the sweep's own sorted row locks,
+        the order invalidation uses), then every claim this change touches is locked in ONE
+        ``lock_claims`` pass — target, successor and an observation's sources — before any
+        compare-and-set, so it serializes with consolidation's lifecycle writes instead of
+        deadlocking against them.
+        """
+        from hindsight_api.extensions import OperationValidationError
+
+        from .adaptive.claims import RETIRED_STATUSES
+
+        rows = {
+            m.unit_id: m
+            for m in await store.get_memories(
+                conn=conn,
+                fq_table=fq_table,
+                bank_id=bank_id,
+                unit_ids=[unit_id, *([successor_id] if successor_id is not None else [])],
+            )
+        }
+        target = rows.get(unit_id)
+        if target is None:
+            return _ExplicitTruthChange(found=False)
+        successor = rows.get(successor_id) if successor_id is not None else None
+        if successor_id is not None:
+            if successor is None:
+                raise OperationValidationError(f"Memory '{successor_id}' not found", status_code=404)
+            error = _explicit_successor_error(target, successor)
+            if error is not None:
+                raise ValueError(error)
+        is_observation = target.fact_type == "observation"
+        requeued = False
+
+        if status in RETIRED_STATUSES and not is_observation:
+            # The observations built on this fact are rebuilt from their other sources, exactly as
+            # invalidating it would: swept here, before its claim row is written (the sweep's lock
+            # order), and again after (a racing observation insert). The sweep requeues only the
+            # co-sources, so the fact itself is never put back in the queue.
+            requeued = await self._delete_stale_observations_for_memories(conn, bank_id, [unit_id]) > 0
+        sources: list[str] = []
+        if is_observation and status is not TruthStatus.UNCERTAIN:
+            sources = (await store.observation_sources(conn, bank_id=bank_id, observation_ids=[unit_id])).get(
+                unit_id, []
+            )
+        locked = await store.lock_claims(
+            conn,
+            bank_id=bank_id,
+            memory_ids=[unit_id, *([successor_id] if successor_id is not None else []), *sources],
+            skip_locked=False,
+            now=now,
+        )
+        if unit_id not in locked:
+            return _ExplicitTruthChange(found=False)
+        claims = await store.claims_for(
+            conn, bank_id=bank_id, memory_ids=[unit_id, *([successor_id] if successor_id is not None else []), *sources]
+        )
+        current = claims.get(unit_id)
+
+        if status in RETIRED_STATUSES:
+            successor_claim = claims.get(successor_id) if successor_id is not None else None
+            if successor_id is not None:
+                if successor_id not in locked:
+                    raise OperationValidationError(f"Memory '{successor_id}' not found", status_code=404)
+                if successor_claim is not None and successor_claim.truth_status in RETIRED_STATUSES:
+                    raise ValueError(
+                        f"Memory '{successor_id}' is itself {successor_claim.truth_status.value}; "
+                        "it cannot replace another memory."
+                    )
+                if (
+                    current is not None
+                    and successor_claim is not None
+                    and current.scope_fingerprint is not None
+                    and successor_claim.scope_fingerprint is not None
+                    and current.scope_fingerprint != successor_claim.scope_fingerprint
+                ):
+                    raise ValueError(
+                        f"Memory '{successor_id}' holds in a different scope ({successor_claim.scope_fingerprint}) "
+                        f"from memory '{unit_id}' ({current.scope_fingerprint})."
+                    )
+            # The change instant: the successor's own start when it has one, else when its evidence
+            # was recorded, else now. Written on both sides, so an as_of recall never shows both.
+            valid_to = (
+                (successor_claim.valid_from if successor_claim is not None else None)
+                or (_claim_change_instant(successor) if successor is not None else None)
+                or now
+            )
+            won = await store.cas_retire(
+                conn,
+                bank_id=bank_id,
+                memory_id=unit_id,
+                to_status=status,
+                retired_via="explicit",
+                superseded_by_id=successor_id,
+                valid_to=valid_to,
+                reason=reason or f"explicit:{status.value}",
+                confidence=None,
+                now=now,
+            )
+            if not won:
+                held = current.truth_status.value if current is not None else "retired"
+                raise OperationValidationError(
+                    f"Memory '{unit_id}' is already {held}; restore it (truth_status 'active') before "
+                    f"marking it {status.value}.",
+                    status_code=409,
+                )
+            if successor_id is not None and (successor_claim is None or successor_claim.valid_from is None):
+                await store.set_claim(
+                    conn,
+                    bank_id=bank_id,
+                    memory_id=successor_id,
+                    truth_status=successor_claim.truth_status if successor_claim is not None else TruthStatus.ACTIVE,
+                    valid_from=valid_to,
+                    valid_to=successor_claim.valid_to if successor_claim is not None else None,
+                    confidence=successor_claim.confidence if successor_claim is not None else None,
+                    scope_fingerprint=successor_claim.scope_fingerprint if successor_claim is not None else None,
+                    reason=successor_claim.reason if successor_claim is not None else None,
+                    now=now,
+                )
+            inherited: list[str] = []
+            if is_observation:
+                inherited = await store.inherit_from_observation(
+                    conn,
+                    bank_id=bank_id,
+                    observation_id=unit_id,
+                    to_status=status,
+                    successor_id=successor_id,
+                    valid_to=valid_to,
+                    evidence_ids=[],
+                    candidate_source_ids=sources,
+                    now=now,
+                )
+            else:
+                # Retired, so it must never be consolidated again (a retired raw fact is never
+                # requeued): a still-pending fact is stamped now.
+                await store.mark_consolidated(
+                    conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[unit_id], when=now
+                )
+                requeued = await self._delete_stale_observations_for_memories(conn, bank_id, [unit_id]) > 0 or requeued
+            await store.insert_relation(
+                conn,
+                bank_id=bank_id,
+                relation_type="supersedes" if status is TruthStatus.SUPERSEDED else "refutes",
+                source_id=successor_id,
+                target_id=unit_id,
+                origin="explicit",
+                reason=reason,
+                confidence=None,
+                evidence={"inherited_ids": inherited} if inherited else {},
+                now=now,
+            )
+            get_metrics_collector().record_adaptive_claim_transition(
+                bank_id=bank_id,
+                transition="supersession" if status is TruthStatus.SUPERSEDED else "refutation",
+                origin="explicit",
+            )
+            return _ExplicitTruthChange(found=True, requeued=requeued, changed=True)
+
+        if current is not None and current.truth_status is status:
+            return _ExplicitTruthChange(found=True)
+        if current is None and status is TruthStatus.ACTIVE:
+            return _ExplicitTruthChange(found=True)
+        was_retired = current is not None and current.truth_status in RETIRED_STATUSES
+        await store.set_claim(
+            conn,
+            bank_id=bank_id,
+            memory_id=unit_id,
+            truth_status=status,
+            valid_from=current.valid_from if current is not None else None,
+            valid_to=None,
+            confidence=current.confidence if current is not None else None,
+            scope_fingerprint=current.scope_fingerprint if current is not None else None,
+            reason=reason or f"explicit:{status.value}",
+            now=now,
+        )
+        if status is TruthStatus.ACTIVE and is_observation:
+            # The raw facts that inherited this observation's retirement come back with it. They
+            # are its sources and stay consolidated: the observation they belong to is current again.
+            for source_id in sources:
+                source_claim = claims.get(source_id)
+                if (
+                    source_claim is not None
+                    and source_claim.inherited_from_id == unit_id
+                    and source_claim.truth_status in RETIRED_STATUSES
+                ):
+                    await store.set_claim(
+                        conn,
+                        bank_id=bank_id,
+                        memory_id=source_id,
+                        truth_status=TruthStatus.ACTIVE,
+                        valid_from=source_claim.valid_from,
+                        scope_fingerprint=source_claim.scope_fingerprint,
+                        reason=reason or "explicit:active",
+                        now=now,
+                    )
+        elif was_retired and not is_observation:
+            # Its observations were rebuilt without it when it was retired; consolidate it again.
+            requeued = (
+                await store.requeue_units(conn, bank_id=bank_id, unit_ids=[unit_id], reason="explicit_restore") > 0
+            )
+        if status is TruthStatus.UNCERTAIN:
+            get_metrics_collector().record_adaptive_claim_transition(
+                bank_id=bank_id, transition="uncertain", origin="explicit"
+            )
+        return _ExplicitTruthChange(found=True, requeued=requeued, changed=True)
+
     async def run_consolidation(
         self,
         bank_id: str,
@@ -13119,7 +14761,14 @@ class MemoryEngine(MemoryEngineInterface):
             )
             directives = list(listed.items)
 
-        preview = render_prompt_preview(operation, resolved_config, bank_profile, directives)
+        # Consolidation and reflect send a different prompt in adaptive memory lifecycle
+        # mode; resolved here exactly as both operations resolve it, so a lifecycle bank is
+        # shown the prompt it actually gets. Off costs one attribute lookup.
+        lifecycle = False
+        if operation != "retain":
+            adaptive = mode_settings(resolved_config, bank_id=bank_id)
+            lifecycle = adaptive is not None and adaptive.effective_mode.lifecycle
+        preview = render_prompt_preview(operation, resolved_config, bank_profile, directives, lifecycle=lifecycle)
         if operation != "retain":
             return preview
         # Reported so a client can offer a strategy picker without a second call for
@@ -13469,22 +15118,64 @@ class MemoryEngine(MemoryEngineInterface):
         tag_scope = await self._authorize_bank_read(bank_id, BankReadOperation.GET_MEMORY_UNIT, request_context)
         from .memories import get_memories
 
+        store = get_memories()
+        # Resolved before the connection is taken, so the config read never holds a second one.
+        adaptive_settings = (
+            await self._adaptive_settings_for_bank(bank_id, request_context)
+            if store.supports_adaptive_state_for(bank_id)
+            else None
+        )
         backend = await self._get_backend()
         async with acquire_with_retry(backend) as conn:
             # The store renders the detail view — including the observation
             # history and source facts it folds in — for a normalized id.
-            unit = await get_memories().get_memory_unit(
+            unit = await store.get_memory_unit(
                 conn=conn,
                 ops=self._backend.ops,
                 fq_table=fq_table,
                 bank_id=bank_id,
                 unit_id=str(memory_uuid),
             )
-        # Outside the caller's tag scope reads exactly like a missing memory (404), so the
-        # answer does not confirm that the id exists.
-        if tag_scope and unit is not None and not tags_satisfy_groups(unit.get("tags"), tag_scope):
-            return None
+            # Outside the caller's tag scope reads exactly like a missing memory (404), so the
+            # answer does not confirm that the id exists.
+            if tag_scope and unit is not None and not tags_satisfy_groups(unit.get("tags"), tag_scope):
+                return None
+            if unit is not None and adaptive_settings is not None:
+                await self._attach_memory_lifecycle(conn, store, bank_id, str(memory_uuid), unit, adaptive_settings)
         return unit
+
+    @staticmethod
+    async def _attach_memory_lifecycle(
+        conn: Any,
+        store: "MemoriesExtension",
+        bank_id: str,
+        unit_id: str,
+        unit: dict[str, Any],
+        settings: AdaptiveSettings,
+    ) -> None:
+        """Add the memory's adaptive-memory view to its detail dict under ``lifecycle``.
+
+        Only while the bank's effective mode is not off, or when something is stored for the
+        memory (a bank switched back to off still shows what it learned). An off-mode bank's
+        memories with nothing stored keep exactly the payload they always had.
+        """
+        from .adaptive import clock
+        from .adaptive.models import AdaptiveMode
+
+        if settings.effective_mode is AdaptiveMode.OFF and unit.get("state") != "invalidated":
+            # An off-mode bank shows the view only for a memory that has state stored, so probe
+            # first with the one-statement recall loader (retention and claim rows; every
+            # reinforcement writes the former) rather than paying the view's seven reads on
+            # every GET. Measured on pg0, median of 300 off-mode GETs: 1.3 ms without the view,
+            # 3.5 ms with it, 1.75 ms with this probe. An archived memory's state lives in its
+            # invalidation snapshot, which the probe cannot see, so it always gets the view.
+            if not await store.load_adaptive_state(conn, bank_id=bank_id, memory_ids=[unit_id]):
+                return
+        view = await store.get_memory_lifecycle(
+            conn, bank_id=bank_id, memory_id=unit_id, now=clock.utcnow(), settings=settings
+        )
+        if view is not None and (settings.effective_mode is not AdaptiveMode.OFF or view.stored):
+            unit["lifecycle"] = view.model_dump(mode="json")
 
     async def list_documents(
         self,
@@ -15471,7 +17162,9 @@ class MemoryEngine(MemoryEngineInterface):
         4. expand: Get chunk/document context for memories
 
         Reflect is read-only: it synthesizes an answer from the bank's stored
-        memories and persists nothing.
+        memories and persists nothing of its own. The one exception is adaptive
+        memory: in a rank/lifecycle bank the memories a successful answer cited are
+        reinforced afterwards, in the background (``successful_reflect_use``).
 
         The agent starts with empty context and must call tools to gather
         information. On the last iteration, tools are removed to force a
@@ -15752,11 +17445,26 @@ class MemoryEngine(MemoryEngineInterface):
         recall_fact_types = [ft for ft in (fact_types or ["world", "experience"]) if ft in ("world", "experience")]
         include_recall = bool(recall_fact_types)
 
+        # Adaptive memory lifecycle mode: the recall tool offers `include_history`, the prompt says
+        # how to read claim annotations, and expand annotates retired memories. One dict lookup in
+        # every other mode, like recall's own check.
+        reflect_lifecycle = False
+        if config_dict.get("adaptive_memory_mode") not in (None, "off"):
+            from .memories import get_memories as _get_memories_for_adaptive
+
+            reflect_lifecycle = AdaptiveSettings.resolve(
+                config_dict,
+                get_config(),
+                store_supports=_get_memories_for_adaptive().supports_adaptive_state_for(bank_id),
+            ).effective_mode.lifecycle
+
         # No defaults on the token arguments: the agent resolves them from
         # `tool_token_limits` and always passes all three. Binding the configured values
         # here as defaults instead is what made #4239 invisible -- they read as live
         # while `_execute_tool` passed positionally past them.
-        async def recall_fn(q: str, max_tokens: int, max_chunk_tokens: int) -> dict[str, Any]:
+        async def recall_fn(
+            q: str, max_tokens: int, max_chunk_tokens: int, *, include_history: bool = False
+        ) -> dict[str, Any]:
             return await tool_recall(
                 self,
                 bank_id,
@@ -15771,12 +17479,20 @@ class MemoryEngine(MemoryEngineInterface):
                 include_chunks=effective_recall_include_chunks,
                 created_after=created_after,
                 created_before=created_before,
+                lifecycle_view="historical" if include_history and reflect_lifecycle else None,
             )
 
         async def expand_fn(memory_ids: list[str], depth: str) -> dict[str, Any]:
             async with backend.acquire() as conn:
                 return await tool_expand(
-                    conn, bank_id, memory_ids, depth, tags=tags, tags_match=tags_match, tag_groups=tag_groups
+                    conn,
+                    bank_id,
+                    memory_ids,
+                    depth,
+                    tags=tags,
+                    tags_match=tags_match,
+                    tag_groups=tag_groups,
+                    lifecycle=reflect_lifecycle,
                 )
 
         # Load directives from the dedicated directives table.
@@ -15861,6 +17577,8 @@ class MemoryEngine(MemoryEngineInterface):
                         evidence_is_sufficient_fn=decision_model.evidence_is_sufficient if decision_model else None,
                         prune_evidence_fn=self._prune_reflect_evidence if decision_model else None,
                         reflect_id=reflect_id,
+                        # Passed only in lifecycle mode, so every other reflect calls the agent as before.
+                        **({"lifecycle": True} if reflect_lifecycle else {}),
                     ),
                     timeout=wall_timeout,
                 )
@@ -16083,6 +17801,14 @@ class MemoryEngine(MemoryEngineInterface):
                     await self._operation_validator.on_reflect_complete(result_ctx)
                 except Exception as e:
                     logger.warning(f"Post-reflect hook error (non-fatal): {e}")
+
+            self._submit_reflect_reinforcement(
+                bank_id,
+                agent_result,
+                config_dict,
+                is_refresh=is_refresh,
+                answer_as_document=answer_as_document,
+            )
 
             _mark("post")
             # The one closing line per reflect: the agent's outcome plus where the wall clock
@@ -17688,6 +19414,27 @@ class MemoryEngine(MemoryEngineInterface):
                 else:
                     stored_structured_content = raw_struct
 
+        # Lifecycle mode: a cited memory whose claim was superseded or refuted is still a row, so
+        # the live check below would read it as grounding the document still has. It is not a
+        # current answer any more, and the bank knows what replaced it — so instead of editing
+        # around it, this run regenerates over current recall, which no longer returns it. Asked
+        # for full runs too, so the trace says why the document changed. A memory the document
+        # already cited as history (retired when its reflect read it) is not one of these: it
+        # stays grounding, or no run on that page could ever be a delta again.
+        stored_based_on = (mental_model.get("reflect_response") or {}).get("based_on")
+        cited_ids = based_on_fact_ids(stored_based_on)
+        grounding: dict[str, Grounding] | None = None
+        newly_retired: dict[str, Grounding] = {}
+        if cited_ids and await self._lifecycle_grounding_enabled(bank_id, request_context):
+            from .memories import get_memories
+
+            async with self._store_read_conn(bank_id) as conn:
+                grounding = await get_memories().grounding_status(conn, bank_id=bank_id, ids=cited_ids)
+            newly_retired = retired_since_cited(stored_based_on, grounding)
+            if use_delta and newly_retired:
+                use_delta = False
+                mode_fallback_reason = "retired_grounding"
+
         tag_filtering = _resolve_refresh_tag_filtering(model_tags, trigger_data)
         exclude_ids = sorted({*stored_exclude_ids, mental_model_id})
         scope = MentalModelRefreshScope(
@@ -17832,14 +19579,19 @@ class MemoryEngine(MemoryEngineInterface):
                     )
                 else:
                     # MemoryFact object with .id, .text, .context attributes
-                    serialized_facts.append(
-                        {
-                            "id": str(fact.id),
-                            "text": fact.text,
-                            "type": fact_type,
-                            "context": fact.context,
-                        }
-                    )
+                    entry: dict[str, Any] = {
+                        "id": str(fact.id),
+                        "text": fact.text,
+                        "type": fact_type,
+                        "context": fact.context,
+                    }
+                    # Lifecycle mode: the claim state the reflect read the fact in, when it was
+                    # not plain active. A retired one is cited as history, which is what lets the
+                    # grounding check tell it from a memory retired after this page cited it
+                    # (``retired_since_cited``).
+                    if fact.lifecycle is not None:
+                        entry["truth_status"] = fact.lifecycle.truth_status
+                    serialized_facts.append(entry)
             based_on_serialized_payload[fact_type] = serialized_facts
 
         # Counted before the delta merge below, which folds in facts from
@@ -17878,17 +19630,29 @@ class MemoryEngine(MemoryEngineInterface):
         # pruning the retracted ids out of based_on below.
         retraction_handled = False
         retraction_operations: MentalModelDeltaOperations | None = None
+        if grounding is not None and not use_delta:
+            # Full run (asked for, or escalated above): the regeneration rebuilds based_on from
+            # current recall, so nothing is unsaid here; the partition is only reported.
+            retracted = partition_retracted(
+                stored_based_on,
+                {i for i, g in grounding.items() if g.state != "absent" and i not in newly_retired},
+                retired=newly_retired,
+            )
         if use_delta:
-            stored_based_on = (mental_model.get("reflect_response") or {}).get("based_on")
-            cited_ids = based_on_fact_ids(stored_based_on)
             if cited_ids:
                 from .memories import get_memories
 
                 store = get_memories()
                 async with self._store_read_conn(bank_id) as conn:
-                    live_ids = await store.live_memory_ids(
-                        conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=cited_ids
-                    )
+                    if grounding is not None:
+                        # Lifecycle mode reached delta, so nothing cited was retired since it was
+                        # cited (a memory cited as history is still grounding): the grounding read
+                        # above already answers the live check.
+                        live_ids = {i for i, g in grounding.items() if g.state != "absent"}
+                    else:
+                        live_ids = await store.live_memory_ids(
+                            conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=cited_ids
+                        )
                     retracted = partition_retracted(stored_based_on, live_ids)
                     if retracted:
                         # Re-ingesting a document deletes its facts and re-extracts them
@@ -17962,12 +19726,18 @@ class MemoryEngine(MemoryEngineInterface):
             outcome: RefreshOutcome,
         ) -> _MentalModelRefreshRun:
             """Close over everything the pipeline resolved before it branched."""
+            # Retired citations are handled by the full regeneration itself, so they count as applied
+            # when it produced the document (an unchanged one included).
+            regenerated = bool(retracted.retired) and outcome in ("content_written", "content_unchanged")
             retraction_record = (
                 MentalModelRetraction(
-                    fact_ids=sorted(retracted.ids),
-                    fact_texts=[(fact.get("text") or "") for fact in retracted.facts],
-                    applied=retraction_handled,
+                    fact_ids=sorted(retracted.ids | retracted.retired_ids),
+                    fact_texts=[(fact.get("text") or "") for fact in retracted.facts]
+                    + [(c.fact.get("text") or "") for c in retracted.retired],
+                    applied=retraction_handled or regenerated,
                     deferred_reason=retraction_deferred_reason,
+                    cause=retracted.cause,
+                    successor_ids=retracted.successor_ids,
                 )
                 if retracted
                 else None
@@ -20527,6 +22297,8 @@ class MemoryEngine(MemoryEngineInterface):
         conn,
         bank_id: str,
         mm_row: Any,
+        *,
+        lifecycle: bool | None = None,
     ) -> bool:
         """Check whether a mental model is out of date.
 
@@ -20543,6 +22315,10 @@ class MemoryEngine(MemoryEngineInterface):
 
         Use :meth:`compute_mental_models_are_stale` when asking about more than one
         model: it is the same question in one round-trip.
+
+        ``lifecycle`` is whether the bank runs adaptive memory ``lifecycle`` mode, where a cited
+        memory whose claim was retired counts as retracted grounding; None resolves it from the
+        bank's config when the grounding check is reached.
         """
         scope = _mental_model_stale_scope_from_row(mm_row, key="")
         if scope is None:
@@ -20585,9 +22361,23 @@ class MemoryEngine(MemoryEngineInterface):
         # triggers — the after-consolidation flush and the cron loop — both come
         # through here, so the refresh still fires; a page can briefly read
         # "up to date" in the list while a refresh for it is already queued.
-        return await self._has_retracted_grounding(conn, bank_id, _mm_row_field(mm_row, "id"))
+        return await self._has_retracted_grounding(conn, bank_id, _mm_row_field(mm_row, "id"), lifecycle=lifecycle)
 
-    async def _has_retracted_grounding(self, conn, bank_id: str, mental_model_id: Any) -> bool:
+    async def _lifecycle_grounding_enabled(self, bank_id: str, request_context: "RequestContext | None") -> bool:
+        """Whether retired claims count as retracted grounding for this bank: adaptive memory
+        ``lifecycle`` mode only. A config that cannot be read answers False (the pre-lifecycle check:
+        only absent memories are retracted), logged."""
+        try:
+            bank_config = await self._config_resolver.get_bank_config(bank_id, request_context)
+        except Exception as exc:
+            logger.warning(f"[MENTAL_MODELS] Could not resolve adaptive mode for {bank_id}: {exc}")
+            return False
+        settings = write_settings_from_bank_config(bank_config, bank_id=bank_id)
+        return settings is not None and settings.effective_mode.lifecycle
+
+    async def _has_retracted_grounding(
+        self, conn, bank_id: str, mental_model_id: Any, *, lifecycle: bool | None = None
+    ) -> bool:
         """Whether the model's stored grounding cites memories that no longer exist.
 
         ``reflect_response`` is read here rather than being required on the row the
@@ -20595,6 +22385,12 @@ class MemoryEngine(MemoryEngineInterface):
         model that already looks fresh pays for the extra fetch. Scope filters are
         irrelevant: a fact this document was actually built on is in scope by
         construction, whatever the model's tags say now.
+
+        In ``lifecycle`` mode a cited memory whose claim is superseded or refuted counts too
+        (``grounding_status``): the row is still there, but it is no longer a current answer.
+        Only when it was retired after the page cited it, though: one the page cited as history
+        (``retired_since_cited``) is what the page already says. ``lifecycle`` None resolves the
+        mode from the bank's config, only once there is grounding to check.
         """
         from .memories import get_memories
 
@@ -20613,9 +22409,17 @@ class MemoryEngine(MemoryEngineInterface):
                 reflect_response = json.loads(reflect_response)
             except json.JSONDecodeError:
                 return False
-        cited_ids = based_on_fact_ids((reflect_response or {}).get("based_on"))
+        based_on = (reflect_response or {}).get("based_on")
+        cited_ids = based_on_fact_ids(based_on)
         if not cited_ids:
             return False
+        if lifecycle is None:
+            lifecycle = await self._lifecycle_grounding_enabled(bank_id, None)
+        if lifecycle:
+            grounding = await get_memories().grounding_status(conn, bank_id=bank_id, ids=cited_ids)
+            return any(g.state == "absent" for g in grounding.values()) or bool(
+                retired_since_cited(based_on, grounding)
+            )
         live_ids = await get_memories().live_memory_ids(
             conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=cited_ids
         )
@@ -20652,6 +22456,7 @@ class MemoryEngine(MemoryEngineInterface):
         if self._llm_config.provider == "none":
             return 0
         try:
+            lifecycle = await self._lifecycle_grounding_enabled(bank_id, request_context)
             backend = await self._get_backend()
             async with acquire_with_retry(backend) as conn:
                 # Someone else is already going to notice. Consolidation is pending, and
@@ -20673,7 +22478,11 @@ class MemoryEngine(MemoryEngineInterface):
                     """,
                     bank_id,
                 )
-                affected = [row["id"] for row in rows if await self._has_retracted_grounding(conn, bank_id, row["id"])]
+                affected = [
+                    row["id"]
+                    for row in rows
+                    if await self._has_retracted_grounding(conn, bank_id, row["id"], lifecycle=lifecycle)
+                ]
         except Exception as exc:
             logger.warning(f"[MENTAL_MODELS] Could not scan {bank_id} for retracted grounding: {exc}")
             return 0
@@ -23081,6 +24890,9 @@ class MemoryEngine(MemoryEngineInterface):
             }
             if item.get("strategy"):
                 task_payload["strategy"] = item["strategy"]
+            # Set by the HTTP layer only when it minted the id and the bank records the mark.
+            if item.get("document_id_minted"):
+                task_payload["document_id_minted"] = True
 
             # Pass tenant_id and api_key_id through task payload
             if request_context.tenant_id:
@@ -23267,6 +25079,54 @@ class MemoryEngine(MemoryEngineInterface):
             # Set by the job's own hand-off so it does not match its own
             # still-'processing' row and suppress its successor.
             dedupe_excludes_operation_id=dedupe_excludes_operation_id,
+        )
+
+    async def submit_async_adaptive_memory_maintenance(
+        self,
+        bank_id: str,
+        *,
+        request_context: "RequestContext",
+    ) -> dict[str, Any]:
+        """Submit the bank's adaptive-memory maintenance job (archive sweep, then prune).
+
+        A no-op (``no_work=True``, null operation_id) unless ``adaptive_memory_archive_enabled`` is on
+        and the bank's effective mode is rank or lifecycle, so the after-consolidation and
+        maintenance-loop callers can call it unconditionally. Deduplicates by bank against a job that
+        is pending or running: one run sweeps the whole retention table, and the next consolidation
+        or loop tick covers anything that changed after it passed.
+        """
+        # Archiving is a server-level switch: an off server (the default) does nothing at all here,
+        # which is what every consolidation pays for calling this.
+        if not get_config().adaptive_memory_archive_enabled:
+            return {"operation_id": None, "no_work": True}
+        await self._authenticate_tenant(request_context)
+        settings = await self._adaptive_settings_for_bank(bank_id, request_context)
+        if not (settings.archive_enabled and settings.effective_mode.applies_factor):
+            return {"operation_id": None, "no_work": True}
+
+        if self._operation_validator:
+            from hindsight_api.extensions import BankWriteContext, BankWriteOperation
+
+            ctx = BankWriteContext(
+                bank_id=bank_id,
+                operation=BankWriteOperation.SUBMIT_ASYNC_ADAPTIVE_MEMORY_MAINTENANCE,
+                request_context=request_context,
+            )
+            await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
+
+        task_payload: dict[str, Any] = {}
+        if request_context.tenant_id:
+            task_payload["_tenant_id"] = request_context.tenant_id
+        if request_context.api_key_id:
+            task_payload["_api_key_id"] = request_context.api_key_id
+
+        return await self._submit_async_operation(
+            bank_id=bank_id,
+            operation_type="adaptive_memory_maintenance",
+            task_type="adaptive_memory_maintenance",
+            task_payload=task_payload,
+            dedupe_by_bank=True,
+            dedupe_by_bank_includes_processing=True,
         )
 
     async def submit_async_vector_index_maintenance(

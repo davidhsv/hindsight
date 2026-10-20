@@ -119,31 +119,56 @@ function canonical(path: string): string {
   }
 }
 
+/** One worktree's view of its repository: the shared common directory, plus the git directory
+ *  that holds THIS worktree's HEAD and the directory checked out (null for a bare repository). */
+export type WorktreeLayout =
+  | {
+      status: "resolved";
+      commonDir: string;
+      gitDir: string;
+      worktree: string | null;
+      bare: boolean;
+    }
+  | { status: "absent" }
+  | { status: "failed"; reason: string };
+
+type ResolvedWorktree = Extract<WorktreeLayout, { status: "resolved" }>;
+
 /** A resolved answer, or null when the layout points at a directory that is no longer there — a
  *  worktree whose administrative directory has been pruned. Naming THAT path would hand the bank
  *  the worktree's own name, the exact outcome this file exists to prevent, so the walk goes on. */
-function resolved(commonDir: string): GitLayout | null {
+function resolved(
+  commonDir: string,
+  gitDir: string,
+  worktree: string | null
+): ResolvedWorktree | null {
   if (entryKind(commonDir) !== "dir") return null;
   const canonicalDir = canonical(commonDir);
-  return { status: "resolved", commonDir: canonicalDir, bare: isBare(canonicalDir) };
+  return {
+    status: "resolved",
+    commonDir: canonicalDir,
+    gitDir: canonical(gitDir),
+    worktree: worktree === null ? null : canonical(worktree),
+    bare: isBare(canonicalDir),
+  };
 }
 
-function probeOnce(directory: string): GitLayout {
+function probeOnce(directory: string): WorktreeLayout {
   let current = resolve(directory);
   for (;;) {
     const dotGit = join(current, ".git");
     const kind = entryKind(dotGit);
     if (kind === "dir") {
-      const layout = resolved(commonDirOf(dotGit));
+      const layout = resolved(commonDirOf(dotGit), dotGit, current);
       if (layout) return layout;
     } else if (kind === "file") {
       const text = readTextOrNull(dotGit);
       const gitDir = text ? gitDirFromPointer(text, current) : null;
-      const layout = gitDir ? resolved(commonDirOf(gitDir)) : null;
+      const layout = gitDir ? resolved(commonDirOf(gitDir), gitDir, current) : null;
       if (layout) return layout;
     }
     if (looksLikeBareRepository(current)) {
-      const layout = resolved(current);
+      const layout = resolved(current, current, null);
       if (layout) return layout;
     }
     const parent = dirname(current);
@@ -159,6 +184,14 @@ function probeOnce(directory: string): GitLayout {
  * giving up here is what costs a session its memory.
  */
 export function probeGitLayout(directory: string): GitLayout {
+  const layout = probeWorktree(directory);
+  if (layout.status !== "resolved") return layout;
+  return { status: "resolved", commonDir: layout.commonDir, bare: layout.bare };
+}
+
+/** `probeGitLayout`, keeping which worktree the directory is in (for its branch and its path
+ *  relative to the checkout). Same walk, same retries, same three answers. */
+export function probeWorktree(directory: string): WorktreeLayout {
   if (!directory) return { status: "absent" };
   let last = "";
   for (let attempt = 0; attempt < ATTEMPTS; attempt++) {

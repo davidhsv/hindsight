@@ -44,6 +44,9 @@ class ChatRequest:
     call is billed to."""
     headers: dict[str, str] = field(default_factory=dict, compare=False)
     """The request headers, lowercased."""
+    body: dict[str, Any] = field(default_factory=dict, compare=False)
+    """The request body as it arrived, for asserting on what the server sent beyond the
+    messages — the response schema it asked for, its sampling parameters."""
 
     @property
     def user_text(self) -> str:
@@ -165,6 +168,18 @@ class RuleBuilder:
 
     def returns_text(self, text: str) -> LLMStub:
         return self._register(lambda _request: _assistant_message(text))
+
+    def refuses(self) -> LLMStub:
+        """Refuse on content-policy grounds the way Anthropic does: HTTP 200, no content,
+        ``stop_reason: "refusal"``.
+
+        Anthropic Messages API only. The OpenAI-compatible provider has no refusal it
+        treats as permanent, so ``/v1/chat/completions`` rejects the rule instead of
+        inventing one.
+        """
+        return self._register(
+            lambda _request: StubbedReply(message={"role": "assistant", "content": ""}, finish_reason="refusal")
+        )
 
     def answers_with(self, build: Callable[[ChatRequest], BaseModel]) -> LLMStub:
         """Compute the reply from the request that triggered it.
@@ -514,6 +529,38 @@ class TriageStub:
         self.fits_mission.clear()
 
 
+class RecallChecksStub:
+    """The recall checks' answers, scripted (see hindsight_api/engine/search/recall_checks.py).
+
+    ``current_state`` answers conditional recency ("is the query about the current state?"),
+    ``any_helps`` the relevance check ("does any listed memory help?"); the injection gate
+    scores a memory 0.9 when its text contains one of ``planted``, else 0.01. The Jev rerank's
+    Choice puts the options containing ``jev_first`` first and keeps the rest in the order they
+    were sent; ``jev_fails`` answers it with a 401 instead, and ``jev_requests`` keeps each one's
+    state and options. The defaults let every check pass through: recency kept, something
+    relevant, nothing planted, the order unchanged. ``asked`` records which check each request
+    was, in arrival order.
+    """
+
+    def __init__(self) -> None:
+        self.current_state = 0.9
+        self.any_helps = 0.95
+        self.planted: set[str] = set()
+        self.jev_first: str | None = None
+        self.jev_fails = False
+        self.jev_requests: list[dict] = []
+        self.asked: list[str] = []
+
+    def reset(self) -> None:
+        self.current_state = 0.9
+        self.any_helps = 0.95
+        self.planted.clear()
+        self.jev_first = None
+        self.jev_fails = False
+        self.jev_requests.clear()
+        self.asked.clear()
+
+
 @dataclass(frozen=True)
 class ReceivedWebhook:
     """One delivery the stub accepted, kept so a test can assert on it."""
@@ -542,6 +589,7 @@ class Stubs:
     embeddings: EmbeddingStub = field(default_factory=EmbeddingStub)
     rerank: RerankStub = field(default_factory=RerankStub)
     triage: TriageStub = field(default_factory=TriageStub)
+    recall_checks: RecallChecksStub = field(default_factory=RecallChecksStub)
     rejected_requests: list[str] = field(default_factory=list)
     """Requests the stub refused as malformed — see ``validation.py``."""
 
@@ -568,6 +616,7 @@ class Stubs:
         self.rerank.verdicts = {}
         self.rerank.states = []
         self.triage.reset()
+        self.recall_checks.reset()
         self.rejected_requests.clear()
         self.webhooks.clear()
 

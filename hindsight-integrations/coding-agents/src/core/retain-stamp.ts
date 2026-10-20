@@ -23,6 +23,7 @@
 import { applyTemplate, type Resolvers } from "./template";
 import { log } from "./log";
 import { projectNameOf } from "./bank";
+import { repoContextOf } from "./repo-context";
 import { basename } from "node:path";
 
 /** Tag namespaces the plugin owns — see the filter in buildRetainStamp. */
@@ -69,14 +70,19 @@ function resolversFor(ctx: RetainStampContext): Resolvers {
 }
 
 /**
- * Resolve the configured tags and metadata for one retain. Returns empty collections when neither
- * setting is configured, which is the default — this adds nothing to a retain unless asked.
+ * Resolve the configured tags and metadata for one retain. Unconfigured (the default), the stamp
+ * carries no tags and only the repository/branch/module metadata of `ctx.directory` — none at all
+ * outside a repository.
  */
 export function buildRetainStamp(cfg: RetainStampConfig, ctx: RetainStampContext): RetainStamp {
+  // Where the memory was written, under the keys the recall `context` uses (core/repo-context.ts),
+  // so a server with context admission on can match the two. Configured metadata may replace them;
+  // a `retainMetadata.repository` should then be mirrored in `recallOptions.context`.
+  const where = repoContextOf(ctx.directory);
   const hasTags = Boolean(cfg.retainTags?.length);
   const hasMetadata = Boolean(cfg.retainMetadata && Object.keys(cfg.retainMetadata).length);
   const hasContext = Boolean(cfg.retainContext?.trim());
-  if (!hasTags && !hasMetadata && !hasContext) return { tags: [], metadata: {} };
+  if (!hasTags && !hasMetadata && !hasContext) return { tags: [], metadata: { ...where } };
 
   // Built lazily and memoized: {gitProject} shells out to git, and a config using it in both a tag
   // and a metadata value should not pay for that twice per retain.
@@ -107,7 +113,7 @@ export function buildRetainStamp(cfg: RetainStampConfig, ctx: RetainStampContext
       log.warn("retain-stamp", "ignoring reserved retainTags entry", { tag: t });
       return false;
     });
-  const metadata: Record<string, string> = {};
+  const metadata: Record<string, string> = { ...where };
   for (const [key, value] of Object.entries(cfg.retainMetadata ?? {})) {
     metadata[key] = applyTemplate(value, resolvers, "retainMetadata");
   }

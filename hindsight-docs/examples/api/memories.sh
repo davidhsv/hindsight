@@ -68,6 +68,37 @@ if [ -n "$MEMORY_ID" ]; then
     -H "Content-Type: application/json" \
     -d '{"state": "valid"}'
   # [/docs:restore-memory]
+
+  # The adaptive memory examples point one raw fact at another.
+  sleep 3
+  OTHER_ID=$(hindsight memory list "$BANK_ID" -o json | python3 -c "import sys,json; items=json.load(sys.stdin).get('items',[]); print(next((u['id'] for u in items if u['fact_type'] in ('world','experience') and u['id'] != '$MEMORY_ID'), ''))")
+  if [ -n "$OTHER_ID" ]; then
+    # [docs:adaptive-memory-mode]
+    # Turn adaptive memory on for one bank (it is off by default).
+    curl -s -X PATCH "$HINDSIGHT_URL/v1/default/banks/$BANK_ID/config" \
+      -H "Content-Type: application/json" \
+      -d '{"updates": {"adaptive_memory_mode": "lifecycle"}}'
+    # [/docs:adaptive-memory-mode]
+
+    # [docs:confirm-memory]
+    # Record that a memory still holds; the same source_key again is a no-op.
+    curl -s -X POST "$HINDSIGHT_URL/v1/default/banks/$BANK_ID/memories/$OTHER_ID/confirm" \
+      -H "Content-Type: application/json" \
+      -d '{"source_key": "incident-2291"}'
+    # [/docs:confirm-memory]
+
+    # [docs:update-memory-lifecycle]
+    # A fact turned out to be wrong; point at the memory that corrects it.
+    curl -s -X PATCH "$HINDSIGHT_URL/v1/default/banks/$BANK_ID/memories/$MEMORY_ID/lifecycle" \
+      -H "Content-Type: application/json" \
+      -d '{"truth_status": "refuted", "superseded_by": "'"$OTHER_ID"'", "reason": "Recorded for the wrong subject"}'
+
+    # Keep an entry readily recallable however rarely it is used.
+    curl -s -X PATCH "$HINDSIGHT_URL/v1/default/banks/$BANK_ID/memories/$OTHER_ID/lifecycle" \
+      -H "Content-Type: application/json" \
+      -d '{"hold": true}'
+    # [/docs:update-memory-lifecycle]
+  fi
 fi
 
 # An observation (derived) exposes how it evolved as sources arrived.

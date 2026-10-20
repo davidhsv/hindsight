@@ -1,3 +1,5 @@
+import asyncio
+
 from hindsight_client import Hindsight
 
 
@@ -307,6 +309,93 @@ def test_update_bank_config_forwards_the_full_configurable_surface(monkeypatch):
         "memory_defense": {"redact_secrets": True},
         "audit_log_enabled": True,
     }
+
+
+def test_update_bank_config_forwards_the_adaptive_memory_settings(monkeypatch):
+    """The per-bank adaptive-memory fields reach the request body, sync and async alike.
+
+    Mirrored by the adaptive-memory case in tests/bank_config_full_surface_mapping.test.ts.
+    """
+    captured: list[dict[str, object]] = []
+
+    async def fake_update(self, bank_id, updates):
+        captured.append(updates)
+        return {"bank_id": bank_id, "config": {}, "overrides": updates}
+
+    monkeypatch.setattr(Hindsight, "_aupdate_bank_config", fake_update)
+
+    settings = {
+        "adaptive_memory_mode": "rank",
+        "adaptive_memory_score_alpha": 0.4,
+        "adaptive_memory_score_floor": 0.2,
+        "adaptive_memory_reinforcement_enabled": False,
+        "adaptive_memory_base_stability_days": 45.0,
+        "adaptive_memory_max_stability_days": 900.0,
+        "adaptive_memory_default_view": "current",
+        "adaptive_memory_historical_cues": False,
+    }
+    client = Hindsight(base_url="http://example.invalid")
+    client.update_bank_config("test-bank", **settings)
+    asyncio.run(client.aupdate_bank_config("test-bank", **settings))
+
+    assert captured == [settings, settings]
+
+
+def test_update_bank_config_forwards_the_context_admission_settings(monkeypatch):
+    """The per-bank context-admission fields reach the request body, sync and async alike.
+
+    Mirrored by the context-admission case in tests/bank_config_full_surface_mapping.test.ts.
+    """
+    captured: list[dict[str, object]] = []
+
+    async def fake_update(self, bank_id, updates):
+        captured.append(updates)
+        return {"bank_id": bank_id, "config": {}, "overrides": updates}
+
+    monkeypatch.setattr(Hindsight, "_aupdate_bank_config", fake_update)
+
+    settings = {
+        "context_admission_mode": "strict",
+        "context_admission_threshold_auto": 0.7,
+        "context_admission_threshold_explicit": 0.3,
+        "context_admission_reference_bonus": 0.1,
+        "context_admission_candidates": 20,
+        "context_admission_max_memories": 5,
+        "context_admission_max_tokens": 1500,
+        "context_admission_mmr_lambda": 0.6,
+        "context_admission_dup_similarity": 0.9,
+    }
+    client = Hindsight(base_url="http://example.invalid")
+    client.update_bank_config("test-bank", **settings)
+    asyncio.run(client.aupdate_bank_config("test-bank", **settings))
+
+    assert captured == [settings, settings]
+
+
+def test_update_bank_config_forwards_the_recall_check_settings(monkeypatch):
+    """The per-bank recall checks reach the request body, sync and async alike.
+
+    Mirrored by the recall-checks case in tests/bank_config_full_surface_mapping.test.ts.
+    """
+    captured: list[dict[str, object]] = []
+
+    async def fake_update(self, bank_id, updates):
+        captured.append(updates)
+        return {"bank_id": bank_id, "config": {}, "overrides": updates}
+
+    monkeypatch.setattr(Hindsight, "_aupdate_bank_config", fake_update)
+
+    settings = {
+        "recall_relevance_check": True,
+        "recall_conditional_recency": False,
+        "recall_injection_gate": True,
+        "recall_jev_rerank": True,
+    }
+    client = Hindsight(base_url="http://example.invalid")
+    client.update_bank_config("test-bank", **settings)
+    asyncio.run(client.aupdate_bank_config("test-bank", **settings))
+
+    assert captured == [settings, settings]
 
 
 def test_update_bank_config_gemini_safety_settings_is_a_list(monkeypatch):

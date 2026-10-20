@@ -114,6 +114,52 @@ func main() {
 				State: *hindsight.NewNullableString(hindsight.PtrString("valid")),
 			}).Execute()
 		// [/docs:restore-memory]
+
+		// The adaptive memory examples point one raw fact at another.
+		time.Sleep(3 * time.Second)
+		var otherID string
+		for _, unit := range memories.GetItems() {
+			if (unit.GetFactType() == "world" || unit.GetFactType() == "experience") && unit.Id != memoryID {
+				otherID = unit.Id
+				break
+			}
+		}
+		if otherID != "" {
+			// [docs:adaptive-memory-mode]
+			// Turn adaptive memory on for one bank (it is off by default).
+			client.BanksAPI.UpdateBankConfig(ctx, memBankID).
+				BankConfigUpdate(hindsight.BankConfigUpdate{
+					Updates: map[string]interface{}{"adaptive_memory_mode": "lifecycle"},
+				}).Execute()
+			// [/docs:adaptive-memory-mode]
+
+			// [docs:confirm-memory]
+			// Record that a memory still holds; the same source key again is a no-op.
+			confirm := hindsight.NewConfirmMemoryRequest()
+			confirm.SetSourceKey("incident-2291")
+			result, _, _ := client.MemoryAPI.ConfirmMemory(ctx, memBankID, otherID).
+				ConfirmMemoryRequest(*confirm).Execute()
+			if result != nil {
+				fmt.Println(result.GetOutcome(), result.GetStabilityDays())
+			}
+			// [/docs:confirm-memory]
+
+			// [docs:update-memory-lifecycle]
+			// A fact turned out to be wrong; point at the memory that corrects it.
+			refute := hindsight.NewUpdateMemoryLifecycleRequest()
+			refute.SetTruthStatus("refuted")
+			refute.SetSupersededBy(otherID)
+			refute.SetReason("Recorded for the wrong subject")
+			client.MemoryAPI.UpdateMemoryLifecycle(ctx, memBankID, memoryID).
+				UpdateMemoryLifecycleRequest(*refute).Execute()
+
+			// Keep an entry readily recallable however rarely it is used.
+			hold := hindsight.NewUpdateMemoryLifecycleRequest()
+			hold.SetHold(true)
+			client.MemoryAPI.UpdateMemoryLifecycle(ctx, memBankID, otherID).
+				UpdateMemoryLifecycleRequest(*hold).Execute()
+			// [/docs:update-memory-lifecycle]
+		}
 	}
 
 	// An observation (derived) exposes how it evolved as sources arrived.

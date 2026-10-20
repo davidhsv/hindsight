@@ -173,6 +173,42 @@ def scoped_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iter
 
 
 @pytest.fixture(scope="session")
+def experimental_admission_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iterator[object]:
+    """A server that allows the experimental context-admission modes (filter, strict).
+
+    The switch (``HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL``) is server-level, hence a process.
+    HTTP only, like ``typesafe_server``: both servers share one database, and the default server's
+    worker runs this one's queued work (retain, consolidation), which no admission setting touches,
+    since the gate never runs on internal recalls.
+    """
+    server = start_hindsight_server(
+        stub_url=stub_server.url,
+        log_path=tmp_path_factory.mktemp("experimental-admission-server") / "server.log",
+        extra_env={"HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL": "true", "HINDSIGHT_API_WORKER_ENABLED": "false"},
+    )
+    yield server
+    server.stop()
+
+
+@pytest.fixture(scope="session")
+def experimental_decay_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iterator[object]:
+    """A server that allows a positive ``adaptive_memory_score_alpha`` (retention decay in ranking).
+
+    The switch (``HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL``) is server-level, hence a process.
+    HTTP only, like ``experimental_admission_server``: both servers share one database, and the default
+    server's worker runs this one's queued work (retain, consolidation and the reinforcement it
+    records), none of which reads the alpha: only recall's ranking does.
+    """
+    server = start_hindsight_server(
+        stub_url=stub_server.url,
+        log_path=tmp_path_factory.mktemp("experimental-decay-server") / "server.log",
+        extra_env={"HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL": "true", "HINDSIGHT_API_WORKER_ENABLED": "false"},
+    )
+    yield server
+    server.stop()
+
+
+@pytest.fixture(scope="session")
 def retrying_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iterator[object]:
     """A server that will actually re-ask the extraction model once.
 
@@ -264,6 +300,55 @@ def keyed_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Itera
     yield server
     worker.stop()
     server.stop()
+
+
+#: The tenant schema of the archiving deployment, its own for the same reason as ``KEYED_SCHEMA``.
+ARCHIVING_SCHEMA = "systest_archiving"
+
+
+@pytest.fixture(scope="session")
+def archiving_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iterator[object]:
+    """A server that archives faded memories, with no grace period.
+
+    Archiving is server-level (``HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_ENABLED`` is not in
+    ``_CONFIGURABLE_FIELDS``), hence a process. It runs as queued work (the
+    ``adaptive_memory_maintenance`` operation), so the deployment gets a schema of its own: a worker
+    of the default server claiming that work would run it with archiving off. With no grace period
+    the sweep after a consolidation archives whatever has already faded.
+    """
+    server = start_hindsight_server(
+        stub_url=stub_server.url,
+        log_path=tmp_path_factory.mktemp("archiving-server") / "server.log",
+        extra_env={
+            "HINDSIGHT_API_DATABASE_SCHEMA": ARCHIVING_SCHEMA,
+            "HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_ENABLED": "true",
+            "HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_GRACE_DAYS": "0",
+        },
+    )
+    asyncio.run(_delete_leftover_banks(server.url))
+    yield server
+    server.stop()
+
+
+@pytest.fixture
+async def archiving_client(archiving_server) -> AsyncIterator[Hindsight]:
+    client = Hindsight(base_url=archiving_server.url)
+    yield client
+    await client.aclose()
+
+
+@pytest.fixture
+async def experimental_admission_client(experimental_admission_server) -> AsyncIterator[Hindsight]:
+    client = Hindsight(base_url=experimental_admission_server.url)
+    yield client
+    await client.aclose()
+
+
+@pytest.fixture
+async def experimental_decay_client(experimental_decay_server) -> AsyncIterator[Hindsight]:
+    client = Hindsight(base_url=experimental_decay_server.url)
+    yield client
+    await client.aclose()
 
 
 @pytest.fixture

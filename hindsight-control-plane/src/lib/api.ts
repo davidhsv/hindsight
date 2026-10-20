@@ -8,6 +8,16 @@ import { bankApi, bankStatsApi, chunkApi, documentApi, memoryApi } from "./bank-
 import { SESSION_REQUIRED_HEADER } from "./auth/session";
 import { stripBasePath, withBasePath } from "./base-path";
 import { appendTagFilter, type TagFilter, type TagsMatch } from "./tag-filter-params";
+import type {
+  ConfirmMemoryResponse,
+  MemoryLifecycle,
+  RecallLifecycle,
+  RecallTaskContext,
+} from "@vectorize-io/hindsight-client";
+
+// Adaptive memory shapes come from the generated client, so they cannot drift from
+// the dataplane's OpenAPI schema.
+export type { MemoryLifecycle, RecallLifecycle };
 
 /**
  * Reduce an API error `details` value to a string safe to render in a toast.
@@ -620,6 +630,14 @@ export class ControlPlaneClient {
     };
     /** Window for the temporal retrieval arm, used instead of extracting dates from the query text. Ranks memories dated inside it higher; does not drop memories dated outside it. */
     temporal_window?: { start: string; end: string };
+    /** Adaptive memory lifecycle mode only: 'current' leaves out superseded and refuted memories; 'historical' also returns superseded ones, annotated. Omitted: the bank's default view. */
+    lifecycle_view?: "current" | "historical";
+    /** Adaptive memory lifecycle mode only: show memories as they stood at this instant (ISO 8601). Wins over lifecycle_view. */
+    as_of?: string;
+    /** Context admission (bank context_admission_mode not 'off'): why the caller recalls. Omitted: 'explicit_search'. */
+    purpose?: "auto_context" | "explicit_search" | "historical_search";
+    /** Context admission: where the caller is working, compared with memory metadata. */
+    context?: RecallTaskContext;
   }) {
     return this.fetchApi("/api/recall", {
       method: "POST",
@@ -1311,6 +1329,59 @@ export class ControlPlaneClient {
   }
 
   /**
+   * Explicitly confirm that a memory still holds, which reinforces it (adaptive
+   * memory mode 'rank' or 'lifecycle' with reinforcement on; 409 otherwise).
+   */
+  async confirmMemory(
+    memoryId: string,
+    bankId: string,
+    confirmation: { sourceKey?: string; eventTime?: string; reason?: string } = {}
+  ) {
+    const body: Record<string, unknown> = { bank_id: bankId };
+    if (confirmation.sourceKey !== undefined) body.source_key = confirmation.sourceKey;
+    if (confirmation.eventTime !== undefined) body.event_time = confirmation.eventTime;
+    if (confirmation.reason !== undefined) body.reason = confirmation.reason;
+    return this.fetchApi<ConfirmMemoryResponse>(memoryApi(memoryId, bankId, "/confirm"), {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Change a memory's retention policy (importance, exemption, hold, unarchive) in
+   * adaptive memory mode 'rank' or 'lifecycle', or its truth status in 'lifecycle'.
+   * Resolves with the memory's lifecycle view after the change.
+   */
+  async updateMemoryLifecycle(
+    memoryId: string,
+    bankId: string,
+    update: {
+      importance?: number;
+      forgettingExempt?: boolean;
+      exemptionReason?: string;
+      truthStatus?: "active" | "uncertain" | "superseded" | "refuted";
+      supersededBy?: string;
+      reason?: string;
+      hold?: boolean;
+      retentionState?: "active";
+    }
+  ) {
+    const body: Record<string, unknown> = { bank_id: bankId };
+    if (update.importance !== undefined) body.importance = update.importance;
+    if (update.forgettingExempt !== undefined) body.forgetting_exempt = update.forgettingExempt;
+    if (update.exemptionReason !== undefined) body.exemption_reason = update.exemptionReason;
+    if (update.truthStatus !== undefined) body.truth_status = update.truthStatus;
+    if (update.supersededBy !== undefined) body.superseded_by = update.supersededBy;
+    if (update.reason !== undefined) body.reason = update.reason;
+    if (update.hold !== undefined) body.hold = update.hold;
+    if (update.retentionState !== undefined) body.retention_state = update.retentionState;
+    return this.fetchApi<MemoryLifecycle>(memoryApi(memoryId, bankId, "/lifecycle"), {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
    * Get chunk
    */
   async getChunk(chunkId: string) {
@@ -1342,6 +1413,9 @@ export class ControlPlaneClient {
       invalidation_reason: string | null;
       invalidated_at: string | null;
       edited_at: string | null;
+      // Adaptive memory state: present while the bank's adaptive memory mode is not
+      // off, or when anything was stored for the memory.
+      lifecycle?: MemoryLifecycle;
       history?: {
         previous_text: string;
         previous_tags: string[];

@@ -6,6 +6,7 @@ is this provider's whole substance. The HTTP round trip is faked; what is assert
 the requests we build and the order and cut we derive from the answers.
 """
 
+import re
 from contextlib import asynccontextmanager
 from dataclasses import fields
 from unittest.mock import patch
@@ -148,11 +149,59 @@ class TestRanking:
         await encoder._predict([("who paid?", "Alice paid the bill")])
 
         body = session.rank_requests[0]
-        assert body["model"] == "jev-latest"
+        assert body["model"] == "jev-1.14.0"
         assert "who paid?" in body["state"]
         question = body["questions"]["rank"]
         assert question["type"] == "choice"
         assert question["criteria"] == {"c0": "Alice paid the bill"}
+
+    @pytest.mark.asyncio
+    async def test_rank_returns_the_order_and_asks_no_cut(self):
+        encoder, session = _encoder({"c0": 0.2, "c1": 0.7, "c2": 0.1}, prune_candidates=True)
+        order = await encoder.rank("who paid?", ["a", "b", "c"])
+
+        assert order == [1, 0, 2]
+        assert len(session.rank_requests) == 1 and session.cut_requests == []
+        assert session.rank_requests[0]["state"] == "Question: who paid?"
+
+    @pytest.mark.asyncio
+    async def test_rank_tells_the_current_date_in_the_state_only(self):
+        encoder, session = _encoder({"c0": 0.2, "c1": 0.8})
+        await encoder.rank("who paid?", ["a", "b"], current_date="2026-10-01")
+
+        body = session.rank_requests[0]
+        assert list(body) == ["state", "model", "questions"]
+        assert body["state"] == "Question: who paid?\nCurrent date: 2026-10-01"
+        assert body["questions"]["rank"]["instructions"] == "Which candidate answers the question: who paid?"
+        assert body["questions"]["rank"]["criteria"] == {"c0": "a", "c1": "b"}
+
+    @pytest.mark.asyncio
+    async def test_the_current_date_counts_against_the_question_budget(self):
+        """The date line is part of the state, so the pool is packed with it counted: a pool that
+        exactly fills one question without it no longer fits one with it."""
+        docs = [f"document {i} " + "word " * 20 for i in range(4)]
+        state = count_tokens("Question: q")
+        instructions = count_tokens("Which candidate answers the question: q") + 30  # the framing cushion
+        exact_fit = state + instructions + sum(count_tokens(doc) + _OPTION_KEY_OVERHEAD for doc in docs)
+        plain, plain_session = _encoder({}, max_question_tokens=exact_fit)
+        dated, dated_session = _encoder({}, max_question_tokens=exact_fit)
+
+        await plain.rank("q", docs)
+        await dated.rank("q", docs, current_date="2026-10-01")
+
+        assert len(plain_session.rank_requests) == 1
+        assert len(dated_session.rank_requests) > 1
+        assert all(body["state"].endswith("\nCurrent date: 2026-10-01") for body in dated_session.rank_requests)
+
+    @pytest.mark.asyncio
+    async def test_rank_caps_an_overlong_query_as_predict_does(self):
+        long_query = "query word " * 3000
+        ranked, ranked_session = _encoder({"c0": 0.6, "c1": 0.4})
+        predicted, predicted_session = _encoder({"c0": 0.6, "c1": 0.4})
+        await ranked.rank(long_query, ["a", "b"])
+        await predicted._predict([(long_query, "a"), (long_query, "b")])
+
+        assert ranked_session.rank_requests == predicted_session.rank_requests
 
     @pytest.mark.asyncio
     async def test_each_query_is_ranked_in_its_own_pool(self):
@@ -322,8 +371,16 @@ class TestFactory:
 
     def test_defaults_are_jev_and_no_pruning(self):
         config = HindsightConfig.from_env()
-        assert config.reranker_typesafe_model == "jev-latest"
+        assert config.reranker_typesafe_model == "jev-1.14.0"
         assert config.reranker_typesafe_prune_candidates is False
+
+    def test_the_default_model_is_an_explicit_release_and_the_env_overrides_it(self, monkeypatch):
+        """An alias such as jev-latest moves with TypeSafe's releases, and recall's ranking with it."""
+        monkeypatch.delenv("HINDSIGHT_API_RERANKER_TYPESAFE_MODEL", raising=False)
+        assert re.fullmatch(r"jev-\d+\.\d+\.\d+", HindsightConfig.from_env().reranker_typesafe_model)
+
+        monkeypatch.setenv("HINDSIGHT_API_RERANKER_TYPESAFE_MODEL", "jev-latest")
+        assert HindsightConfig.from_env().reranker_typesafe_model == "jev-latest"
 
     @pytest.mark.asyncio
     async def test_base_url_is_honoured(self):

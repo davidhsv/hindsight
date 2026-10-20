@@ -798,6 +798,9 @@ _UNSCOPED_BY_DESIGN = {
     # drain the bank's own queues and return nothing.
     "submit_async_graph_maintenance": "queued after every write, including a scoped caller's; returns no data",
     "submit_async_vector_index_maintenance": "queued after every write, including a scoped caller's; returns no data",
+    # Archive/prune is bank-wide retention policy, not a caller's request: only the
+    # after-consolidation hook and the maintenance loop submit it, both with an internal context.
+    "submit_async_adaptive_memory_maintenance": "submitted only internally (after consolidation, maintenance loop); returns no data",
 }
 _SCOPE_HANDLING = {
     "_tag_scope",

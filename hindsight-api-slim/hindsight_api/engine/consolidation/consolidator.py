@@ -22,7 +22,8 @@ import logging
 import math
 import time
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -33,12 +34,26 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import asyncpg
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic.json_schema import DEFAULT_REF_TEMPLATE, GenerateJsonSchema, JsonSchemaMode
 
 from ...config import get_config
 from ...metrics import get_metrics_collector
 from ...worker.stage import set_stage
+from ..adaptive import clock as adaptive_clock
+from ..adaptive.claims import RETIRED_STATUSES
+from ..adaptive.models import AdaptiveMode, ClaimState, TruthStatus
+from ..adaptive.producers import (
+    FactEvidence,
+    ObservationEvidence,
+    fact_evidence,
+    mode_settings,
+    reinforcement_allowed,
+    write_settings,
+)
+from ..adaptive.settings import lifecycle_scope_keys
 from ..db import DatabaseBackend
 from ..db_utils import acquire_with_retry
+from ..fact_budget import select_facts_within_budget
 from ..llm_interface import OutputTooLongError, PromptCachePrefix, ProviderRateLimitResetError
 from ..llm_trace import (
     record_created_memory_ids,
@@ -49,19 +64,23 @@ from ..llm_trace import (
 )
 from ..llm_wrapper import sanitize_llm_output
 from ..memories import StoredMemory, get_memories
-from ..memory_engine import Budget, fq_table
+from ..memory_engine import Budget, count_tokens, fq_table
 from ..prompt_utils import truncate_context_for_prompt
 from ..retain import embedding_utils
+from ..search.lifecycle_filter import ALL_WITH_STATUS
+from ..source_facts import select_source_facts_within_budget
+from . import lifecycle as claim_lifecycle
 from .prompts import (
     build_consolidation_input,
     build_consolidation_system_prompt,
 )
-from .triage import TriageResult, triage_facts, triage_model
+from .triage import MAX_CANDIDATES, TriageResult, triage_facts, triage_model
 
 if TYPE_CHECKING:
     # The engine's connection abstraction, which is what every caller passes; the annotations
     # below named asyncpg's concrete type, which predates it.
     from ...api.http import RequestContext
+    from ..adaptive.settings import AdaptiveSettings
     from ..db.base import DatabaseConnection
     from ..memories.base import StoredMemory
     from ..memory_engine import MemoryEngine
@@ -290,6 +309,7 @@ async def _dedup_adjudicate(
     anchor_emb_str: str | None,
     tags: list[str] | None,
     exclude_id: str | None,
+    exclude_non_active: bool = False,
 ) -> _DedupOutcome:
     """Probe one observation's embedding against in-scope observations and adjudicate a merge.
 
@@ -304,6 +324,10 @@ async def _dedup_adjudicate(
 
     The embedder and the LLM both run with NO connection held; only the semantic+BM25 probe
     briefly borrows a short-lived connection.
+
+    ``exclude_non_active`` (lifecycle mode) leaves superseded and refuted observations out of the
+    probe inside the store's SQL, before its limit, so retired near-twins can never crowd the live
+    twin out of the top-K nor be folded into.
     """
     from ..memories import get_memories
 
@@ -326,6 +350,7 @@ async def _dedup_adjudicate(
         tags_match=tags_match,
         enable_graph=False,
         temporal_window=None,
+        **({"exclude_non_active": True} if exclude_non_active else {}),
     )
     results = grouped["observation"].semantic
     best_id: str | None = None
@@ -421,6 +446,7 @@ async def _apply_dedup_update_fold(
     outcome: _DedupOutcome,
     updated_id: str,
     updated_text: str,
+    claim_state: "claim_lifecycle.ApplyState | None" = None,
 ) -> bool:
     """Fold a just-rewritten observation into the twin the adjudicator matched it to.
 
@@ -434,8 +460,13 @@ async def _apply_dedup_update_fold(
     Like :func:`_apply_dedup_create_fold` this runs on the caller's connection inside the
     caller's transaction (#3876); ``outcome`` comes from the connection-free prepare phase.
     Returns True when the updated row was folded away.
+
+    ``claim_state`` (lifecycle mode): fold only into a twin that is still live under the batch's
+    claim lock, and retire the updated row as merged into it instead of deleting it.
     """
     if not outcome.should_merge or outcome.best_id is None:
+        return False
+    if claim_state is not None and not await _merge_precheck(conn, claim_state, updated_id, outcome.best_id):
         return False
 
     # Lock order is sources-before-observation, the same as the create fold and the normal
@@ -455,6 +486,9 @@ async def _apply_dedup_update_fold(
         # Nothing live to fold, or the twin / updated row vanished during the LLM window —
         # keep the updated row as a distinct observation instead of deleting it unfolded.
         return False
+    if claim_state is not None:
+        await _merge_retire(conn, claim_state, updated_id, outcome.best_id)
+        return True
     await _execute_delete_action(conn, bank_id, updated_id)
     logger.info(
         "[CONSOLIDATION] dedup-merged updated observation %s into %s (cosine>=%.2f)",
@@ -477,6 +511,36 @@ class _BatchDeltas:
     stats: dict[str, int]
     tags: set[str]
     cancelled: bool
+
+
+@dataclass
+class _LifecycleRun:
+    """Adaptive memory's claim lifecycle across one consolidation job (lifecycle or observe mode).
+
+    ``counts`` tallies what the job's batches did (transitions whose CAS won, validation drops by
+    reason, history attaches, shadow records); it is reported under ``stats["lifecycle"]``.
+    Parallel batches update it between awaits only, so the single event loop keeps it consistent.
+    """
+
+    settings: "AdaptiveSettings"
+    counts: Counter[str] = field(default_factory=Counter)
+
+    @property
+    def lifecycle(self) -> bool:
+        return self.settings.effective_mode.lifecycle
+
+    @property
+    def observe(self) -> bool:
+        return self.settings.effective_mode is AdaptiveMode.OBSERVE
+
+
+@dataclass
+class _BatchLifecycle:
+    """One LLM batch's view of the job's lifecycle run, plus what it hands back to the job:
+    the tags of the observations it retired (mental models scoped to them must refresh)."""
+
+    run: _LifecycleRun
+    retired_tags: set[str] = field(default_factory=set)
 
 
 def _parse_observation_scopes(memory: dict[str, Any]) -> Any:
@@ -789,6 +853,64 @@ class _DeleteAction(BaseModel):
     reason: str = ""  # LLM's one-sentence justification (diagnostic only)
 
 
+# Lifecycle-mode actions (adaptive memory). Every label is optional and lenient: a
+# malformed entry is dropped by its ``mode="before"`` normalizer rather than rejecting the response
+# (#4152), and whether a named id is one the model was shown is checked after miscopied ids are
+# repaired (``_resolve_miscopied_ids``), in ``lifecycle.plan_lifecycle``. Only ``_build_response_model
+# (lifecycle=True)`` advertises them; everything else reads them with ``getattr`` defaults, so base,
+# triage and MockLLM instances keep working.
+_SUPERSEDES_DESCRIPTION = "Ids of retirable existing observations this one replaces because their state changed."
+_REFUTES_DESCRIPTION = "Ids of retirable existing observations this one shows were wrong."
+_REFINES_DESCRIPTION = "Ids of existing observations this one adds detail to; they stay true."
+_CONFLICTS_DESCRIPTION = "Ids of existing observations this one contradicts when neither clearly wins."
+_SPLIT_FROM_DESCRIPTION = "Id of the observation two or more creates split into separate facets."
+_KEEPS_DESCRIPTION = "Source fact ids of a replaced observation that stay true and carry over to the successor."
+_RELATION_DESCRIPTION = (
+    "supersedes: the observation's state changed; refutes: it was wrong; historical: an older fact "
+    "restating a superseded or refuted observation. Null for an ordinary update."
+)
+_RETIRES_DESCRIPTION = (
+    "Source fact ids of the target that are no longer true (empty: every one this response does not cite)."
+)
+
+
+class _LifecycleCreateAction(_CreateAction):
+    supersedes: list[str] = Field(default_factory=list, description=_SUPERSEDES_DESCRIPTION)
+    refutes: list[str] = Field(default_factory=list, description=_REFUTES_DESCRIPTION)
+    refines: list[str] = Field(default_factory=list, description=_REFINES_DESCRIPTION)
+    conflicts_with: list[str] = Field(default_factory=list, description=_CONFLICTS_DESCRIPTION)
+    split_from: str | None = Field(default=None, description=_SPLIT_FROM_DESCRIPTION)
+    keeps_source_ids: list[str] = Field(default_factory=list, description=_KEEPS_DESCRIPTION)
+
+    @field_validator("supersedes", "refutes", "refines", "conflicts_with", "keeps_source_ids", mode="before")
+    @classmethod
+    def _lenient_ids(cls, v: Any) -> list[str]:
+        return claim_lifecycle.clean_ids(v)
+
+    @field_validator("split_from", mode="before")
+    @classmethod
+    def _lenient_id(cls, v: Any) -> str | None:
+        return claim_lifecycle.clean_id(v)
+
+
+class _LifecycleUpdateAction(_UpdateAction):
+    relation: Literal["supersedes", "refutes", "historical"] | None = Field(
+        default=None, description=_RELATION_DESCRIPTION
+    )
+    retires_source_ids: list[str] = Field(default_factory=list, description=_RETIRES_DESCRIPTION)
+    keeps_source_ids: list[str] = Field(default_factory=list, description=_KEEPS_DESCRIPTION)
+
+    @field_validator("relation", mode="before")
+    @classmethod
+    def _lenient_relation(cls, v: Any) -> str | None:
+        return claim_lifecycle.clean_relation(v)
+
+    @field_validator("retires_source_ids", "keeps_source_ids", mode="before")
+    @classmethod
+    def _lenient_ids(cls, v: Any) -> list[str]:
+        return claim_lifecycle.clean_ids(v)
+
+
 @dataclass
 class _PreparedDelete:
     observation_id: str
@@ -851,6 +973,11 @@ class _PreparedCreate:
     agg: "_SourceAggregation"
     embedding_str: str | None
     dedup: _DedupOutcome | None = None
+    #: The inserted observation's id, set by the write (None until then, or when it was skipped).
+    observation_id: str | None = None
+    #: Lifecycle mode: the claim transitions this create carries (it is a successor, a split child,
+    #: a refinement or a conflicting claim). None for an ordinary create.
+    lifecycle_plan: "claim_lifecycle.SuccessorPlan | None" = None
 
 
 @dataclass
@@ -1203,6 +1330,9 @@ def _build_response_model(
     *,
     fact_ids: list[str] | None = None,
     supports_max_items: bool = True,
+    lifecycle: bool = False,
+    target_ids: Sequence[str] = (),
+    source_ids: Sequence[str] = (),
 ) -> type[_ConsolidationBatchResponse]:
     """Build a response model, optionally constraining creates via JSON schema.
 
@@ -1217,16 +1347,25 @@ def _build_response_model(
     batch fact is discarded, so a grammar-constrained provider must not be able to
     emit one (#5273). Schema only: validation stays ``list[str]``, so a provider that
     ignores the hint cannot fail the batch.
+
+    ``lifecycle`` (adaptive memory, lifecycle mode) builds the lifecycle subclasses instead, with
+    the label lists pinned to ``target_ids`` (the pool's retirable observations) and
+    ``source_ids`` (the source fact ids shown with them); every other mode gets the models above,
+    byte for byte.
     """
     cap = max(max_creates, 0) if supports_max_items and max_creates is not None and max_creates >= 0 else None
+    if lifecycle:
+        return _build_lifecycle_response_model(
+            cap,
+            fact_ids=fact_ids,
+            supports_max_items=supports_max_items,
+            target_ids=target_ids,
+            source_ids=source_ids,
+        )
     if cap is None and not fact_ids:
         return _ConsolidationBatchResponse
 
-    ids_schema: dict[str, Any] = {}
-    if fact_ids:
-        ids_schema["items"] = {"type": "string", "enum": list(fact_ids)}
-        if supports_max_items:
-            ids_schema["minItems"] = 1
+    ids_schema = _fact_ids_schema(fact_ids, supports_max_items)
 
     class _Create(_CreateAction):
         source_fact_ids: list[str] = Field(json_schema_extra=ids_schema)
@@ -1239,6 +1378,148 @@ def _build_response_model(
         updates: list[_Update] = []
 
     return _ConstrainedConsolidationBatchResponse
+
+
+def _fact_ids_schema(fact_ids: list[str] | None, supports_max_items: bool) -> dict[str, Any]:
+    ids_schema: dict[str, Any] = {}
+    if fact_ids:
+        ids_schema["items"] = {"type": "string", "enum": list(fact_ids)}
+        if supports_max_items:
+            ids_schema["minItems"] = 1
+    return ids_schema
+
+
+def _pinned_ids_schema(ids: Sequence[str], supports_max_items: bool) -> dict[str, Any]:
+    """An id-list field's schema hint: ``enum``-pinned to ``ids``, or empty-only when there are none.
+
+    Schema only, like ``source_fact_ids``: validation stays a lenient ``list[str]``.
+    """
+    if ids:
+        return {"items": {"type": "string", "enum": list(ids)}}
+    return {"maxItems": 0} if supports_max_items else {}
+
+
+def _pin_nullable_id(ids: Sequence[str]) -> Callable[[dict[str, Any]], None]:
+    """``json_schema_extra`` for ``str | None``: put the ``enum`` on the string branch of the ``anyOf``
+    (on the field itself it would forbid null)."""
+
+    def pin(schema: dict[str, Any]) -> None:
+        if not ids:
+            return
+        for branch in schema.get("anyOf") or []:
+            if branch.get("type") == "string":
+                branch["enum"] = list(ids)
+
+    return pin
+
+
+#: ``$defs`` names of the id enums the lifecycle schema spells once and references from every field.
+_BATCH_FACT_ID_DEF = "BatchFactId"
+_RETIRABLE_OBSERVATION_ID_DEF = "RetirableObservationId"
+_SHOWN_SOURCE_ID_DEF = "ShownSourceFactId"
+
+
+def _hoist_id_enums(
+    schema: dict[str, Any], enums: Mapping[str, Sequence[str]], *, ref_template: str = DEFAULT_REF_TEMPLATE
+) -> dict[str, Any]:
+    """Spell each pinned id list once under ``$defs`` and ``$ref`` it wherever a field pins it.
+
+    The lifecycle labels pin the pool's retirable ids on five fields and the shown source ids on
+    three. Inline, every id is repeated on each of them, so the schema (sent as input on every call)
+    grows with the pool several times over. The constraint itself is unchanged, and every provider
+    path already resolves ``$defs`` references (the create and update actions are references too).
+    """
+    names = {json.dumps(list(ids)): name for name, ids in enums.items() if ids}
+    used: dict[str, list[Any]] = {}
+
+    def hoist(node: Any) -> Any:
+        if isinstance(node, dict):
+            if set(node) == {"type", "enum"} and node["type"] == "string":
+                name = names.get(json.dumps(node["enum"]))
+                if name is not None:
+                    used[name] = node["enum"]
+                    return {"$ref": ref_template.format(model=name)}
+            return {key: hoist(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [hoist(item) for item in node]
+        return node
+
+    hoisted = hoist(schema)
+    if used:
+        defs = hoisted.setdefault("$defs", {})
+        for name, ids in used.items():
+            defs[name] = {"type": "string", "enum": list(ids)}
+    return hoisted
+
+
+def _build_lifecycle_response_model(
+    cap: int | None,
+    *,
+    fact_ids: list[str] | None,
+    supports_max_items: bool,
+    target_ids: Sequence[str],
+    source_ids: Sequence[str],
+) -> type[_ConsolidationBatchResponse]:
+    """The lifecycle-mode response model: the base fields plus the lifecycle labels.
+
+    Target lists are ``enum``-pinned to the pool's retirable observation ids and the source-id lists
+    to the source fact ids the pool showed with them, so a grammar-constrained provider can only
+    name what it was shown. Each id list is spelled once in the JSON schema (``_hoist_id_enums``).
+    A subclass per batch, like the base constrained model.
+    """
+    ids_schema = _fact_ids_schema(fact_ids, supports_max_items)
+    targets = _pinned_ids_schema(target_ids, supports_max_items)
+    sources = _pinned_ids_schema(source_ids, supports_max_items)
+
+    class _Create(_LifecycleCreateAction):
+        source_fact_ids: list[str] = Field(json_schema_extra=ids_schema)
+        supersedes: list[str] = Field(
+            default_factory=list, description=_SUPERSEDES_DESCRIPTION, json_schema_extra=targets
+        )
+        refutes: list[str] = Field(default_factory=list, description=_REFUTES_DESCRIPTION, json_schema_extra=targets)
+        refines: list[str] = Field(default_factory=list, description=_REFINES_DESCRIPTION, json_schema_extra=targets)
+        conflicts_with: list[str] = Field(
+            default_factory=list, description=_CONFLICTS_DESCRIPTION, json_schema_extra=targets
+        )
+        split_from: str | None = Field(
+            default=None, description=_SPLIT_FROM_DESCRIPTION, json_schema_extra=_pin_nullable_id(target_ids)
+        )
+        keeps_source_ids: list[str] = Field(
+            default_factory=list, description=_KEEPS_DESCRIPTION, json_schema_extra=sources
+        )
+
+    class _Update(_LifecycleUpdateAction):
+        source_fact_ids: list[str] = Field(json_schema_extra=ids_schema)
+        retires_source_ids: list[str] = Field(
+            default_factory=list, description=_RETIRES_DESCRIPTION, json_schema_extra=sources
+        )
+        keeps_source_ids: list[str] = Field(
+            default_factory=list, description=_KEEPS_DESCRIPTION, json_schema_extra=sources
+        )
+
+    shared_enums = {
+        _BATCH_FACT_ID_DEF: list(fact_ids or []),
+        _RETIRABLE_OBSERVATION_ID_DEF: list(target_ids),
+        _SHOWN_SOURCE_ID_DEF: list(source_ids),
+    }
+
+    class _LifecycleConsolidationBatchResponse(_ConsolidationBatchResponse):
+        creates: list[_Create] = Field(default=[], max_length=cap)
+        updates: list[_Update] = []
+
+        @classmethod
+        def model_json_schema(
+            cls,
+            by_alias: bool = True,
+            ref_template: str = DEFAULT_REF_TEMPLATE,
+            schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
+            mode: JsonSchemaMode = "validation",
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            schema = super().model_json_schema(by_alias, ref_template, schema_generator, mode, **kwargs)
+            return _hoist_id_enums(schema, shared_enums, ref_template=ref_template)
+
+    return _LifecycleConsolidationBatchResponse
 
 
 class ConsolidationPerfLog:
@@ -1383,6 +1664,7 @@ async def _fetch_unconsolidated_rows(
     limit: int,
     observation_scopes: list[list[str]] | None,
     llm_parallelism: int,
+    with_provenance: bool = False,
 ) -> list[dict[str, Any]]:
     """Unconsolidated candidate facts, read through the memories store.
 
@@ -1401,6 +1683,10 @@ async def _fetch_unconsolidated_rows(
     per group, leaving enough distinct groups in the round to fill the parallel slots. Facts
     are still consumed oldest-first *within* a group, which is the ordering consolidation
     actually depends on.
+
+    ``with_provenance`` (adaptive memory in rank/lifecycle) adds what reinforcement keys a fact by:
+    ``document_id``, ``metadata`` and ``document_id_minted``. The first two come with the read; the
+    minted marks are one batched read of the round's documents. Nothing reaches the prompt.
     """
     store = get_memories()
     scopes: list[list[str] | None] = list(observation_scopes) if observation_scopes else [None]
@@ -1416,7 +1702,7 @@ async def _fetch_unconsolidated_rows(
     ordered = (
         _fair_group_slice(oldest_first, limit, math.ceil(limit / llm_parallelism)) if fair else oldest_first[:limit]
     )
-    return [
+    rows = [
         {
             "id": uuid.UUID(m.unit_id),
             "text": m.text,
@@ -1429,9 +1715,19 @@ async def _fetch_unconsolidated_rows(
             "observation_scopes": m.observation_scopes,
             # Read-time version: the write re-checks it (see _sources_changed_since_read).
             "updated_at": m.updated_at,
+            # The prompt shows only its scope keys (see _scope_label).
+            "metadata": m.metadata or {},
         }
         for m in ordered
     ]
+    if with_provenance and rows:
+        minted = await store.minted_document_ids(
+            conn, bank_id=bank_id, document_ids=[m.document_id for m in ordered if m.document_id]
+        )
+        for row, m in zip(rows, ordered):
+            row["document_id"] = m.document_id
+            row["document_id_minted"] = m.document_id is not None and str(m.document_id) in minted
+    return rows
 
 
 #: Cap on the store-side count of unconsolidated facts. Used only for the "is there work?"
@@ -1592,6 +1888,21 @@ async def _run_consolidation_job(
 
     pool = memory_engine._backend
 
+    # Adaptive memory: reinforcement settings while the bank's mode writes state (rank/lifecycle)
+    # and its reinforcement switch is on; None otherwise, and the batches run exactly as before.
+    adaptive_settings = write_settings(config, bank_id=bank_id)
+    if adaptive_settings is not None and not reinforcement_allowed(adaptive_settings):
+        adaptive_settings = None
+    # Claim lifecycle: lifecycle mode labels and applies transitions, observe mode records the
+    # retirements a plain delete would have been. None otherwise: off and rank run as before.
+    lifecycle_settings = mode_settings(config, bank_id=bank_id)
+    lifecycle_run = (
+        _LifecycleRun(lifecycle_settings)
+        if lifecycle_settings is not None
+        and (lifecycle_settings.effective_mode.lifecycle or lifecycle_settings.effective_mode is AdaptiveMode.OBSERVE)
+        else None
+    )
+
     # Get bank profile
     async with acquire_with_retry(pool) as conn:
         t0 = time.perf_counter()
@@ -1703,6 +2014,9 @@ async def _run_consolidation_job(
                 fetch_limit,
                 observation_scopes,
                 max(1, config.consolidation_llm_parallelism),
+                # Lifecycle mode reads the facts' metadata too (scope fingerprints, source trust).
+                with_provenance=adaptive_settings is not None
+                or (lifecycle_run is not None and lifecycle_run.lifecycle),
             )
             perf.record_timing("fetch_memories", time.perf_counter() - t0)
 
@@ -1758,6 +2072,7 @@ async def _run_consolidation_job(
                 memory_tags = memory.get("tags") or []
                 if memory_tags:
                     local_tags.update(memory_tags)
+            batch_lifecycle = _BatchLifecycle(lifecycle_run) if lifecycle_run is not None else None
 
             # Adaptive splitting: on LLM failure, halve the sub-batch and retry,
             # down to batch_size=1. Only if a single-memory batch still fails is
@@ -1825,6 +2140,8 @@ async def _run_consolidation_job(
                             config=config,
                             obs_tags_override=obs_tags,
                             mark_consolidated_ids=sub_ids if is_final_pass else None,
+                            adaptive_settings=adaptive_settings,
+                            lifecycle=batch_lifecycle,
                         )
                         sub_deleted += pass_deleted
                         if pass_failed:
@@ -1868,6 +2185,8 @@ async def _run_consolidation_job(
                         perf=batch_perf,
                         config=config,
                         mark_consolidated_ids=sub_ids,
+                        adaptive_settings=adaptive_settings,
+                        lifecycle=batch_lifecycle,
                     )
 
                 all_deleted += sub_deleted
@@ -1943,10 +2262,13 @@ async def _run_consolidation_job(
                     # (#3411). Only the succeeded source facts — the ones just marked
                     # consolidated — contribute a tag. (Store-owned: no witness, so this is a
                     # plain best-effort write; a missed tag only defers a mental-model refresh.)
+                    # A retired observation's tags count too: a mental model grounded on it must refresh.
+                    retired_tags = batch_lifecycle.retired_tags if batch_lifecycle is not None else set()
                     if operation_id and succeeded_ids:
                         succeeded_set = {str(mem_id) for mem_id in succeeded_ids}
                         batch_tags = sorted(
                             {t for m in llm_batch_local if str(m["id"]) in succeeded_set for t in (m.get("tags") or [])}
+                            | retired_tags
                         )
                         if batch_tags:
                             await _persist_pending_refresh_tags(conn, operation_id, batch_tags)
@@ -2058,6 +2380,8 @@ async def _run_consolidation_job(
             # gives us atomicity.
             perf.merge_from(batch_perf)
 
+            if batch_lifecycle is not None:
+                local_tags.update(batch_lifecycle.retired_tags)
             return _BatchDeltas(stats=local_stats, tags=local_tags, cancelled=cancelled_local)
 
         # Number every batch up front so log line numbering is deterministic
@@ -2219,6 +2543,12 @@ async def _run_consolidation_job(
             f"per-class breakdown."
         )
     stats["unresolved_actions"] = perf.unresolved_actions
+    if lifecycle_run is not None and lifecycle_run.counts:
+        # Only when the bank runs the claim lifecycle and something happened: an off-mode result
+        # carries no new key.
+        lifecycle_stats = {f"lifecycle_{name}": count for name, count in sorted(lifecycle_run.counts.items())}
+        stats.update(lifecycle_stats)
+        perf.log(f"[7] Lifecycle: {lifecycle_stats}")
     if perf.unresolved_actions:
         perf.log(
             f"[6] WARNING: {perf.unresolved_actions} observation create/update action(s) cited no fact id from "
@@ -2397,6 +2727,8 @@ async def _process_memory_batch(
     config: Any = None,
     obs_tags_override: list[str] | None = None,
     mark_consolidated_ids: list[Any] | None = None,
+    adaptive_settings: "AdaptiveSettings | None" = None,
+    lifecycle: _BatchLifecycle | None = None,
 ) -> tuple[list[dict[str, Any]], int, bool]:
     """
     Process a batch of memories in a single LLM call.
@@ -2421,6 +2753,15 @@ async def _process_memory_batch(
             batch's write transaction, so the stamps share the fate of the observations
             derived from the same LLM response (#3876). None on a pass that is not the
             final one for these memories — the caller stamps once, on the last pass.
+        adaptive_settings: Set when the bank reinforces (rank/lifecycle, reinforcement on):
+            the observations this batch creates, updates and folds into are reinforced by
+            their new evidence, in a savepoint of the batch's transaction. The facts then
+            carry their provenance (``_fetch_unconsolidated_rows(with_provenance=True)``).
+        lifecycle: Set when the bank runs the claim lifecycle. In lifecycle mode the pool shows
+            retired observations labelled, the prompt and schema are the lifecycle variants, and the
+            response's labels become claim transitions inside the batch's transaction (see
+            ``lifecycle``); in observe mode a plain delete also records the retirements it would have
+            been (shadow rows). The retired observations' tags are handed back on it.
     """
     # Map the source memories this batch consumes onto the consolidation trace.
     record_source_memory_ids([str(m["id"]) for m in memories])
@@ -2438,6 +2779,11 @@ async def _process_memory_batch(
     # scope applies to the whole pass. Resolved before the recall because the recall
     # applies the source-facts token limits a strategy may override.
     config = _config_for_scope(config, fact_tags)
+    lifecycle_mode = lifecycle is not None and lifecycle.run.lifecycle
+    scope_tags = frozenset(fact_tags)
+    # Passed only in lifecycle mode, so every other mode calls the recall and dedup seams exactly as before.
+    lifecycle_kwargs: dict[str, Any] = {"lifecycle": True} if lifecycle_mode else {}
+    dedup_kwargs: dict[str, Any] = {"exclude_non_active": True} if lifecycle_mode else {}
 
     # 1. Parallel recalls — one per fact
     # When obs_tags_override is set, use it as the observation scope for all facts.
@@ -2451,6 +2797,7 @@ async def _process_memory_batch(
             request_context=request_context,
             tags=observation_scope_tags if observation_scope_tags is not None else (m.get("tags") or []),
             config=config,
+            **lifecycle_kwargs,
         )
         for m in memories
     ]
@@ -2459,6 +2806,24 @@ async def _process_memory_batch(
     # existing twin from the LLM and turn an UPDATE into a duplicate CREATE.
     # The batch's memories stay unconsolidated and are picked up on retry.
     per_fact_recalls = await _gather_or_cancel(recall_tasks)
+    lifecycle_pool: dict[str, claim_lifecycle.PoolEntry] | None = None
+    if lifecycle_mode:
+
+        def live_recall(index: int):
+            m = memories[index]
+            return _find_related_observations(
+                memory_engine=memory_engine,
+                bank_id=bank_id,
+                query=m["text"],
+                request_context=request_context,
+                tags=observation_scope_tags if observation_scope_tags is not None else (m.get("tags") or []),
+                config=config,
+                lifecycle=True,
+                live_only=True,
+            )
+
+        shaped = await _shape_lifecycle_pools(pool, bank_id, per_fact_recalls, config, scope_tags, live_recall)
+        per_fact_recalls, lifecycle_pool = shaped.recalls, shaped.entries
     if perf:
         perf.record_timing("recall", time.perf_counter() - t0)
 
@@ -2486,7 +2851,14 @@ async def _process_memory_batch(
         current_count = 0
         if max_obs > 0:
             async with acquire_with_retry(pool) as count_conn:
-                current_count = await _count_observations_for_scope(count_conn, bank_id, fact_tags)
+                current_count = (
+                    # Lifecycle mode: a retired observation no longer holds a slot.
+                    await get_memories().count_active_observations(
+                        count_conn, bank_id=bank_id, tags=fact_tags, tags_match="all_strict"
+                    )
+                    if lifecycle_mode
+                    else await _count_observations_for_scope(count_conn, bank_id, fact_tags)
+                )
         remaining_observation_slots = max(max_obs - current_count, 0)
         if remaining_observation_slots == 0:
             logger.info(
@@ -2497,18 +2869,29 @@ async def _process_memory_batch(
     # 2c. Triage: restatements and chatter are settled by a typed judgment, not the LLM.
     triage = TriageResult()
     if (decision_model := triage_model(config)) is not None:
-        async with acquire_with_retry(pool) as conn:
-            entities_by_fact = await get_memories().entities_for_units(
-                conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[str(m["id"]) for m in memories]
+        triage_memories, triage_candidates = list(memories), [list(r.results) for r in per_fact_recalls]
+        if lifecycle_pool is not None:
+            # A fact whose candidates include a retired observation may be old news about it, which
+            # only the lifecycle prompt can label: triage must not settle it as new or a restatement.
+            pairs = [
+                (m, c)
+                for m, c in zip(triage_memories, triage_candidates)
+                if not any(lifecycle_pool[str(o.id)].retired for o in c[:MAX_CANDIDATES] if str(o.id) in lifecycle_pool)
+            ]
+            triage_memories, triage_candidates = [m for m, _ in pairs], [c for _, c in pairs]
+        if triage_memories:
+            async with acquire_with_retry(pool) as conn:
+                entities_by_fact = await get_memories().entities_for_units(
+                    conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[str(m["id"]) for m in triage_memories]
+                )
+            triage = await triage_facts(
+                triage_memories,
+                triage_candidates,
+                decision_model,
+                entities_by_fact=entities_by_fact,
+                mission=(config.observations_mission or "").strip(),
+                may_create=remaining_observation_slots is None,
             )
-        triage = await triage_facts(
-            memories,
-            [list(r.results) for r in per_fact_recalls],
-            decision_model,
-            entities_by_fact=entities_by_fact,
-            mission=(config.observations_mission or "").strip(),
-            may_create=remaining_observation_slots is None,
-        )
     llm_memories = [m for m in memories if not triage.settled(str(m["id"]))]
 
     # 3. Single LLM call — skipped when triage settled every fact.
@@ -2522,6 +2905,7 @@ async def _process_memory_batch(
             config=config,
             remaining_observation_slots=remaining_observation_slots,
             max_observations_per_scope=max_obs,
+            lifecycle_pool=lifecycle_pool,
         )
         if llm_memories
         else _BatchLLMResult()
@@ -2530,7 +2914,33 @@ async def _process_memory_batch(
         perf.record_timing("llm", time.perf_counter() - t0)
         perf.record_llm_call(llm_result.obs_count, llm_result.prompt_chars)
         perf.record_llm_batch_failures(llm_result.failed_attempts)
-    _apply_triage(llm_result, triage, union_observations)
+    lifecycle_plan: claim_lifecycle.LifecyclePlan | None = None
+    lifecycle_drops: claim_lifecycle.Drops | None = None
+    if lifecycle is not None and lifecycle_pool is not None:
+        # Ids first: the labels and the triage redirect below must see the observations they name.
+        _resolve_miscopied_ids(
+            llm_result,
+            {str(obs.id) for obs in union_observations},
+            {s for e in lifecycle_pool.values() for s in e.source_ids},
+        )
+        _apply_triage(llm_result, triage, union_observations, retiring=_retirements_named(llm_result, lifecycle_pool))
+        lifecycle_drops = claim_lifecycle.Drops(bank_id=bank_id)
+        lifecycle_plan = claim_lifecycle.plan_lifecycle(
+            llm_result,
+            claim_lifecycle.PlanInputs(
+                pool=lifecycle_pool,
+                facts={str(m["id"]): m for m in memories},
+                scope_tags=scope_tags,
+                settings=lifecycle.run.settings,
+                now=adaptive_clock.utcnow(),
+                target_sources=await _lifecycle_target_sources(pool, bank_id, llm_result, lifecycle_pool),
+            ),
+            lifecycle_drops,
+            new_create=lambda text, fact_ids, reason: _CreateAction(text=text, source_fact_ids=fact_ids, reason=reason),
+        )
+        _cap_lifecycle_creates(llm_result, lifecycle_plan, remaining_observation_slots, max_obs)
+    else:
+        _apply_triage(llm_result, triage, union_observations)
 
     # 4. Prepare every action connection-free, then apply them all in ONE transaction.
     #
@@ -2667,6 +3077,7 @@ async def _process_memory_batch(
                 embedding_str,
                 agg.tags,
                 exclude_id=update.observation_id,
+                **dedup_kwargs,
             )
         return prepared
 
@@ -2693,6 +3104,10 @@ async def _process_memory_batch(
             return None
         agg = _aggregate_source_fields(source_mems, tags=fact_tags)
         create_source_ids = [m["id"] for m in source_mems]
+        plan = lifecycle_plan.for_create(create) if lifecycle_plan is not None else None
+        labelled = plan is not None and plan.labelled
+        if plan is not None and lifecycle_pool is not None:
+            create_source_ids = _lifecycle_create_sources(plan, create_source_ids)
 
         # Reconcile against observations shown to the LLM: an exact-text match means
         # this CREATE reproduces verbatim an observation the model already had in context.
@@ -2700,7 +3115,9 @@ async def _process_memory_batch(
         # — no row is inserted, nothing is lost. We deliberately do NOT also UPDATE the twin
         # here: the LLM frequently UPDATEd it earlier in this same batch, and a second update
         # would run off the pre-LLM snapshot and clobber that change (see _dedupe_updates).
-        duplicate_of = _duplicate_create_target(create.text, shown_obs_by_text, update_texts)
+        # A labelled create (a successor, a split facet) is a new claim by construction: it is
+        # never collapsed into an existing observation, by exact text or by semantic dedup.
+        duplicate_of = None if labelled else _duplicate_create_target(create.text, shown_obs_by_text, update_texts)
         if duplicate_of is not None:
             logger.warning(
                 "[CONSOLIDATION] dropped duplicate observation CREATE — verbatim match of %s; llm_reason=%r",
@@ -2720,13 +3137,14 @@ async def _process_memory_batch(
             source_fact_tags=agg.tags,
             agg=agg,
             embedding_str=embedding_str,
+            lifecycle_plan=plan,
         )
         # Semantic near-duplicate reconciliation: merge this CREATE into an existing
         # near-identical observation (LLM-adjudicated, 1-by-1) instead of inserting a dup.
         # The probe reads the state the batch started from, so two near-twin CREATEs in ONE
         # response can both land; the next round's probe sees them and folds them, and the
         # exact-text guard above already covers the common case.
-        if dedup_enabled:
+        if dedup_enabled and not labelled:
             prepared_create.dedup = await _dedup_adjudicate(
                 pool,
                 memory_engine,
@@ -2737,6 +3155,7 @@ async def _process_memory_batch(
                 embedding_str,
                 agg.tags,
                 exclude_id=None,
+                **dedup_kwargs,
             )
         return prepared_create
 
@@ -2744,13 +3163,28 @@ async def _process_memory_batch(
         p for p in await _gather_or_cancel([_bounded(_prepare_create(c)) for c in llm_result.creates]) if p is not None
     ]
 
+    # --- Prepare: reinforcement evidence --------------------------------------
+    # The survivors' existing sources and their provenance, read before the transaction like the
+    # liveness preflight above, so the write holds its locks no longer than it did.
+    evidence: ObservationEvidence | None = None
+    if adaptive_settings is not None and (prepared_updates or prepared_creates or prepared_deletes):
+        evidence = await _prepare_observation_evidence(
+            pool, bank_id, adaptive_settings, memories, prepared_updates, prepared_creates, prepared_deletes
+        )
+
     # --- Apply: one transaction for everything this LLM response decided ------
     deleted_count = 0
     # A failed LLM call yields no actions, and its memories must NOT be stamped: the caller
     # bisects and retries them, and a stamp would exclude them from pending consolidation
     # for good. With neither writes nor stamps there is nothing to open a transaction for.
     stamp_ids = list(mark_consolidated_ids or []) if not llm_result.failed else []
-    if prepared_deletes or prepared_updates or prepared_creates or stamp_ids:
+    lifecycle_only_writes = lifecycle_plan is not None and bool(
+        lifecycle_plan.historical or lifecycle_plan.plain_retires
+    )
+    observe_shadow = lifecycle is not None and lifecycle.run.observe
+    claim_state: claim_lifecycle.ApplyState | None = None
+    merged_retentions: list[tuple[str, str]] = []
+    if prepared_deletes or prepared_updates or prepared_creates or stamp_ids or lifecycle_only_writes:
         # One store batch for everything this response decided. The SQL transaction already makes
         # these writes all-or-nothing for a store that keeps its rows in SQL; a store whose every
         # write is its own atomic call needs the batch to say the same thing — otherwise it applies
@@ -2761,6 +3195,21 @@ async def _process_memory_batch(
         try:
             async with acquire_with_retry(pool) as conn:
                 async with conn.transaction():
+                    if lifecycle_plan is not None and lifecycle_drops is not None:
+                        # Lifecycle mode: the observations' rows, then ONE sorted pass over every
+                        # existing claim this response may touch, before anything else is locked —
+                        # the order the sweep, the delete paths and PATCH take them in.
+                        claim_state = claim_lifecycle.ApplyState(
+                            bank_id=bank_id,
+                            store=get_memories(),
+                            fq_table=fq_table,
+                            scope_tags=scope_tags,
+                            now=adaptive_clock.utcnow(),
+                            drops=lifecycle_drops,
+                        )
+                        await _lock_lifecycle_claims(
+                            conn, claim_state, lifecycle_plan, prepared_deletes, prepared_updates, prepared_creates
+                        )
                     changed_ids = await _sources_changed_since_read(conn, bank_id, memories)
                     if changed_ids:
                         # Drop the whole response, stamps included: the facts stay pending and the
@@ -2770,6 +3219,7 @@ async def _process_memory_batch(
                             f"{len(changed_ids)} source fact(s) edited since read, e.g. {changed_ids[0]}"
                         )
                         prepared_deletes, prepared_updates, prepared_creates, stamp_ids = [], [], [], []
+                        lifecycle_plan = claim_lifecycle.LifecyclePlan() if lifecycle_plan is not None else None
 
                     # Each action below reads its sources (liveness, entities) and, for an update,
                     # the observation it rewrites — one read at a time. Naming them all first lets
@@ -2784,6 +3234,12 @@ async def _process_memory_batch(
                         )
                     )
 
+                    if observe_shadow and lifecycle is not None:
+                        # Before the deletes: what lifecycle mode would have retired instead.
+                        await _record_shadow_retirements(
+                            conn, memory_engine, bank_id, lifecycle.run, prepared_deletes, memories, union_observations
+                        )
+
                     merged_away: list[_MergedAway] = []
                     for prepared_delete in prepared_deletes:
                         if prepared_delete.is_merge:
@@ -2793,6 +3249,9 @@ async def _process_memory_batch(
                             )
                             if gone:
                                 merged_away.append(_MergedAway(gone=gone[0], target_id=prepared_delete.merged_into))
+                        if claim_state is not None:
+                            # Lifecycle mode keeps the row: a merge retires it once its evidence moved.
+                            continue
                         await _execute_delete_action(
                             conn=conn, bank_id=bank_id, observation_id=prepared_delete.observation_id
                         )
@@ -2811,8 +3270,9 @@ async def _process_memory_batch(
                             continue
                         for m in prepared.source_mems:
                             per_memory_updated.add(str(m["id"]))
+                        folded_into_twin = False
                         if prepared.dedup is not None:
-                            await _apply_dedup_update_fold(
+                            folded_into_twin = await _apply_dedup_update_fold(
                                 conn,
                                 memory_engine,
                                 bank_id,
@@ -2820,10 +3280,32 @@ async def _process_memory_batch(
                                 prepared.dedup,
                                 prepared.update.observation_id,
                                 prepared.update.text,
+                                claim_state=claim_state,
                             )
+                            if folded_into_twin and claim_state is not None and prepared.dedup.best_id:
+                                merged_retentions.append((prepared.dedup.best_id, prepared.update.observation_id))
+                        if evidence is not None:
+                            if folded_into_twin and prepared.dedup is not None and prepared.dedup.best_id:
+                                # The rewritten observation is gone; its twin now carries every source.
+                                evidence.folded(
+                                    prepared.dedup.best_id,
+                                    [*(prepared.model.source_fact_ids or []), *prepared.source_memory_ids],
+                                )
+                            else:
+                                evidence.attached(
+                                    prepared.update.observation_id,
+                                    prepared.source_memory_ids,
+                                    unchanged_text=_norm_obs_text(prepared.update.text)
+                                    == _norm_obs_text(prepared.model.text),
+                                    previous_mentioned_at=prepared.model.mentioned_at,
+                                )
 
                     for prepared_create in prepared_creates:
-                        if prepared_create.dedup is not None:
+                        if prepared_create.dedup is not None and (
+                            claim_state is None
+                            or prepared_create.dedup.best_id is None
+                            or claim_state.live(prepared_create.dedup.best_id)
+                        ):
                             merged_into = await _apply_dedup_create_fold(
                                 conn,
                                 memory_engine,
@@ -2840,6 +3322,8 @@ async def _process_memory_batch(
                                 )
                                 for m in prepared_create.source_mems:
                                     per_memory_created.add(str(m["id"]))
+                                if evidence is not None:
+                                    evidence.folded(merged_into, prepared_create.source_memory_ids)
                                 continue
 
                         action = await _apply_create_action(
@@ -2854,10 +3338,52 @@ async def _process_memory_batch(
                         if action == "created":
                             for m in prepared_create.source_mems:
                                 per_memory_created.add(str(m["id"]))
+                            if evidence is not None and prepared_create.observation_id is not None:
+                                evidence.created(prepared_create.observation_id, prepared_create.source_memory_ids)
 
                     # After the response's own updates, so the survivor is extended as rewritten.
                     for merged in merged_away:
-                        await _fold_deleted_evidence(conn, memory_engine, bank_id, merged.gone, merged.target_id)
+                        if claim_state is not None and not await _merge_precheck(
+                            conn, claim_state, merged.gone.unit_id, merged.target_id
+                        ):
+                            continue
+                        folded = await _fold_deleted_evidence(
+                            conn,
+                            memory_engine,
+                            bank_id,
+                            merged.gone,
+                            merged.target_id,
+                            requeue_on_miss=claim_state is None,
+                        )
+                        if folded and claim_state is not None and merged.target_id is not None:
+                            if await _merge_retire(conn, claim_state, merged.gone.unit_id, merged.target_id):
+                                merged_retentions.append((merged.target_id, merged.gone.unit_id))
+                        if folded and evidence is not None and merged.target_id is not None:
+                            evidence.folded(merged.target_id, merged.gone.source_memory_ids)
+
+                    if claim_state is not None and lifecycle_plan is not None:
+                        attached = await _apply_lifecycle_transitions(
+                            conn, claim_state, lifecycle_plan, prepared_creates, memories
+                        )
+                        per_memory_updated.update(attached)
+                        created_ids = [p.observation_id for p in prepared_creates if p.observation_id]
+                        if created_ids:
+                            # A successor rebuilt under a new id (its old one deleted by an edit's sweep)
+                            # takes over the retired claims its sources carry the evidence of.
+                            await get_memories().relink_rebuilt_successors(
+                                conn,
+                                bank_id=bank_id,
+                                new_observation_ids=created_ids,
+                                now=claim_state.now,
+                                locked_claim_ids=claim_state.locked,
+                            )
+
+                    # After every write it accounts for, before the stamps: a failure rolls back its
+                    # own savepoint and nothing else.
+                    if evidence is not None:
+                        await _record_observation_reinforcement(conn, bank_id, evidence)
+                    if merged_retentions and lifecycle is not None:
+                        await _merge_retentions(conn, bank_id, lifecycle.run.settings, merged_retentions)
 
                     # The facts this response consumed are marked consolidated in the SAME transaction
                     # as the observations that now carry them. Stamping them separately is what let a
@@ -2878,7 +3404,15 @@ async def _process_memory_batch(
             await write_batch.abort()
             raise
 
+    if lifecycle is not None:
+        if claim_state is not None:
+            lifecycle.retired_tags.update(claim_state.retired_tags)
+            lifecycle.run.counts.update(claim_state.transitions)
+        if lifecycle_drops is not None:
+            lifecycle.run.counts.update({f"dropped_{reason}": n for reason, n in lifecycle_drops.counts.items()})
+
     # Build per-memory result dicts for the stats tracker in the outer loop
+    old_news = lifecycle_plan.acted_on if lifecycle_plan is not None else set()
     results: list[dict[str, Any]] = []
     for m in memories:
         mid = str(m["id"])
@@ -2892,6 +3426,9 @@ async def _process_memory_batch(
             results.append({"action": "updated"})
         elif mid in triage.chatter:
             results.append({"action": "skipped", "reason": "triage_chatter"})
+        elif mid in old_news:
+            # Old news about a retired observation: acted on, never re-asked.
+            results.append({"action": "skipped", "reason": "lifecycle_old_news"})
         else:
             results.append({"action": "skipped", "reason": "no_durable_knowledge"})
 
@@ -3139,24 +3676,35 @@ async def _apply_create_action(
     # Map the new observation onto the consolidation trace as a produced memory.
     new_id = created.get("observation_id")
     if new_id:
+        prepared.observation_id = str(new_id)
         record_created_memory_ids([new_id])
     logger.debug(f"Created observation from {len(prepared.source_memory_ids)} source memories")
     return created["action"]
 
 
-def _apply_triage(llm_result: _BatchLLMResult, triage: TriageResult, union_observations: list["MemoryFact"]) -> None:
+def _apply_triage(
+    llm_result: _BatchLLMResult,
+    triage: TriageResult,
+    union_observations: list["MemoryFact"],
+    retiring: Sequence[str] = (),
+) -> None:
     """Write the triage verdicts as actions: a new fact is a CREATE of its own sentence, and a
     restatement is evidence for its observation — an UPDATE that keeps the text as it is.
 
     Folded into the LLM's own update of that observation when there is one, since two
     updates of one observation in a response overwrite each other.
+
+    ``retiring`` (lifecycle mode): observations the response supersedes or refutes. A restatement
+    of one is old-state evidence; it must not land on the successor, which has no id in this
+    response either, so it is dropped like a retired one's and the fact is asked again next pass.
     """
     text_by_id = {str(o.id): o.text for o in union_observations}
     id_by_text = {_norm_obs_text(o.text): str(o.id) for o in union_observations}
     # An update wins over a delete of the same observation, so evidence for one the LLM deleted
     # (retired, or merged away) on another fact's word would bring it back. A merged one's
     # evidence goes to the survivor; a retired one's goes nowhere, like the LLM's own facts.
-    deleted = {d.observation_id: d.merged_into for d in llm_result.deletes}
+    deleted: dict[str, str | None] = {d.observation_id: d.merged_into for d in llm_result.deletes}
+    deleted.update(dict.fromkeys(retiring))
     restates = dict(triage.restates)
     for fact_id, sentence in triage.new.items():
         # Recorded verbatim before, an exact copy would be dropped as a duplicate create and the
@@ -3199,13 +3747,30 @@ def _resolve_pool_id(raw: str, pool_ids: set[str]) -> str:
     return matches[0] if len(matches) == 1 else raw
 
 
-def _resolve_miscopied_ids(llm_result: _BatchLLMResult, pool_ids: set[str]) -> None:
+#: Lifecycle label fields naming pool observations, and those naming the pool's source facts.
+_LIFECYCLE_TARGET_FIELDS = ("supersedes", "refutes", "refines", "conflicts_with")
+_LIFECYCLE_SOURCE_FIELDS = ("retires_source_ids", "keeps_source_ids")
+
+
+def _resolve_miscopied_ids(llm_result: _BatchLLMResult, pool_ids: set[str], source_ids: set[str] | None = None) -> None:
+    """Repair miscopied ids in place: every observation id the response names against the pool,
+    and (lifecycle mode) every source fact id it names against the source ids the pool showed."""
     for update in llm_result.updates:
         update.observation_id = _resolve_pool_id(update.observation_id, pool_ids)
     for delete in llm_result.deletes:
         delete.observation_id = _resolve_pool_id(delete.observation_id, pool_ids)
         if delete.merged_into is not None:
             delete.merged_into = _resolve_pool_id(delete.merged_into, pool_ids)
+    sources = source_ids or set()
+    for action in [*llm_result.creates, *llm_result.updates]:
+        for name in _LIFECYCLE_TARGET_FIELDS:
+            if ids := getattr(action, name, None):
+                setattr(action, name, [_resolve_pool_id(i, pool_ids) for i in ids])
+        if split_from := getattr(action, "split_from", None):
+            action.split_from = _resolve_pool_id(split_from, pool_ids)
+        for name in _LIFECYCLE_SOURCE_FIELDS:
+            if ids := getattr(action, name, None):
+                setattr(action, name, [_resolve_pool_id(i, sources) for i in ids])
 
 
 async def _execute_delete_action(
@@ -3235,7 +3800,8 @@ async def _fold_deleted_evidence(
     bank_id: str,
     gone: StoredMemory,
     target_id: str | None,
-) -> None:
+    requeue_on_miss: bool = True,
+) -> bool:
     """Move a merged-away observation's evidence onto the observation that absorbed it.
 
     Small models merge observations by rewriting one and deleting the others. An UPDATE can
@@ -3246,10 +3812,15 @@ async def _fold_deleted_evidence(
     delete the model marks as a merge (``merged_into``) moves its evidence. Without a usable
     target (the model merged into an observation it creates in the same response, which has no
     id yet) or with the survivor gone, the evidence is re-queued and the next pass attaches it.
+
+    Returns True when the evidence was folded into ``target_id``.
+
+    ``requeue_on_miss`` False (lifecycle mode): a missed fold leaves the merged observation in place
+    and active, still carrying its evidence, so there is nothing to requeue.
     """
     live = await _filter_live_source_memories(conn, bank_id, [uuid.UUID(str(sid)) for sid in gone.source_memory_ids])
     if not live:
-        return
+        return False
     store = get_memories()
     if target_id is not None:
         target = await store.get_memories(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[target_id])
@@ -3266,10 +3837,672 @@ async def _fold_deleted_evidence(
                 embeddings=memory_engine.embeddings,
             )
             if folded:
-                return
-    await store.mark_consolidated(
-        conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[str(sid) for sid in live], when=None
+                return True
+    if requeue_on_miss:
+        await store.requeue_units(conn, bank_id=bank_id, unit_ids=[str(sid) for sid in live], reason="fold_miss")
+    return False
+
+
+async def _prepare_observation_evidence(
+    pool: DatabaseBackend,
+    bank_id: str,
+    settings: "AdaptiveSettings",
+    memories: list[dict[str, Any]],
+    prepared_updates: list[_PreparedUpdate],
+    prepared_creates: list[_PreparedCreate],
+    prepared_deletes: list[_PreparedDelete],
+) -> ObservationEvidence | None:
+    """The evidence a batch's writes may reinforce its observations with, read before they run.
+
+    The batch's own facts carry their provenance (``with_provenance``). An observation the batch
+    may add sources to — an UPDATE target, a dedup twin, a ``merged_into`` survivor — also needs the
+    evidence keys of the sources it already has, so a re-statement from a session it has already
+    heard counts nothing: one read of those observations, one of their sources, one of the sources'
+    documents. None (logged, counted) when that read fails: the batch then simply reinforces nothing.
+    """
+    now = adaptive_clock.utcnow()
+    facts: dict[str, FactEvidence] = {
+        str(m["id"]): fact_evidence(
+            memory_id=str(m["id"]),
+            document_id=m.get("document_id"),
+            document_id_minted=bool(m.get("document_id_minted")),
+            metadata=m.get("metadata"),
+            mentioned_at=m.get("mentioned_at"),
+            occurred_start=m.get("occurred_start"),
+            event_date=m.get("event_date"),
+            now=now,
+        )
+        for m in memories
+    }
+    observation_ids = list(
+        dict.fromkeys(
+            [p.update.observation_id for p in prepared_updates]
+            + [
+                p.dedup.best_id
+                for p in [*prepared_updates, *prepared_creates]
+                if p.dedup is not None and p.dedup.should_merge and p.dedup.best_id
+            ]
+            + [d.merged_into for d in prepared_deletes if d.is_merge and d.merged_into]
+            # A merged-away observation's sources move to its survivor, so they need keys too.
+            + [d.observation_id for d in prepared_deletes if d.is_merge and d.merged_into]
+        )
     )
+    prior_sources: dict[str, list[str]] = {}
+    prior_mentioned_at: dict[str, datetime | None] = {}
+    if observation_ids:
+        store = get_memories()
+        try:
+            async with acquire_with_retry(pool) as conn:
+                for obs in await store.get_memories(
+                    conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=observation_ids
+                ):
+                    prior_sources[obs.unit_id] = [str(s) for s in obs.source_memory_ids]
+                    prior_mentioned_at[obs.unit_id] = obs.mentioned_at
+                others = list(dict.fromkeys(s for srcs in prior_sources.values() for s in srcs if s not in facts))
+                if others:
+                    sources = await store.get_memories(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=others)
+                    minted = await store.minted_document_ids(
+                        conn, bank_id=bank_id, document_ids=[f.document_id for f in sources if f.document_id]
+                    )
+                    for f in sources:
+                        facts[f.unit_id] = fact_evidence(
+                            memory_id=f.unit_id,
+                            document_id=f.document_id,
+                            document_id_minted=f.document_id is not None and str(f.document_id) in minted,
+                            metadata=f.metadata,
+                            mentioned_at=f.mentioned_at,
+                            occurred_start=f.occurred_start,
+                            event_date=f.event_date,
+                            now=now,
+                        )
+        except Exception as exc:
+            logger.warning(f"[CONSOLIDATION] bank={bank_id} reinforcement evidence read failed, skipping it: {exc!r}")
+            get_metrics_collector().record_adaptive_reinforcement_dropped(
+                producer="consolidation", reason="error", bank_id=bank_id
+            )
+            return None
+    return ObservationEvidence(
+        settings, facts=facts, prior_sources=prior_sources, prior_mentioned_at=prior_mentioned_at
+    )
+
+
+async def _record_observation_reinforcement(conn, bank_id: str, evidence: ObservationEvidence) -> None:
+    """Write a batch's observation reinforcement in a savepoint of the batch's transaction.
+
+    A failure rolls back the savepoint (and nothing the batch wrote), is logged and counted, and
+    never fails the batch: reinforcement must not cost a valid consolidation. ``background``: a
+    memory another transaction holds (being deleted) is skipped rather than waited for.
+    """
+    call = evidence.call()
+    if call is None:
+        return
+    try:
+        async with conn.transaction():
+            await get_memories().record_reinforcement(
+                conn,
+                bank_id=bank_id,
+                events=call.events,
+                settings=evidence.settings,
+                now=adaptive_clock.utcnow(),
+                background=True,
+                anchors=call.anchors,
+                initial_memory_ids=call.initial_memory_ids,
+            )
+    except Exception as exc:
+        logger.warning(f"[CONSOLIDATION] bank={bank_id} reinforcement failed, batch kept: {exc!r}")
+        get_metrics_collector().record_adaptive_reinforcement_dropped(
+            producer="consolidation", reason="error", bank_id=bank_id
+        )
+
+
+# --------------------------------------------------------------------------- lifecycle mode
+#
+# The claim lifecycle's half of a batch (the labels are planned in ``lifecycle``). Every
+# helper below runs only when the bank's effective mode is lifecycle (or, for the shadow, observe),
+# so an off or rank bank never reaches one.
+
+
+def _retirements_named(llm_result: _BatchLLMResult, pool: Mapping[str, claim_lifecycle.PoolEntry]) -> list[str]:
+    """Pool observations the response supersedes or refutes (before validation: what triage must
+    not land a restatement on)."""
+    named = [
+        target
+        for create in llm_result.creates
+        for name in ("supersedes", "refutes")
+        for target in claim_lifecycle.clean_ids(getattr(create, name, None))
+    ]
+    named += [u.observation_id for u in llm_result.updates if getattr(u, "relation", None) in ("supersedes", "refutes")]
+    return [t for t in dict.fromkeys(named) if t in pool]
+
+
+async def _lifecycle_target_sources(
+    pool: DatabaseBackend,
+    bank_id: str,
+    llm_result: _BatchLLMResult,
+    lifecycle_pool: Mapping[str, claim_lifecycle.PoolEntry],
+) -> dict[str, list[StoredMemory]]:
+    """The source facts of every observation the response's labels name, as stored: their metadata
+    gives a target its scope fingerprint and its side of a conflict its trust. One read."""
+    targets = claim_lifecycle.lifecycle_target_ids(llm_result, lifecycle_pool)
+    wanted = list(dict.fromkeys(s for t in targets for s in lifecycle_pool[t].source_ids))
+    if not wanted:
+        return {}
+    async with acquire_with_retry(pool) as conn:
+        rows = {
+            m.unit_id: m
+            for m in await get_memories().get_memories(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=wanted)
+        }
+    return {t: [rows[s] for s in lifecycle_pool[t].source_ids if s in rows] for t in targets}
+
+
+def _cap_lifecycle_creates(
+    llm_result: _BatchLLMResult,
+    plan: claim_lifecycle.LifecyclePlan,
+    remaining_observation_slots: int | None,
+    max_observations_per_scope: int,
+) -> None:
+    """The observation cap in lifecycle mode, applied after the labels: a retirement in the same
+    response frees its slot. Labelled creates are never dropped (a successor replaces what it
+    retires); ordinary creates keep what is left, in order."""
+    if remaining_observation_slots is None or remaining_observation_slots < 0:
+        return
+    freed = (
+        len(plan.retire_target_ids())
+        + len({p.split_from for p in plan.successors.values() if p.split_from})
+        + len(plan.plain_retires)
+        + sum(1 for d in llm_result.deletes if d.merged_into)
+    )
+    labelled = [c for c in llm_result.creates if (p := plan.for_create(c)) is not None and p.labelled]
+    budget = max(0, remaining_observation_slots + freed - len(labelled))
+    kept: list[_CreateAction] = []
+    plain_kept = 0
+    for create in llm_result.creates:
+        if (p := plan.for_create(create)) is not None and p.labelled:
+            kept.append(create)
+        elif plain_kept < budget:
+            kept.append(create)
+            plain_kept += 1
+    if len(kept) < len(llm_result.creates):
+        logger.info(
+            f"[CONSOLIDATION] Truncating {len(llm_result.creates)} creates to {len(kept)} "
+            f"(max_observations_per_scope={max_observations_per_scope}, {freed} slot(s) freed by retirements)"
+        )
+    llm_result.creates = kept
+
+
+def _lifecycle_create_sources(plan: claim_lifecycle.SuccessorPlan, cited_ids: list[uuid.UUID]) -> list[uuid.UUID]:
+    """A labelled create's sources: its cited facts and the replaced observation's sources it keeps.
+
+    Never the replaced (or split) observation's other sources: those are what the retirement passes
+    its status down to. A split facet records the parent's sources as claim evidence instead
+    (``_apply_split``), so the over-general raw facts do not stay current through the facets."""
+    ids = list(cited_ids)
+    seen = {str(i) for i in ids}
+    for sid in plan.keeps:
+        if sid not in seen:
+            seen.add(sid)
+            ids.append(uuid.UUID(sid))
+    return ids
+
+
+async def _lock_lifecycle_claims(
+    conn: "DatabaseConnection",
+    state: claim_lifecycle.ApplyState,
+    plan: claim_lifecycle.LifecyclePlan,
+    prepared_deletes: list[_PreparedDelete],
+    prepared_updates: list[_PreparedUpdate],
+    prepared_creates: list[_PreparedCreate],
+) -> None:
+    """Lock everything the batch's claim transitions touch: the observations' rows, then — in the
+    one sorted ``lock_claims`` pass — every existing claim (targets, kept and cited facts,
+    inheritance candidates, merge pairs, dedup twins, and the retired claims a create may re-link
+    as their rebuilt successor).
+
+    Observation rows first because that is the order every other writer of these claims takes
+    them in: the stale-observation sweep (and the delete paths and the PATCH lifecycle API on a raw
+    fact behind it) row-locks the observations, then locks claims. Taking claims first here would
+    let a PATCH of one of a target's sources and this batch wait on each other.
+    """
+    observations: list[str] = [*plan.retire_target_ids(), *plan.plain_retires, *(a.target_id for a in plan.historical)]
+    facts: list[str] = []
+    for prepared in prepared_creates:
+        lp = prepared.lifecycle_plan
+        if lp is not None:
+            observations += [
+                *lp.refines,
+                *(c.target_id for c in lp.conflicts),
+                *([lp.split_from] if lp.split_from else []),
+            ]
+            facts += [*lp.cited, *lp.keeps]
+        if prepared.dedup is not None and prepared.dedup.should_merge and prepared.dedup.best_id:
+            observations.append(prepared.dedup.best_id)
+    for prepared in prepared_updates:
+        if prepared.dedup is not None and prepared.dedup.should_merge and prepared.dedup.best_id:
+            observations += [prepared.dedup.best_id, prepared.update.observation_id]
+    for delete in prepared_deletes:
+        if delete.is_merge:
+            observations += [delete.observation_id, *([delete.merged_into] if delete.merged_into else [])]
+    for attach in plan.historical:
+        facts += list(attach.fact_ids)
+    observations = sorted(set(observations))
+    for observation_id in observations:
+        await state.store.lock_observation_tags(
+            conn=conn, fq_table=state.fq_table, bank_id=state.bank_id, observation_id=observation_id
+        )
+    # Raw inheritance candidates: the sources of whatever may be retired (with a successor, or split).
+    conflict_targets = [c.target_id for p in prepared_creates if p.lifecycle_plan for c in p.lifecycle_plan.conflicts]
+    split_parents = [
+        p.lifecycle_plan.split_from for p in prepared_creates if p.lifecycle_plan and p.lifecycle_plan.split_from
+    ]
+    inheriting = list(dict.fromkeys([*plan.retire_target_ids(), *conflict_targets, *split_parents]))
+    if inheriting:
+        state.sources = await state.store.observation_sources(conn, bank_id=state.bank_id, observation_ids=inheriting)
+        facts += [s for sources in state.sources.values() for s in sources]
+    # The predecessors ``relink_rebuilt_successors`` may point at a create: in this pass, so the
+    # re-link after the creates takes no claim lock of its own on rows another writer can hold.
+    created_sources = sorted({str(s) for p in prepared_creates for s in p.source_memory_ids})
+    relinkable = (
+        await state.store.relinkable_claims(conn, bank_id=state.bank_id, evidence_ids=created_sources)
+        if created_sources
+        else set()
+    )
+    await claim_lifecycle.lock(conn, state, [*observations, *facts, *relinkable])
+
+
+async def _merge_precheck(
+    conn: "DatabaseConnection", state: claim_lifecycle.ApplyState, gone_id: str, survivor_id: str | None
+) -> bool:
+    """Lifecycle MERGE: fold only into a live survivor, and only an observation that is live and in
+    this scope — it is retired as merged, not deleted, once its evidence has moved."""
+    if survivor_id is None or not state.live(survivor_id):
+        logger.info(f"[CONSOLIDATION][lifecycle] merge of {gone_id[:8]} skipped: survivor not live")
+        return False
+    if not state.live(gone_id):
+        state.drops.drop("cas_lost", f"merge of {gone_id}")
+        return False
+    return await claim_lifecycle.in_scope(conn, state, gone_id)
+
+
+async def _merge_retire(
+    conn: "DatabaseConnection", state: claim_lifecycle.ApplyState, gone_id: str, survivor_id: str
+) -> bool:
+    """Retire a folded-away observation as merged into its survivor (a rewording, not an earlier state)."""
+    won = await claim_lifecycle.retire(
+        conn,
+        state,
+        target_id=gone_id,
+        status=TruthStatus.SUPERSEDED,
+        retired_via="merges",
+        successor_id=survivor_id,
+        valid_to=None,
+        reason="consolidation:merge",
+        relation="merges",
+        evidence_ids=[],
+        prechecked=True,
+    )
+    if won:
+        state.count("merge")
+    return won
+
+
+async def _merge_retentions(
+    conn: "DatabaseConnection", bank_id: str, settings: "AdaptiveSettings", pairs: list[tuple[str, str]]
+) -> None:
+    """The survivor of each merge keeps the larger stability of the pair, in a savepoint: a failure
+    is logged and never costs the batch."""
+    for survivor_id, merged_id in pairs:
+        try:
+            async with conn.transaction():
+                await get_memories().merge_retention(
+                    conn,
+                    bank_id=bank_id,
+                    survivor_id=survivor_id,
+                    merged_id=merged_id,
+                    settings=settings,
+                    now=adaptive_clock.utcnow(),
+                )
+        except Exception as exc:
+            logger.warning(
+                f"[CONSOLIDATION] bank={bank_id} merge retention for {survivor_id[:8]} failed, kept: {exc!r}"
+            )
+
+
+async def _apply_lifecycle_transitions(
+    conn: "DatabaseConnection",
+    state: claim_lifecycle.ApplyState,
+    plan: claim_lifecycle.LifecyclePlan,
+    prepared_creates: list[_PreparedCreate],
+    memories: list[dict[str, Any]],
+) -> set[str]:
+    """Write the batch's claim transitions, after the observations they name exist.
+
+    Successors (and the facts asserting the new state) get their ``valid_from``; each retirement
+    is a CAS on the target, then its relation, its evidence and the raw inheritance; splits retire
+    their parent once every facet exists; conflicts mark both sides uncertain unless the trust rule
+    picks a winner; old facts join a retired observation as history; a plain delete retires its
+    target without a successor. Returns the facts attached as history.
+    """
+    store = state.store
+    lifecycle_creates = [p for p in prepared_creates if p.lifecycle_plan is not None]
+    await claim_lifecycle.lock_new(conn, state, [p.observation_id for p in lifecycle_creates if p.observation_id])
+    split_children: defaultdict[str, list[_PreparedCreate]] = defaultdict(list)
+    for prepared in lifecycle_creates:
+        lp = prepared.lifecycle_plan
+        successor = prepared.observation_id
+        if lp is None:
+            continue
+        if successor is None:
+            state.drops.drop("successor_not_written", f"{len(lp.retires)} retirement(s) of a create that was skipped")
+            continue
+        await claim_lifecycle.assert_current(
+            conn, state, memory_id=successor, valid_from=lp.t_star, fingerprint=lp.fingerprint
+        )
+        for fact_id in lp.cited:
+            await claim_lifecycle.assert_current(conn, state, memory_id=fact_id, valid_from=lp.t_star)
+        for target in lp.retires:
+            await _retire_with_successor(conn, state, plan, target, successor, lp)
+        for refined in lp.refines:
+            await store.insert_relation(
+                conn,
+                bank_id=state.bank_id,
+                relation_type="refines",
+                source_id=successor,
+                target_id=refined,
+                origin=claim_lifecycle.ORIGIN,
+                reason="consolidation:refines",
+                confidence=None,
+                evidence={"fact_ids": lp.cited},
+                now=state.now,
+            )
+        for conflict in lp.conflicts:
+            await _apply_conflict(conn, state, plan, conflict, successor, lp)
+        if lp.split_from is not None:
+            split_children[lp.split_from].append(prepared)
+
+    for parent, children in split_children.items():
+        await _apply_split(conn, state, parent, children)
+
+    attached: set[str] = set()
+    for attach in plan.historical:
+        live = await _filter_live_source_memories(conn, state.bank_id, [uuid.UUID(f) for f in attach.fact_ids])
+        retired = await claim_lifecycle.attach_historical(conn, state, attach, live)
+        if live:
+            attached.update(str(f) for f in live)
+            state.transitions["historical_attached"] += len(live)
+            state.transitions["historical_retired"] += len(retired)
+
+    if plan.plain_retires:
+        batch_ids = [str(m["id"]) for m in memories]
+        earliest = claim_lifecycle.change_instant(memories, state.now)
+        for target_id in plan.plain_retires:
+            claim = state.claims.get(target_id)
+            valid_to = max(earliest, claim.valid_from) if claim is not None and claim.valid_from else earliest
+            won = await claim_lifecycle.retire(
+                conn,
+                state,
+                target_id=target_id,
+                status=TruthStatus.SUPERSEDED,
+                retired_via="supersedes",
+                successor_id=None,
+                valid_to=valid_to,
+                reason="retire_without_successor",
+                relation=None,
+                evidence_ids=batch_ids,
+            )
+            if won:
+                state.count("supersession")
+                state.transitions["retire_without_successor"] += 1
+                logger.info(f"[CONSOLIDATION][lifecycle] retire_without_successor: {target_id[:8]}")
+    return attached
+
+
+async def _retire_with_successor(
+    conn: "DatabaseConnection",
+    state: claim_lifecycle.ApplyState,
+    plan: claim_lifecycle.LifecyclePlan,
+    target: claim_lifecycle.RetireTarget,
+    successor: str,
+    lp: claim_lifecycle.SuccessorPlan,
+) -> None:
+    won = await claim_lifecycle.retire(
+        conn,
+        state,
+        target_id=target.target_id,
+        status=target.status,
+        retired_via=target.relation,
+        successor_id=successor,
+        valid_to=lp.t_star,
+        reason=f"consolidation:{target.relation}",
+        relation=target.relation,
+        evidence_ids=lp.cited,
+    )
+    if not won:
+        return
+    state.count("supersession" if target.status is TruthStatus.SUPERSEDED else "refutation")
+    inherited = await claim_lifecycle.inherit(
+        conn,
+        state,
+        target=target,
+        successor_id=successor,
+        valid_to=lp.t_star,
+        evidence_ids=lp.cited,
+        keeps=lp.keeps,
+        recited=plan.recited,
+    )
+    state.transitions["inherited"] += len(inherited)
+
+
+async def _apply_conflict(
+    conn: "DatabaseConnection",
+    state: claim_lifecycle.ApplyState,
+    plan: claim_lifecycle.LifecyclePlan,
+    conflict: claim_lifecycle.ConflictPlan,
+    created_id: str,
+    lp: claim_lifecycle.SuccessorPlan,
+) -> None:
+    """One ``conflicts_with``: a ``conflicts`` relation, then both sides uncertain — or, when the
+    trust rule (or policy ``latest``) picks a winner, a supersession of the losing side."""
+    if not state.live(conflict.target_id) or not await claim_lifecycle.in_scope(conn, state, conflict.target_id):
+        return
+    outcome = conflict.outcome
+    await state.store.insert_relation(
+        conn,
+        bank_id=state.bank_id,
+        relation_type="conflicts",
+        source_id=created_id,
+        target_id=conflict.target_id,
+        origin=claim_lifecycle.ORIGIN,
+        reason=f"consolidation:conflict:{outcome.winner or 'unresolved'}",
+        confidence=outcome.new_confidence,
+        evidence={"fact_ids": lp.cited},
+        now=state.now,
+    )
+    if outcome.winner == "new":
+        await _retire_with_successor(
+            conn,
+            state,
+            plan,
+            claim_lifecycle.RetireTarget(
+                target_id=conflict.target_id,
+                status=TruthStatus.SUPERSEDED,
+                relation="supersedes",
+                explicit_sources=None,
+            ),
+            created_id,
+            lp,
+        )
+        return
+    if outcome.winner == "existing":
+        # The new claim is born superseded by the observation that won; its own facts go with it.
+        won = await claim_lifecycle.retire(
+            conn,
+            state,
+            target_id=created_id,
+            status=TruthStatus.SUPERSEDED,
+            retired_via="supersedes",
+            successor_id=conflict.target_id,
+            valid_to=lp.t_star,
+            reason="consolidation:conflict_lost",
+            relation="supersedes",
+            evidence_ids=lp.cited,
+            prechecked=True,
+        )
+        if won:
+            state.count("supersession")
+            inherited = await claim_lifecycle.inherit(
+                conn,
+                state,
+                target=claim_lifecycle.RetireTarget(
+                    target_id=created_id,
+                    status=TruthStatus.SUPERSEDED,
+                    relation="supersedes",
+                    explicit_sources=tuple(lp.cited),
+                ),
+                successor_id=conflict.target_id,
+                valid_to=lp.t_star,
+                evidence_ids=lp.cited,
+                keeps=(),
+                recited=set(),
+            )
+            state.transitions["inherited"] += len(inherited)
+        return
+    await claim_lifecycle.mark_uncertain(
+        conn, state, memory_id=conflict.target_id, confidence=outcome.existing_confidence, valid_from=None
+    )
+    await claim_lifecycle.mark_uncertain(
+        conn, state, memory_id=created_id, confidence=outcome.new_confidence, valid_from=lp.t_star
+    )
+
+
+async def _apply_split(
+    conn: "DatabaseConnection", state: claim_lifecycle.ApplyState, parent: str, children: list[_PreparedCreate]
+) -> None:
+    """Retire a split parent once its facets exist.
+
+    The parent is superseded with no successor pointer (there are several facets) and one
+    ``splits`` relation per facet. Its raw sources inherit the retirement (``retired_via='splits'``,
+    no successor) under the usual exclusions, where the facets themselves do not count as
+    observations still standing on them: the over-general statement becomes history and current
+    recall answers from the facets. Each facet keeps the parent's sources as claim evidence, not as
+    its own sources.
+    """
+    written = [c for c in children if c.observation_id is not None]
+    if len(written) < 2:
+        state.drops.drop("split_incomplete", f"split of {parent}: {len(written)} facet(s) written")
+        return
+    plans = [c.lifecycle_plan for c in written if c.lifecycle_plan is not None]
+    valid_to = min(p.t_star for p in plans)
+    cited = list(dict.fromkeys(f for p in plans for f in p.cited))
+    won = await claim_lifecycle.retire(
+        conn,
+        state,
+        target_id=parent,
+        status=TruthStatus.SUPERSEDED,
+        retired_via="splits",
+        successor_id=None,
+        valid_to=valid_to,
+        reason="consolidation:split",
+        relation=None,
+        evidence_ids=cited,
+    )
+    if not won:
+        return
+    state.count("split")
+    facets = [str(c.observation_id) for c in written]
+    parent_sources = state.sources.get(parent, [])
+    if parent_sources:
+        inherited = await state.store.inherit_from_observation(
+            conn,
+            bank_id=state.bank_id,
+            observation_id=parent,
+            to_status=TruthStatus.SUPERSEDED,
+            successor_id=None,
+            valid_to=valid_to,
+            evidence_ids=cited,
+            candidate_source_ids=parent_sources,
+            reason="consolidation:split",
+            retired_via="splits",
+            ignored_citer_ids=facets,
+            now=state.now,
+        )
+        state.transitions["inherited"] += len(inherited)
+    for child in written:
+        if parent_sources:
+            await state.store.add_claim_evidence(
+                conn,
+                bank_id=state.bank_id,
+                memory_id=str(child.observation_id),
+                evidence_ids=parent_sources,
+                now=state.now,
+            )
+        await state.store.insert_relation(
+            conn,
+            bank_id=state.bank_id,
+            relation_type="splits",
+            source_id=child.observation_id,
+            target_id=parent,
+            origin=claim_lifecycle.ORIGIN,
+            reason="consolidation:split",
+            confidence=None,
+            evidence={"fact_ids": child.lifecycle_plan.cited if child.lifecycle_plan else []},
+            now=state.now,
+        )
+
+
+async def _record_shadow_retirements(
+    conn: "DatabaseConnection",
+    memory_engine: "MemoryEngine",
+    bank_id: str,
+    run: _LifecycleRun,
+    prepared_deletes: list[_PreparedDelete],
+    memories: list[dict[str, Any]],
+    union_observations: list["MemoryFact"],
+) -> None:
+    """Observe mode: for each plain delete, record what lifecycle mode would have retired instead.
+
+    The delete still happens (observe changes nothing visible), so the observation's own record
+    would cascade away with it; the record goes on the raw sources the retirement would have passed
+    its status down to (same exclusions as the store's inheritance), with the deciding observation
+    in the snapshot. A savepoint: a failed diagnostic write never costs the batch.
+    """
+    store = get_memories()
+    text_by_id = {str(o.id): o.text for o in union_observations}
+    batch_ids = [str(m["id"]) for m in memories]
+    for delete in prepared_deletes:
+        if delete.is_merge:
+            continue
+        try:
+            async with conn.transaction():
+                would = await claim_lifecycle.would_inherit(
+                    conn,
+                    store,
+                    fq_table,
+                    memory_engine._backend.ops,
+                    bank_id=bank_id,
+                    observation_id=delete.observation_id,
+                )
+                snapshot = {
+                    "decided_by": "consolidation_delete",
+                    "observation_id": delete.observation_id,
+                    "observation_text": text_by_id.get(delete.observation_id),
+                    "retired_via": "inherited",
+                    "batch_fact_ids": batch_ids,
+                }
+                for fact_id in would:
+                    if await store.record_shadow_retirement(
+                        conn,
+                        bank_id=bank_id,
+                        memory_id=fact_id,
+                        would_status=TruthStatus.SUPERSEDED,
+                        deciding_snapshot=snapshot,
+                        evidence_ids=batch_ids,
+                        now=adaptive_clock.utcnow(),
+                    ):
+                        run.counts["shadow_retirements"] += 1
+        except Exception as exc:
+            logger.warning(
+                f"[CONSOLIDATION] bank={bank_id} shadow retirement for {delete.observation_id[:8]} failed: {exc!r}"
+            )
 
 
 async def _embed_observation_text(
@@ -3297,6 +4530,8 @@ async def _find_related_observations(
     request_context: "RequestContext",
     tags: list[str] | None = None,
     config: Any = None,
+    lifecycle: bool = False,
+    live_only: bool = False,
 ) -> "RecallResult":
     """
     Find observations related to the given query using optimized recall.
@@ -3309,6 +4544,11 @@ async def _find_related_observations(
 
     Args:
         tags: Optional tags to filter observations (uses all_strict matching for security)
+        lifecycle: Adaptive memory in lifecycle mode: recall through the internal
+            ``all-with-status`` view, over-fetched (see ``_shape_lifecycle_pools``).
+        live_only: With ``lifecycle``: the live observations only, under the real budgets —
+            the current view, with the retired ones dropped inside the store's arms before
+            their limits, so they cannot take a live observation's place.
 
     Returns:
         List of related observations with their tags, source memories, and dates
@@ -3340,18 +4580,33 @@ async def _find_related_observations(
     # Resolve budget: consolidation doesn't need deep recall, default to LOW to reduce memory fan-out
     recall_budget = Budget(config.consolidation_recall_budget)
 
+    # Lifecycle mode sees retired observations too, labelled (the internal ``all-with-status``
+    # view). They must not spend the pool's token budget, so the recall over-fetches and
+    # ``_shape_lifecycle_pools`` applies the real budgets to the live observations alone.
+    max_tokens = config.consolidation_max_tokens
+    max_source_facts_tokens = config.consolidation_source_facts_max_tokens
+    lifecycle_kwargs: dict[str, Any] = {}
+    if lifecycle and live_only:
+        lifecycle_kwargs.update(lifecycle_view="current", _exclude_retired=True)
+    elif lifecycle:
+        if max_tokens > 0:
+            max_tokens *= _LIFECYCLE_POOL_OVERFETCH
+        if max_source_facts_tokens > 0:
+            max_source_facts_tokens *= _LIFECYCLE_POOL_OVERFETCH
+        lifecycle_kwargs["lifecycle_view"] = ALL_WITH_STATUS
+
     try:
         recall_result = await memory_engine.recall_async(
             bank_id=bank_id,
             query=query,
             budget=recall_budget,
-            max_tokens=config.consolidation_max_tokens,  # Token budget for observations (configurable)
+            max_tokens=max_tokens,  # Token budget for observations (configurable)
             fact_type=["observation"],  # Only retrieve observations
             request_context=request_context,
             tags=tags,  # Filter by source memory's tags
             tags_match=tags_match,  # Use strict matching for security
             include_source_facts=True,  # Embed source facts so we avoid a separate DB fetch
-            max_source_facts_tokens=config.consolidation_source_facts_max_tokens,
+            max_source_facts_tokens=max_source_facts_tokens,
             max_source_facts_tokens_per_observation=config.consolidation_source_facts_max_tokens_per_observation,
             # Round-robin interleave fusion (no cross-encoder): consolidation is looking
             # for an existing near-identical observation to merge into. Both the
@@ -3361,6 +4616,7 @@ async def _find_related_observations(
             # to the LLM, which then UPDATEs instead of creating a duplicate.
             reranking="interleave",
             _quiet=True,  # Suppress logging
+            **lifecycle_kwargs,
         )
     finally:
         if recall_span:
@@ -3369,11 +4625,186 @@ async def _find_related_observations(
     return recall_result
 
 
+#: How many times the pool's token budgets a lifecycle-mode recall asks for. Retired observations
+#: are shown but must not spend the budget, which recall itself cannot tell apart, so it hands back
+#: more and ``_shape_lifecycle_pools`` spends the real budget on the live ones. A fact whose
+#: over-fetch holds a retired observation has its live ones recalled again without the retired ones
+#: (``live_only``), so retired near-twins can never crowd a live one out.
+_LIFECYCLE_POOL_OVERFETCH = 3
+
+#: Retired observations with no successor (refuted or retired explicitly, a split parent, one whose
+#: successor was deleted) shown per fact, after the live ones and at no budget cost: without one, a
+#: fact restating a refuted claim would find nothing to attach to and become a current claim again.
+_LIFECYCLE_UNLINKED_HISTORY_PER_FACT = 1
+
+
+@dataclass
+class _LifecyclePool:
+    """A batch's per-fact recalls, shaped for lifecycle mode, and the claim state of every entry."""
+
+    recalls: list["RecallResult"]
+    entries: dict[str, claim_lifecycle.PoolEntry]
+
+
+async def _shape_lifecycle_pools(
+    pool: DatabaseBackend,
+    bank_id: str,
+    recalls: list["RecallResult"],
+    config: Any,
+    scope_tags: frozenset[str],
+    live_recall: Callable[[int], Any],
+) -> _LifecyclePool:
+    """The lifecycle-mode pool: live observations first, within the budget; retired ones labelled.
+
+    One lock-free claim read for every recalled observation. Per recall: the active and uncertain
+    observations, in recall order, take the observation budget exactly as recall's own tail would.
+    When the over-fetched recall holds a retired observation at all, the retired ones may have taken
+    a live one's place in it, so the live ones come instead from ``live_recall(i)`` (the fact's
+    recall with the retired observations dropped inside the store's arms, under the real budgets).
+    Retired observations are shown after the live ones and cost nothing: one whose successor is shown
+    (at most one per successor: one link of each supersession chain), and up to
+    ``_LIFECYCLE_UNLINKED_HISTORY_PER_FACT`` with no successor at all (a refuted claim, a split parent,
+    one whose successor was deleted), so a fact restating it can be attached to it as history. The
+    source facts are those of the live observations, under the real source budget; retired ones are
+    shown without their sources.
+    """
+    ids = list(dict.fromkeys(str(o.id) for r in recalls for o in r.results))
+    store = get_memories()
+    claims: dict[str, ClaimState] = {}
+    if ids:
+        async with acquire_with_retry(pool) as conn:
+            claims = await store.claims_for(conn, bank_id=bank_id, memory_ids=ids)
+
+    def retired(observation_id: str) -> bool:
+        claim = claims.get(observation_id)
+        return claim is not None and claim.truth_status in RETIRED_STATUSES
+
+    crowded = [i for i, recall in enumerate(recalls) if any(retired(str(o.id)) for o in recall.results)]
+    live_recalls: dict[int, "RecallResult"] = dict(
+        zip(crowded, await _gather_or_cancel([live_recall(i) for i in crowded]))
+    )
+    unread = list(dict.fromkeys(str(o.id) for r in live_recalls.values() for o in r.results if str(o.id) not in claims))
+    if unread:
+        async with acquire_with_retry(pool) as conn:
+            claims.update(await store.claims_for(conn, bank_id=bank_id, memory_ids=unread))
+
+    shaped: list["RecallResult"] = []
+    entries: dict[str, claim_lifecycle.PoolEntry] = {}
+    for index, recall in enumerate(recalls):
+        live_source = live_recalls.get(index, recall)
+        live = [o for o in live_source.results if not retired(str(o.id))]
+        selection = select_facts_within_budget(
+            fact_ids_ordered=[str(o.id) for o in live],
+            text_by_id={str(o.id): o.text for o in live},
+            max_tokens=config.consolidation_max_tokens,
+            count_tokens=count_tokens,
+        )
+        admitted_ids = set(selection.ids)
+        admitted = [o for o in live if str(o.id) in admitted_ids]
+        history: list["MemoryFact"] = []
+        successors_shown: set[str] = set()
+        unlinked = 0
+        for o in recall.results:
+            claim = claims.get(str(o.id))
+            if not retired(str(o.id)) or claim is None:
+                continue
+            successor = claim.superseded_by_id
+            if successor is None:
+                if claim.retired_via != "merges" and unlinked < _LIFECYCLE_UNLINKED_HISTORY_PER_FACT:
+                    unlinked += 1
+                    history.append(o)
+            elif successor in admitted_ids and successor not in successors_shown:
+                successors_shown.add(successor)
+                history.append(o)
+        source_facts = live_source.source_facts or {}
+        by_observation = {str(o.id): list(dict.fromkeys(o.source_fact_ids or [])) for o in admitted}
+        source_selection = select_source_facts_within_budget(
+            source_ids_ordered=list(dict.fromkeys(s for sids in by_observation.values() for s in sids)),
+            source_fact_ids_by_obs=by_observation,
+            text_by_id={sid: sf.text for sid, sf in source_facts.items()},
+            max_total_tokens=config.consolidation_source_facts_max_tokens,
+            max_tokens_per_observation=config.consolidation_source_facts_max_tokens_per_observation,
+            count_tokens=count_tokens,
+        )
+        shaped.append(
+            recall.model_copy(
+                update={
+                    "results": [*admitted, *history],
+                    "source_facts": {sid: source_facts[sid] for sid in source_selection.ids if sid in source_facts},
+                }
+            )
+        )
+        for o in [*admitted, *history]:
+            entries.setdefault(str(o.id), claim_lifecycle.pool_entry(o, claims.get(str(o.id)), scope_tags))
+    return _LifecyclePool(recalls=shaped, entries=entries)
+
+
+#: Retain-metadata keys that say *where* a fact holds rather than what it says. The same
+#: setting in two environments (reminders at 06:00 on staging, at 09:00 on dev) is two true
+#: facts; with no environment in the prompt the second reads as a state change and the model
+#: rewrites the first in place. ``repository`` is the same for code: the coding-agents
+#: integration stamps it on everything it retains, and a service is often named only that
+#: way, so without it two services' values of one setting read as one setting changing.
+#: Shown as each fact's ``scope``, which the SCOPES STAY APART processing rule keeps apart.
+#: Only scope keys reach the prompt (these, and in lifecycle mode the server's lifecycle scope
+#: keys, see :func:`_prompt_scope_keys`): the rest of a fact's metadata is mostly provenance
+#: (source, session, harness, branch) that would spend tokens on every fact line and invite splits
+#: on what is not a scope.
+_SCOPE_METADATA_KEYS = ("environment", "service", "module", "repository")
+#: A scope value is an identifier; cap it so a pasted blob in metadata cannot bloat every line.
+_SCOPE_VALUE_MAX_CHARS = 120
+
+
+def _prompt_scope_keys(*, lifecycle: bool) -> tuple[str, ...]:
+    """The keys the prompt renders as a fact's scope: :data:`_SCOPE_METADATA_KEYS`, then, for a
+    lifecycle batch, any further key in ``HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS``.
+
+    Lifecycle validation drops a label whose claim and target differ on one of the server's scope
+    keys, so a lifecycle batch shows the model every key it compares; a key it cannot see would get
+    its labels dropped for a difference it was never told about. Every other batch shows the base
+    keys only: the setting belongs to adaptive memory, and a bank in ``off`` mode must send the
+    consolidation prompt a server without adaptive memory sends, whatever the setting says.
+    """
+    if not lifecycle:
+        return _SCOPE_METADATA_KEYS
+    return tuple(dict.fromkeys((*_SCOPE_METADATA_KEYS, *lifecycle_scope_keys(get_config()))))
+
+
+def _scope_label(metadata: dict[str, Any] | None, scope_keys: Sequence[str]) -> str | None:
+    """``key=value, ...`` over the fact's non-empty ``scope_keys``, in that order, or None when it
+    names no scope.
+
+    Whitespace is collapsed so a value cannot break the one-fact-per-line input format.
+    """
+    if not metadata:
+        return None
+    parts: list[str] = []
+    for key in scope_keys:
+        value = metadata.get(key)
+        words = str(value).split() if value is not None else []
+        if words:
+            parts.append(f"{key}={' '.join(words)[:_SCOPE_VALUE_MAX_CHARS]}")
+    return ", ".join(parts) or None
+
+
 def _build_observations_for_llm(
     observations: "list[MemoryFact]",
     source_facts: "dict[str, MemoryFact]",
+    lifecycle_pool: Mapping[str, claim_lifecycle.PoolEntry] | None = None,
+    *,
+    scope_keys: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Serialize MemoryFact observations into dicts for the consolidation LLM prompt."""
+    """Serialize MemoryFact observations into dicts for the consolidation LLM prompt.
+
+    ``scope_keys`` are the metadata keys a source fact's ``scope`` shows; None reads them with
+    :func:`_prompt_scope_keys`, for a lifecycle batch when ``lifecycle_pool`` is given.
+
+    ``lifecycle_pool`` (lifecycle mode) adds each entry's ``status``, ``successor`` and
+    ``retirable``, the ids of a retirable entry's source facts (what ``retires_source_ids`` /
+    ``keeps_source_ids`` name), and shows a retired entry without its sources.
+    """
+    if scope_keys is None:
+        scope_keys = _prompt_scope_keys(lifecycle=lifecycle_pool is not None)
     obs_list = []
     for obs in observations:
         # Rows written before #4799 may repeat an id thousands of times; show each source once.
@@ -3383,6 +4814,12 @@ def _build_observations_for_llm(
             "text": obs.text,
             "proof_count": len(unique_ids) or 1,
         }
+        entry = lifecycle_pool.get(str(obs.id)) if lifecycle_pool is not None else None
+        if entry is not None:
+            obs_data["status"] = entry.status.value
+            if entry.successor is not None:
+                obs_data["successor"] = entry.successor
+            obs_data["retirable"] = entry.retirable
         if obs.occurred_start:
             obs_data["occurred_start"] = obs.occurred_start
         if obs.occurred_end:
@@ -3390,13 +4827,17 @@ def _build_observations_for_llm(
         if obs.mentioned_at:
             obs_data["mentioned_at"] = obs.mentioned_at
         source_memories = []
-        for sid in unique_ids:
+        for sid in unique_ids if entry is None or not entry.retired else []:
             sf = source_facts.get(sid)
             if sf is None:
                 continue
-            sf_data: dict[str, Any] = {"text": sf.text}
+            sf_data: dict[str, Any] = (
+                {"id": sid, "text": sf.text} if entry is not None and entry.retirable else {"text": sf.text}
+            )
             if sf.context:
                 sf_data["context"] = truncate_context_for_prompt(sf.context)
+            if scope := _scope_label(sf.metadata, scope_keys):
+                sf_data["scope"] = scope
             if sf.occurred_start:
                 sf_data["occurred_start"] = sf.occurred_start
             if sf.occurred_end:
@@ -3432,6 +4873,22 @@ def _dedupe_updates(updates: list[_UpdateAction], *, batch_label: str) -> list[_
             continue
         collisions += 1
         merged_ids = list(dict.fromkeys([*existing.source_fact_ids, *upd.source_fact_ids]))
+        if isinstance(upd, _LifecycleUpdateAction) or isinstance(existing, _LifecycleUpdateAction):
+            # Lifecycle labels survive the collapse: the last relation the model gave, and every
+            # source id either entry named.
+            by_id[upd.observation_id] = _LifecycleUpdateAction(
+                text=upd.text,
+                observation_id=upd.observation_id,
+                source_fact_ids=merged_ids,
+                reason=upd.reason,
+                relation=getattr(upd, "relation", None) or getattr(existing, "relation", None),
+                retires_source_ids=[
+                    *getattr(existing, "retires_source_ids", []),
+                    *getattr(upd, "retires_source_ids", []),
+                ],
+                keeps_source_ids=[*getattr(existing, "keeps_source_ids", []), *getattr(upd, "keeps_source_ids", [])],
+            )
+            continue
         by_id[upd.observation_id] = _UpdateAction(
             text=upd.text,
             observation_id=upd.observation_id,
@@ -3519,12 +4976,21 @@ async def _consolidate_batch_with_llm(
     config: Any,
     remaining_observation_slots: int | None = None,
     max_observations_per_scope: int = -1,
+    lifecycle_pool: Mapping[str, claim_lifecycle.PoolEntry] | None = None,
 ) -> _BatchLLMResult:
-    """Single LLM call for a batch of facts against a pooled set of observations."""
+    """Single LLM call for a batch of facts against a pooled set of observations.
+
+    ``lifecycle_pool`` (adaptive memory, lifecycle mode) switches to the lifecycle prompt variant and
+    response schema, renders the pool's claim state, and leaves the observation cap to the caller,
+    because a retirement in the same response frees a slot (``_cap_lifecycle_creates``).
+    """
     if config is None:
         raise ValueError("config is required for _consolidate_batch_with_llm")
+    scope_keys = _prompt_scope_keys(lifecycle=lifecycle_pool is not None)
     if union_observations:
-        obs_list = _build_observations_for_llm(union_observations, union_source_facts)
+        obs_list = _build_observations_for_llm(
+            union_observations, union_source_facts, lifecycle_pool, scope_keys=scope_keys
+        )
         # One observation per line, no indentation: the pool is nearly all of a batch's
         # uncached input, and `indent=2` spent a fifth of it on whitespace.
         observations_text = "[\n" + ",\n".join(json.dumps(o, ensure_ascii=False) for o in obs_list) + "\n]"
@@ -3542,6 +5008,8 @@ async def _consolidate_batch_with_llm(
             temporal_parts.append(f"mentioned_at={m['mentioned_at']}")
         if temporal_parts:
             text += f" ({', '.join(temporal_parts)})"
+        if scope := _scope_label(m.get("metadata"), scope_keys):
+            text += f" [scope: {scope}]"
         return text
 
     facts_lines = "\n".join(_fact_line(m) for m in memories)
@@ -3568,8 +5036,10 @@ async def _consolidate_batch_with_llm(
     # single Gemini context cache shared by every bank — the bank mission, capacity
     # note, and response_schema (all bank/batch-variable) are kept OUT of the
     # cached prefix so one cache serves all and it never busts within a run.
+    lifecycle = lifecycle_pool is not None
     system_prompt = build_consolidation_system_prompt(
         llm_output_language=config.llm_output_language if config is not None else None,
+        lifecycle=lifecycle,
     )
     user_content = build_consolidation_input(
         facts_text=facts_lines,
@@ -3584,10 +5054,15 @@ async def _consolidate_batch_with_llm(
     prompt_cache = PromptCachePrefix(system_instruction=system_prompt)
 
     # Constrain the schema: the observation cap on creates, and source_fact_ids to this batch's ids
+    # (lifecycle mode: and the label lists to the retirable observations and their shown source ids)
+    retirable = [e for e in lifecycle_pool.values() if e.retirable] if lifecycle_pool is not None else []
     response_model = _build_response_model(
         max_creates=remaining_observation_slots,
         fact_ids=[str(m["id"]) for m in memories],
         supports_max_items=config.llm_supports_max_items,
+        lifecycle=lifecycle,
+        target_ids=[e.id for e in retirable],
+        source_ids=list(dict.fromkeys(s for e in retirable for s in e.source_ids if s in union_source_facts)),
     )
 
     max_attempts = config.consolidation_max_attempts
@@ -3640,8 +5115,9 @@ async def _consolidate_batch_with_llm(
             creates = response.creates + [
                 _CreateAction(text=u.text, source_fact_ids=u.source_fact_ids, reason=u.reason) for u in misaimed
             ]
-            # Defensive truncation: some LLM providers may not enforce JSON schema max_length
-            if remaining_observation_slots is not None and remaining_observation_slots >= 0:
+            # Defensive truncation: some LLM providers may not enforce JSON schema max_length. In
+            # lifecycle mode the caller caps after the labels are planned (a retirement frees a slot).
+            if not lifecycle and remaining_observation_slots is not None and remaining_observation_slots >= 0:
                 if len(creates) > remaining_observation_slots:
                     logger.info(
                         f"[CONSOLIDATION] Truncating {len(creates)} creates to {remaining_observation_slots} "

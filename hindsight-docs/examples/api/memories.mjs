@@ -89,6 +89,40 @@ await patchMemory(memoryId, { state: 'invalidated', reason: 'server decommission
 await patchMemory(memoryId, { state: 'valid' });
 // [/docs:restore-memory]
 
+// The adaptive memory examples point one raw fact at another.
+await new Promise(r => setTimeout(r, 3000));
+const other = memories.items.find(
+    u => (u.fact_type === 'world' || u.fact_type === 'experience') && u.id !== memoryId
+);
+if (other) {
+    const otherId = other.id;
+
+    // [docs:adaptive-memory-mode]
+    // Turn adaptive memory on for one bank (it is off by default).
+    await client.updateBankConfig(BANK_ID, { adaptiveMemoryMode: 'lifecycle' });
+    // [/docs:adaptive-memory-mode]
+
+    // [docs:confirm-memory]
+    // Record that a memory still holds; it stays readily recallable for longer.
+    const result = await client.confirmMemory(BANK_ID, otherId, {
+        sourceKey: 'incident-2291', // the same key again is a no-op
+    });
+    console.log(result.outcome, result.stability_days);
+    // [/docs:confirm-memory]
+
+    // [docs:update-memory-lifecycle]
+    // A fact turned out to be wrong; point at the memory that corrects it.
+    await client.updateMemoryLifecycle(BANK_ID, memoryId, {
+        truthStatus: 'refuted',
+        supersededBy: otherId,
+        reason: 'Recorded for the wrong subject',
+    });
+
+    // Keep an entry readily recallable however rarely it is used.
+    await client.updateMemoryLifecycle(BANK_ID, otherId, { hold: true });
+    // [/docs:update-memory-lifecycle]
+}
+
 // An observation (derived) exposes how it evolved as sources arrived.
 const observation = memories.items.find(u => u.fact_type === 'observation');
 if (observation) {

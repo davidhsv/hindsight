@@ -17,6 +17,7 @@ from uuid import UUID
 import numpy as np
 
 from ..metadata_utils import drop_null_values
+from ..operation_metadata import RetainExtractionErrors
 from ..response_models import TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,16 @@ class RetainContentDict(TypedDict, total=False):
             is already stored (optional, default False). Internal — set by
             ``reprocess_document``, not accepted on the public retain API. See
             ``retain_batch`` for the two skips it suppresses.
+        importance: How important the memories extracted from this item are, in [0, 1]
+            (optional; 0.5 is neutral). Applied as a retention policy to every fact the item
+            yields, only while the bank's adaptive mode is rank or lifecycle.
+        forgetting_exempt: Exempt the memories extracted from this item from forgetting
+            (optional). Applied like ``importance``.
+        document_id_minted: The item's document id was minted by the server, not supplied by
+            the caller (optional). Internal — set by ``retain_batch`` when it mints an id (or
+            carries the mark of a document it re-retains) while the bank's adaptive mode writes
+            state. Recorded in ``retain_params``, so a reprocess replays it; reinforcement then
+            counts the document as weak evidence (``adaptive.evidence.evidence_key``).
     """
 
     content: str  # Required
@@ -151,6 +162,9 @@ class RetainContentDict(TypedDict, total=False):
     )  # Observation scopes for consolidation
     update_mode: Literal["replace", "append"]
     force_reextract: bool
+    importance: float
+    forgetting_exempt: bool
+    document_id_minted: bool
 
 
 @dataclass
@@ -190,6 +204,10 @@ class RetainContent:
     observation_scopes: Literal["per_tag", "combined", "all_combinations", "shared"] | list[list[str]] | None = (
         None  # Observation scopes
     )
+    #: Retention policy for every fact this item yields (adaptive memory, rank/lifecycle only);
+    #: None leaves the lazy default.
+    importance: float | None = None
+    forgetting_exempt: bool | None = None
 
     def __post_init__(self) -> None:
         # Drop null-valued metadata keys (issue #3209): the retain API accepts
@@ -274,6 +292,13 @@ class ExtractionResult:
     usage: TokenUsage
     """LLM tokens consumed. Zero for chunks mode, which makes no model call."""
 
+    extraction_errors: RetainExtractionErrors = field(default_factory=RetainExtractionErrors)
+    """Non-fatal extraction failures the caller must record on the operation.
+
+    Today only chunks skipped under ``retain_skip_refused_chunks``. The Batch API
+    route persists its own errors and leaves this empty.
+    """
+
 
 def merge_processed_content_tokens(a: int | None, b: int | None) -> int | None:
     """Combine ``RetainBatchResult.processed_content_tokens`` across sub-results.
@@ -351,6 +376,9 @@ class ExtractedFact:
     observation_scopes: Literal["per_tag", "combined", "all_combinations", "shared"] | list[list[str]] | None = (
         None  # Observation scopes
     )
+    # The content item's retention policy (RetainContent.importance / forgetting_exempt).
+    importance: float | None = None
+    forgetting_exempt: bool | None = None
 
 
 @dataclass
@@ -408,6 +436,11 @@ class ProcessedFact:
 
     # Observation scopes for consolidation
     observation_scopes: Literal["per_tag", "combined", "all_combinations", "shared"] | list[list[str]] | None = None
+
+    # Retention policy from the content item, applied when the fact is inserted (adaptive memory,
+    # rank/lifecycle only). None leaves the lazy default.
+    importance: float | None = None
+    forgetting_exempt: bool | None = None
 
     @staticmethod
     def _is_degenerate_text(text: str) -> bool:
@@ -494,6 +527,8 @@ class ProcessedFact:
             content_index=extracted_fact.content_index,
             tags=extracted_fact.tags,
             observation_scopes=extracted_fact.observation_scopes,
+            importance=extracted_fact.importance,
+            forgetting_exempt=extracted_fact.forgetting_exempt,
         )
 
 

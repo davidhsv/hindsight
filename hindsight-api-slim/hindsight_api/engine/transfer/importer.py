@@ -49,14 +49,19 @@ from ..retain.types import (
 from ..schema import fq_table
 from .schema import (
     CARRIED_HISTORY_TABLES,
+    CLAIM_EVIDENCE_ENTRY,
     HISTORY_TABLES,
+    LIFECYCLE_RELATIONS_ENTRY,
     OPERATIONAL_TABLES,
     SCHEMA_VERSION,
     BankRowsJSONEncoding,
+    ImportedMemoryState,
     TransferAttachment,
+    TransferClaimEvidence,
     TransferDocument,
     TransferFact,
     TransferKnowledgePage,
+    TransferLifecycleRelation,
     TransferManifest,
     TransferObservation,
     TransferObservationSource,
@@ -146,8 +151,12 @@ class ImportResult:
     # observation sources, and the post-retain hook's unit ids.
     fact_unit_ids: dict[str, list[str | None]] = field(default_factory=dict)
     # Source memory-unit id -> regenerated target id, kept only for the ids the
-    # caller asked for: the ones mental-model evidence and restored rows cite.
+    # caller asked for: the ones mental-model evidence and restored rows cite, and every
+    # memory that carries adaptive state (claim pointers and edges name those).
     remapped_unit_ids: dict[str, str] = field(default_factory=dict)
+    # The adaptive state of the imported memories that had some, written once every memory
+    # exists (``_restore_lifecycle``): a claim's pointers can name a memory replayed later.
+    memory_states: list[ImportedMemoryState] = field(default_factory=list)
 
 
 @dataclass
@@ -157,6 +166,18 @@ class _ObservationOutcome:
     imported: int = 0
     skipped: int = 0
     remapped_unit_ids: dict[str, str] = field(default_factory=dict)
+    memory_states: list[ImportedMemoryState] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _LifecycleRestore:
+    """What ``_restore_lifecycle`` wrote; ``relation_id_map`` re-keys the curation archive's snapshots."""
+
+    states: int = 0
+    relations: int = 0
+    evidence: int = 0
+    dropped: int = 0
+    relation_id_map: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -392,6 +413,7 @@ async def import_documents(
         # transfers and leave the imported page without a backing model.
         for row in mental_models:
             row["bank_id"] = bank_id
+        lifecycle = _lifecycle_sections(zf)
         result = await _replay_documents(
             zf,
             backend=backend,
@@ -403,8 +425,9 @@ async def import_documents(
             on_conflict=on_conflict,
             ops=ops,
             outbox_callback_factory=outbox_callback_factory,
-            keep_unit_ids=_referenced_ids(mental_models),
+            keep_unit_ids=_referenced_ids(mental_models) | lifecycle.peer_ids(),
         )
+    await _restore_lifecycle(backend, bank_id, result=result, sections=lifecycle)
 
     if mental_models or knowledge_pages:
         # Facts and observations were replayed under fresh ids: point the models'
@@ -492,9 +515,14 @@ async def _replay_documents(
             unit_ids: list[str | None] = [None] * len(document.facts)
             for ordinal, unit_id in zip(imported_facts.original_ordinals, imported_facts.unit_ids, strict=True):
                 unit_ids[ordinal] = unit_id
-                source_id = document.facts[ordinal].source_id
-                if source_id is not None and source_id in keep_unit_ids:
-                    result.remapped_unit_ids[source_id] = unit_id
+                fact = document.facts[ordinal]
+                stateful = fact.claim is not None or fact.retention is not None
+                if fact.source_id is not None and (fact.source_id in keep_unit_ids or stateful):
+                    result.remapped_unit_ids[fact.source_id] = unit_id
+                if stateful:
+                    result.memory_states.append(
+                        ImportedMemoryState(unit_id=unit_id, claim=fact.claim, retention=fact.retention)
+                    )
             result.fact_unit_ids[document.id] = unit_ids
 
     outcome = await _import_observations(
@@ -509,7 +537,92 @@ async def _replay_documents(
     result.observations_imported = outcome.imported
     result.observations_skipped = outcome.skipped
     result.remapped_unit_ids.update(outcome.remapped_unit_ids)
+    result.memory_states.extend(outcome.memory_states)
     return result
+
+
+@dataclass(frozen=True)
+class _ArchiveLifecycle:
+    """The archive's lifecycle relations and claim evidence (both absent without adaptive state)."""
+
+    relations: list[TransferLifecycleRelation]
+    evidence: list[TransferClaimEvidence]
+
+    def peer_ids(self) -> set[str]:
+        """Every memory the two sections name, so the replay keeps their new ids."""
+        ids = {i for r in self.relations for i in (r.source_memory_id, r.target_memory_id) if i}
+        return ids | {i for e in self.evidence for i in (e.memory_id, e.evidence_memory_id)}
+
+
+def _lifecycle_sections(zf: zipfile.ZipFile) -> _ArchiveLifecycle:
+    return _ArchiveLifecycle(
+        relations=[TransferLifecycleRelation.model_validate(r) for r in _read_json(zf, LIFECYCLE_RELATIONS_ENTRY)],
+        evidence=[TransferClaimEvidence.model_validate(r) for r in _read_json(zf, CLAIM_EVIDENCE_ENTRY)],
+    )
+
+
+async def _restore_lifecycle(
+    backend: Any,
+    bank_id: str,
+    *,
+    result: ImportResult,
+    sections: _ArchiveLifecycle,
+) -> _LifecycleRestore:
+    """Write the imported memories' claims and retention, then the edges between them.
+
+    After the replay, so every memory a claim pointer or an edge names has its target id. A
+    reference to a memory that did not come back is dropped (a pointer cleared, an evidence row
+    skipped, a relation endpoint tombstoned) and counted. Nothing happens for an archive without
+    adaptive state. On a SQL store each replay batch already wrote its memories' claims (pointers
+    cleared) in the transaction that inserted them; this pass writes them again, re-keyed.
+    """
+    relations, evidence = sections.relations, sections.evidence
+    if not (result.memory_states or relations or evidence):
+        return _LifecycleRestore()
+    from ..memories import get_memories
+
+    store = get_memories()
+    id_map = result.remapped_unit_ids
+    dropped = 0
+    states: list[ImportedMemoryState] = []
+    for state in result.memory_states:
+        claim = state.claim
+        if claim is not None:
+            pointers = {}
+            for key in ("superseded_by_id", "inherited_from_id"):
+                source = getattr(claim, key)
+                mapped = id_map.get(source) if source is not None else None
+                if source is not None and mapped is None:
+                    dropped += 1
+                pointers[key] = mapped
+            claim = claim.model_copy(update=pointers)
+        states.append(ImportedMemoryState(unit_id=state.unit_id, claim=claim, retention=state.retention))
+    async with acquire_with_retry(backend) as conn:
+        async with conn.transaction():
+            written = await store.restore_memory_state(conn=conn, fq_table=fq_table, bank_id=bank_id, rows=states)
+            relation_restore = await store.restore_lifecycle_relations(
+                conn=conn, fq_table=fq_table, bank_id=bank_id, rows=relations, unit_id_map=id_map
+            )
+            evidence_restore = await store.restore_claim_evidence(
+                conn=conn, fq_table=fq_table, bank_id=bank_id, rows=evidence, unit_id_map=id_map
+            )
+    dropped += relation_restore.dropped_endpoints + evidence_restore.dropped
+    logger.info(
+        "[transfer] Restored adaptive state into bank %s: %d memory state(s), %d relation(s), %d evidence row(s); "
+        "%d reference(s) to memories not imported were dropped",
+        bank_id,
+        written,
+        len(relation_restore.id_map),
+        evidence_restore.inserted,
+        dropped,
+    )
+    return _LifecycleRestore(
+        states=written,
+        relations=len(relation_restore.id_map),
+        evidence=evidence_restore.inserted,
+        dropped=dropped,
+        relation_id_map=relation_restore.id_map,
+    )
 
 
 def _document_batches(documents: Iterable[TransferDocument]) -> Iterator[list[TransferDocument]]:
@@ -1068,6 +1181,7 @@ async def _restore_invalidated_units(
     unit_id_map: dict[str, str],
     document_id_map: dict[str, str],
     bank_rows_json_encoding: BankRowsJSONEncoding,
+    relation_id_map: dict[str, str] | None = None,
 ) -> int:
     """Restore the curation archive into the store that holds it, so invalidated facts stay revertable.
 
@@ -1088,6 +1202,7 @@ async def _restore_invalidated_units(
             unit_id_map=unit_id_map,
             document_id_map=document_id_map,
             bank_rows_json_encoding=bank_rows_json_encoding,
+            relation_id_map=relation_id_map,
         )
     except NotImplementedError:
         logger.warning(
@@ -1306,8 +1421,10 @@ async def _restore_bank(
     result = BankImportResult(bank_id=bank_id)
     unit_id_map: dict[str, str] = {}
     document_id_map: dict[str, str] = {}
+    lifecycle = _LifecycleRestore()
 
     if restoring.data:
+        sections = _lifecycle_sections(zf)
         doc_result = await _replay_documents(
             zf,
             backend=backend,
@@ -1325,8 +1442,10 @@ async def _restore_bank(
                 parsed.bank_rows.get("mental_model_history", []),
                 parsed.data_rows.get("graph_maintenance_queue", []),
                 parsed.data_rows.get("invalidated_memory_units", []),
-            ),
+            )
+            | sections.peer_ids(),
         )
+        lifecycle = await _restore_lifecycle(backend, bank_id, result=doc_result, sections=sections)
         result.documents_imported = doc_result.documents_imported
         result.facts_imported = doc_result.facts_imported
         result.observations_imported = doc_result.observations_imported
@@ -1370,6 +1489,7 @@ async def _restore_bank(
                 unit_id_map=unit_id_map,
                 document_id_map=document_id_map,
                 bank_rows_json_encoding=bank_rows_json_encoding,
+                relation_id_map=lifecycle.relation_id_map,
             )
 
             # Synthesized knowledge rides with the memories: the evidence remapped
@@ -1709,6 +1829,18 @@ async def _import_document_batch(
             # (lossy) signal, exactly as before.
             if lifecycle:
                 await store.restore_fact_lifecycle(conn=conn, fq_table=fq_table, bank_id=bank_id, rows=lifecycle)
+            # The facts' claims (and retention) commit with the facts, after the consolidation stamps
+            # above: a superseded or refuted fact must never be visible without its claim, where a
+            # current-view recall would show it and a concurrent consolidation could consume it (an
+            # archive exported without observations carries no consolidation stamp). The pointers
+            # can name memories a later batch replays, so they are left for _restore_lifecycle.
+            states = [
+                state
+                for doc, unit_ids in zip(prepared, result_unit_ids, strict=True)
+                for state in _fact_memory_states(doc.document.facts, doc.retained_index_by_original, unit_ids)
+            ]
+            if states:
+                await store.restore_memory_state(conn=conn, fq_table=fq_table, bank_id=bank_id, rows=states)
 
     # Best-effort, and only after the acquire() block above has exited: this
     # takes its own connection, and on Oracle the write above is not committed
@@ -1876,6 +2008,32 @@ def _fact_lifecycle_rows(
     return rows
 
 
+def _fact_memory_states(
+    facts: list[TransferFact],
+    retained_index_by_original: list[int | None],
+    retained_unit_ids: list[str],
+) -> list[ImportedMemoryState]:
+    """The imported facts' claims and retention keyed by their new unit ids, claim pointers cleared.
+
+    Written in the transaction that inserts the facts; ``_restore_lifecycle`` writes them again with
+    the pointers re-keyed once every memory they can name exists.
+    """
+    states: list[ImportedMemoryState] = []
+    for original_index, fact in enumerate(facts):
+        retained_index = retained_index_by_original[original_index]
+        if retained_index is None or (fact.claim is None and fact.retention is None):
+            continue
+        claim = (
+            fact.claim.model_copy(update={"superseded_by_id": None, "inherited_from_id": None})
+            if fact.claim is not None
+            else None
+        )
+        states.append(
+            ImportedMemoryState(unit_id=retained_unit_ids[retained_index], claim=claim, retention=fact.retention)
+        )
+    return states
+
+
 async def _import_observations(
     *,
     backend: Any,
@@ -1945,11 +2103,18 @@ async def _import_observations(
         )
         outcome.imported += written.imported
         outcome.skipped += written.skipped
+        stateful = {obs.source_id: obs for obs, _sources in batch if obs.source_id and (obs.claim or obs.retention)}
         outcome.remapped_unit_ids.update(
             (source_id, unit_id)
             for source_id, unit_id in written.remapped_unit_ids.items()
-            if source_id in keep_unit_ids
+            if source_id in keep_unit_ids or source_id in stateful
         )
+        for source_id, obs in stateful.items():
+            unit_id = written.remapped_unit_ids.get(source_id)
+            if unit_id is not None:
+                outcome.memory_states.append(
+                    ImportedMemoryState(unit_id=unit_id, claim=obs.claim, retention=obs.retention)
+                )
 
     # One transaction per batch: the source facts are already committed, so a batch only
     # needs its own sources, and a whole-set insert outgrew PostgreSQL's 1 GB message (#5418).

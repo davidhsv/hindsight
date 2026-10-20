@@ -113,6 +113,8 @@ Arbitrary key-value string pairs that provide context about this item. For examp
 
 Values are stored and returned as strings. A key whose value is `null` is dropped rather than stored, so it will not come back on the recalled memory — send an empty string if you need the key to survive.
 
+Four keys also reach consolidation: `environment`, `service`, `module` and `repository` say where a fact holds, and in a bank in adaptive memory's `lifecycle` mode so does any further key the server lists in [`HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS`](../configuration#adaptive-memory). Facts that give one of them different values are kept in separate observations instead of one replacing the other — a reminder time of 06:00 retained with `{"environment": "staging"}` and one of 09:00 with `{"environment": "dev"}` become two observations, each naming its environment, and so do two repositories' values of one setting. No other metadata key reaches the consolidation prompt (`branch`, for one, does not: a decision made on `main` usually still holds on a feature branch).
+
 ### document_id
 
 A caller-supplied string that groups one or more items under a logical document. This field is the key to making retain **idempotent**.
@@ -253,6 +255,14 @@ Pass an explicit list of tag sets. Each inner list is one scope.
 - ✗ *"What happened in session s1 regardless of teacher?"* — `["session-id:s1"]` alone was not included
 
 **Use when** you know exactly which combinations are meaningful and want to avoid unnecessary passes.
+
+### importance and forgetting_exempt
+
+Only for banks whose [adaptive memory](../adaptive-memory.mdx) mode is `rank` or `lifecycle`; every other bank ignores both. `importance`, in `[0, 1]` (`0.5` is neutral), tells Hindsight how much the extracted memories matter: it scales their initial stability, raises how far a faded one can drop in ranking, and protects them from archiving at or above the archive protection threshold. `forgetting_exempt: true` exempts them from retention decay altogether. Neither changes what is extracted, and both can be changed later through the [lifecycle `PATCH`](./memories#change-retention-or-truth-status).
+
+```json
+{ "items": [{ "content": "Production database failover runbook: …", "importance": 0.9 }] }
+```
 
 ### Response
 

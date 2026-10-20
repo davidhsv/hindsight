@@ -689,6 +689,8 @@ Mental models and knowledge pages count as **data**, not configuration. A mental
 
 Embeddings and database ids are never carried: facts are re-embedded with the *target* bank's model and entities are re-resolved against it, so an archive moves cleanly to an instance configured with a different embedding model, vector extension, or text-search backend.
 
+**Adaptive-memory state travels with the memories.** What a bank has learned about each memory under [adaptive memory](../adaptive-memory.mdx) — its retention (stability, reinforcement count, importance, forgetting exemption) and its claim state (truth status, validity, successor) — is carried on each fact and observation, and the claim evidence and lifecycle relations between memories travel with them, re-keyed onto the target's ids. A document export carries the state of its own facts and the edges between them; an edge to a memory the archive does not hold arrives as a tombstone (its snapshot kept), and a pointer to one is cleared. The reinforcement ledger does not travel: after an import, evidence the source already counted (a re-sent confirmation with the same `source_key`) can reinforce a memory again. An invalidated fact in the curation archive keeps its snapshot, re-keyed the same way, and restoring it on the target brings back its retention, claim and links. A bank that never used adaptive memory exports exactly the archive it did before.
+
 Webhooks travel with `include_bank_config`. When copying a bank whose webhooks point at a per-bank consumer, export with `include_bank_config=false`, or delete them on the copy.
 
 ### Export

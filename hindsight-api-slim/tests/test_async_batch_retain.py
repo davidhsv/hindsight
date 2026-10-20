@@ -933,6 +933,168 @@ async def test_completion_completed_when_flag_on_but_no_errors(memory):
     assert row["status"] == "completed"
 
 
+REFUSED_MARKER = "Refusable paragraph"
+
+
+async def _retain_with_one_refused_chunk(
+    memory, request_context, monkeypatch, bank_id: str, *, skip_refused_chunks: bool = True
+) -> dict:
+    """Async-retain three paragraphs with the middle one refused; return the child operation status.
+
+    The real extraction path runs from the retain down to each chunk's extraction call, which
+    is the only thing patched: the refused chunk raises the provider's content-policy error, the
+    others extract one fact each.
+    """
+    from hindsight_api.engine.llm_interface import ProviderContentPolicyError
+    from hindsight_api.engine.response_models import TokenUsage
+    from hindsight_api.engine.retain import fact_extraction
+
+    async def extract_chunk(*, chunk: str, **_kwargs):
+        if REFUSED_MARKER in chunk:
+            raise ProviderContentPolicyError("API Error: Claude Code is unable to respond to this request")
+        name = chunk.split()[0]
+        return [fact_extraction.Fact(fact=f"{name} paragraph fact", fact_type="world")], TokenUsage()
+
+    monkeypatch.setattr(fact_extraction, "_extract_facts_with_auto_split", extract_chunk)
+    await memory.update_bank_config(
+        bank_id,
+        {"retain_skip_refused_chunks": skip_refused_chunks, "retain_chunk_size": 200},
+        request_context=request_context,
+    )
+    # Each paragraph fits a 200-char chunk and no two do, so the document is three chunks.
+    filler = "Filler words keep each paragraph near its own chunk. " * 3
+    content = "\n\n".join(f"{name} paragraph. {filler}" for name in ("Alpha", REFUSED_MARKER, "Gamma"))
+    result = await memory.submit_async_retain(
+        bank_id=bank_id,
+        contents=[{"content": content, "document_id": "refusal-doc"}],
+        request_context=request_context,
+    )
+    await asyncio.sleep(0.2)
+    parent = await memory.get_operation_status(
+        bank_id=bank_id, operation_id=result["operation_id"], request_context=request_context
+    )
+    assert parent["child_operations"], parent
+    return await memory.get_operation_status(
+        bank_id=bank_id,
+        operation_id=parent["child_operations"][0]["operation_id"],
+        request_context=request_context,
+    )
+
+
+@pytest.mark.asyncio
+async def test_skipped_refused_chunk_is_recorded_on_the_operation(memory, request_context, monkeypatch):
+    """A chunk skipped under retain_skip_refused_chunks shows up as an extraction error, the rest is kept."""
+    from hindsight_api.config import ENV_FAIL_ON_EXTRACTION_ERRORS, clear_config_cache
+
+    monkeypatch.delenv(ENV_FAIL_ON_EXTRACTION_ERRORS, raising=False)
+    clear_config_cache()
+    bank_id = f"test_skip_refused_{uuid.uuid4().hex[:8]}"
+    try:
+        child = await _retain_with_one_refused_chunk(memory, request_context, monkeypatch, bank_id)
+
+        assert child["status"] == "completed", child
+        meta = child["result_metadata"]
+        assert meta["extraction_errors_count"] == 1
+        assert meta["unit_ids_count"] == 2
+        (sample,) = meta["extraction_errors_sample"]
+        assert sample.startswith(
+            "Chunk skipped, refused by the provider's content policy (API Error: Claude Code is unable to "
+            f"respond to this request): '{REFUSED_MARKER} paragraph."
+        )
+
+        chunks = await memory.list_document_chunks(bank_id, "refusal-doc", limit=10, request_context=request_context)
+        assert [chunk["chunk_index"] for chunk in chunks["items"]] == [0, 1, 2]
+        assert REFUSED_MARKER in chunks["items"][1]["chunk_text"]
+        units = await memory.list_memory_units(bank_id, fact_type="world", limit=10, request_context=request_context)
+        assert sorted(unit["text"] for unit in units["items"]) == ["Alpha paragraph fact", "Gamma paragraph fact"]
+    finally:
+        clear_config_cache()
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_skipped_refused_chunk_fails_the_operation_under_fail_on_extraction_errors(
+    memory, request_context, monkeypatch
+):
+    """HINDSIGHT_API_FAIL_ON_EXTRACTION_ERRORS still turns a skipped chunk into a failed retain."""
+    from hindsight_api.config import ENV_FAIL_ON_EXTRACTION_ERRORS, clear_config_cache
+
+    monkeypatch.setenv(ENV_FAIL_ON_EXTRACTION_ERRORS, "true")
+    clear_config_cache()
+    bank_id = f"test_skip_refused_fail_{uuid.uuid4().hex[:8]}"
+    try:
+        child = await _retain_with_one_refused_chunk(memory, request_context, monkeypatch, bank_id)
+
+        assert child["status"] == "failed", child
+        assert "1 fact extraction error" in child["error_message"]
+    finally:
+        monkeypatch.delenv(ENV_FAIL_ON_EXTRACTION_ERRORS)
+        clear_config_cache()
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_failed_streaming_retain_records_what_it_kept(memory, request_context, monkeypatch):
+    """A retain that fails partway keeps the chunks it committed, and its operation says so.
+
+    The previous version of the document is already gone by then (the first batch replaced it),
+    so the failed operation's ``kept_after_failure`` is the only account of what the document holds.
+    """
+    bank_id = f"test_kept_after_failure_{uuid.uuid4().hex[:8]}"
+    try:
+        await memory.retain_async(
+            bank_id=bank_id,
+            content="Old version of the document.",
+            document_id="refusal-doc",
+            request_context=request_context,
+        )
+        child = await _retain_with_one_refused_chunk(
+            memory, request_context, monkeypatch, bank_id, skip_refused_chunks=False
+        )
+
+        assert child["status"] == "failed", child
+        assert "refused by provider content policy" in child["error_message"]
+        assert child["result_metadata"]["kept_after_failure"] == {
+            "refusal-doc": {"chunks_total": 3, "chunks_failed": 1, "memories_kept": 2}
+        }
+        chunks = await memory.list_document_chunks(bank_id, "refusal-doc", limit=10, request_context=request_context)
+        assert [chunk["chunk_text"].split()[0] for chunk in chunks["items"]] == ["Alpha", "Gamma"]
+        units = await memory.list_memory_units(bank_id, fact_type="world", limit=10, request_context=request_context)
+        assert sorted(unit["text"] for unit in units["items"]) == ["Alpha paragraph fact", "Gamma paragraph fact"]
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_persist_extraction_errors_adds_to_what_the_operation_holds(memory):
+    """Two retain passes of one operation (two documents) add up instead of overwriting."""
+    from hindsight_api.engine.operation_metadata import RetainExtractionErrors
+    from hindsight_api.engine.retain.orchestrator import _persist_extraction_errors
+
+    bank_id = f"test_persist_extraction_errors_{uuid.uuid4().hex[:8]}"
+    pool = await memory._get_pool()
+    await _ensure_bank(pool, bank_id)
+    operation_id = await _seed_retain_op_with_errors(pool, bank_id, error_count=1)
+
+    for message in ("doc-a chunk skipped", "doc-b chunk skipped"):
+        errors = RetainExtractionErrors()
+        errors.add(message)
+        await _persist_extraction_errors(pool, str(operation_id), errors)
+    # Nothing to record is not a write.
+    await _persist_extraction_errors(pool, str(operation_id), RetainExtractionErrors())
+
+    row = await pool.fetchrow("SELECT result_metadata FROM async_operations WHERE operation_id = $1", operation_id)
+    metadata = (
+        row["result_metadata"] if isinstance(row["result_metadata"], dict) else json.loads(row["result_metadata"])
+    )
+    assert metadata == {
+        "unit_ids_count": 3,
+        "extraction_errors_count": 3,
+        "extraction_errors_sample": ["chunk 2 failed to parse", "doc-a chunk skipped", "doc-b chunk skipped"],
+    }
+    await pool.execute("DELETE FROM async_operations WHERE operation_id = $1", operation_id)
+
+
 @pytest.mark.asyncio
 async def test_retain_records_user_provided_document_ids(memory, request_context):
     """User-supplied document_ids land in child op result_metadata.document_ids."""

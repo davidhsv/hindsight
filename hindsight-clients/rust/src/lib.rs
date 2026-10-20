@@ -150,6 +150,8 @@ mod tests {
                     observation_scopes: None,
                     strategy: None,
                     update_mode: None,
+                    importance: None,
+                    forgetting_exempt: None,
                 },
                 types::MemoryItem {
                     content: types::Content::Variant0("Bob works with Alice on the search team".to_string()),
@@ -163,6 +165,8 @@ mod tests {
                     observation_scopes: None,
                     strategy: None,
                     update_mode: None,
+                    importance: None,
+                    forgetting_exempt: None,
                 },
             ],
             document_tags: None,
@@ -189,6 +193,10 @@ mod tests {
             tag_groups: None,
             min_scores: None,
             temporal_window: None,
+            lifecycle_view: None,
+            as_of: None,
+            purpose: None,
+            context: None,
         };
         let recall_response = client
             .recall_memories(&bank_id, None, &recall_request)

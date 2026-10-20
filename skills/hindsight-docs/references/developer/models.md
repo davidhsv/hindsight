@@ -1263,7 +1263,8 @@ ranking round, with token truncation applied to fit context windows.
 
 | Model | Use Case |
 |-------|----------|
-| `jev-latest` | Default; tracks the current Jev release |
+| `jev-1.14.0` | Default; an explicit release, so ranking does not change unannounced |
+| `jev-latest` | Tracks the current Jev release; moves when TypeSafe ships a new one |
 
 Setting `HINDSIGHT_API_RERANKER_TYPESAFE_PRUNE_CANDIDATES=true` adds a second question
 that cuts the ranked list where relevance ends, so recall returns the relevant
@@ -1335,7 +1336,7 @@ export HINDSIGHT_API_RERANKER_NVIDIA_MODEL=nvidia/llama-nemotron-rerank-vl-1b-v2
 # TypeSafe (typed-decision API, ranks the whole pool in one question)
 export HINDSIGHT_API_RERANKER_PROVIDER=typesafe
 export HINDSIGHT_API_RERANKER_TYPESAFE_API_KEY=your-api-key
-export HINDSIGHT_API_RERANKER_TYPESAFE_MODEL=jev-latest  # default, can omit
+export HINDSIGHT_API_RERANKER_TYPESAFE_MODEL=jev-1.14.0  # default, can omit
 # export HINDSIGHT_API_RERANKER_TYPESAFE_PRUNE_CANDIDATES=true  # return only the relevant ones
 
 # Alibaba Cloud DashScope (qwen3-rerank)

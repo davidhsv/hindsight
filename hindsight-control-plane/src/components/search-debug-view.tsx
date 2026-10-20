@@ -33,6 +33,7 @@ import { Spinner } from "@/components/ui/spinner";
 import JsonView from "react18-json-view";
 import "react18-json-view/src/style.css";
 import { MemoryDetailModal } from "./memory-detail-modal";
+import { LifecycleBadge } from "./memory-lifecycle";
 import { AttachmentStrip, RetainedAttachment } from "@/components/ui/inline-attachment-text";
 import { EntityChip, TagChip } from "@/components/ui/facet-chip";
 
@@ -613,6 +614,7 @@ export function SearchDebugView() {
                                 <span className="px-2 py-0.5 rounded bg-muted capitalize">
                                   {result.type || "world"}
                                 </span>
+                                <LifecycleBadge lifecycle={result.lifecycle} />
                                 {result.context && (
                                   <span className="truncate max-w-xs">{result.context}</span>
                                 )}

@@ -14,6 +14,10 @@ const ctx = (over: Partial<Parameters<typeof buildRetainStamp>[1]> = {}) => ({
   ...over,
 });
 
+/** `git init`'s branch follows the user's init.defaultBranch, so read it rather than assume. */
+const currentBranch = () =>
+  execFileSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), "hs-stamp-repo-"));
   execFileSync("git", ["init", "-q"], { cwd: repo });
@@ -26,12 +30,40 @@ afterEach(() => {
 });
 
 describe("buildRetainStamp", () => {
-  it("adds nothing when neither setting is configured", () => {
-    expect(buildRetainStamp({}, ctx())).toEqual({ tags: [], metadata: {} });
+  it("adds only where the memory was written when neither setting is configured", () => {
+    // `git init` with no remote: the repository is the checkout's folder name.
+    const where = { repository: repo.split("/").pop()!, branch: currentBranch() };
+    expect(buildRetainStamp({}, ctx())).toEqual({ tags: [], metadata: where });
     expect(buildRetainStamp({ retainTags: [], retainMetadata: {} }, ctx())).toEqual({
       tags: [],
-      metadata: {},
+      metadata: where,
     });
+  });
+
+  it("adds nothing at all outside a repository", () => {
+    const plain = mkdtempSync(join(tmpdir(), "hs-stamp-plain-"));
+    try {
+      expect(buildRetainStamp({}, ctx({ directory: plain }))).toEqual({ tags: [], metadata: {} });
+    } finally {
+      rmSync(plain, { recursive: true, force: true });
+    }
+  });
+
+  it("stamps the normalized remote, branch and module, which configured metadata may replace", () => {
+    execFileSync("git", ["remote", "add", "origin", "git@github.com:acme/payments.git"], {
+      cwd: repo,
+    });
+    const sub = join(repo, "services", "auth");
+    mkdirSync(sub, { recursive: true });
+    expect(buildRetainStamp({}, ctx({ directory: sub })).metadata).toEqual({
+      repository: "github.com/acme/payments",
+      branch: currentBranch(),
+      module: "services",
+    });
+    expect(
+      buildRetainStamp({ retainMetadata: { repository: "payments" } }, ctx({ directory: sub }))
+        .metadata.repository
+    ).toBe("payments");
   });
 
   it("resolves {gitProject} to the repo name — the #3269 use case", () => {
@@ -41,7 +73,7 @@ describe("buildRetainStamp", () => {
     );
     const name = repo.split("/").pop()!;
     expect(tags).toEqual([`project:${name}`]);
-    expect(metadata).toEqual({ repo: name });
+    expect(metadata).toEqual({ repository: name, branch: currentBranch(), repo: name });
   });
 
   it("resolves {gitProject} from the session root outside a repository", () => {

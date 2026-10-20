@@ -58,6 +58,7 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
             tools=tuple(tool["function"]["name"] for tool in body.get("tools") or []),
             api_key=request.headers.get("authorization", "").removeprefix("Bearer ") or None,
             headers={k.lower(): v for k, v in request.headers.items()},
+            body=body,
         )
 
         reply = stubs.llm.resolve(chat_request)
@@ -83,6 +84,8 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
             return _provider_error(
                 f"stub provider error {reply.error_status}", code="stub_error", status=reply.error_status
             )
+        if reply.finish_reason == "refusal":
+            return _provider_error("refuses() answers the Anthropic Messages API only", code="stub_misuse")
 
         return JSONResponse(
             {
@@ -139,6 +142,7 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
             tools=tuple(tool["name"] for tool in body.get("tools") or []),
             api_key=authorization.removeprefix("Bearer ") or request.headers.get("x-api-key"),
             headers={k.lower(): v for k, v in request.headers.items()},
+            body=body,
         )
 
         reply = stubs.llm.resolve(chat_request)
@@ -149,6 +153,7 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
         if reply.error_status is not None:
             return _anthropic_error(f"stub provider error {reply.error_status}", reply.error_status)
 
+        refused = reply.finish_reason == "refusal"
         usage = _usage(chat_request.all_text, str(reply.message.get("content") or ""))
         return JSONResponse(
             {
@@ -156,8 +161,8 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
                 "type": "message",
                 "role": "assistant",
                 "model": body["model"],
-                "content": [{"type": "text", "text": reply.message["content"]}],
-                "stop_reason": "end_turn",
+                "content": [] if refused else [{"type": "text", "text": reply.message["content"]}],
+                "stop_reason": "refusal" if refused else "end_turn",
                 "stop_sequence": None,
                 "usage": {"input_tokens": usage["prompt_tokens"], "output_tokens": usage["completion_tokens"]},
             }
@@ -238,6 +243,20 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
                 answers[question_id] = {"type": "choice", "choice": pick, "probabilities": probabilities}
             return JSONResponse({"model": "stub", "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 1}})
 
+        jev_rerank = _jev_rerank_response(stubs, state, body)
+        if jev_rerank is not None:
+            return jev_rerank
+
+        checks = _recall_check_answers(stubs, state, body["questions"])
+        if checks is not None:
+            return JSONResponse(
+                {
+                    "model": body.get("model", "stub"),
+                    "answers": checks,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+            )
+
         for question_id, question in body["questions"].items():
             if question["type"] == "noul":
                 memory = question["instructions"]["memory"]
@@ -281,6 +300,59 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
         return JSONResponse({"id": "rerank-stub", "results": results})
 
     return app
+
+
+def _jev_rerank_response(stubs: Stubs, state: object, body: dict) -> JSONResponse | None:
+    """The answer to the Jev rerank's Choice, or None when the request is not one.
+
+    Told apart from the typesafe reranker's own rank question by the date line its state ends
+    with (see hindsight_api/engine/search/jev_rerank.py).
+    """
+    questions = body["questions"]
+    if not (set(questions) == {"rank"} and isinstance(state, str) and "\nCurrent date: " in state):
+        return None
+    checks = stubs.recall_checks
+    checks.asked.append("jev_rerank")
+    options = questions["rank"]["criteria"]
+    checks.jev_requests.append({"state": state, "options": list(options.values())})
+    if checks.jev_fails:
+        return _provider_error("invalid API key", code="unauthorized", status=401)
+    n = len(options)
+    scores = {
+        key: (1.0 if checks.jev_first and checks.jev_first in text else 0.0) + (n - position) * 1e-3
+        for position, (key, text) in enumerate(options.items())
+    }
+    total = sum(scores.values())
+    probabilities = {key: value / total for key, value in scores.items()}
+    best = max(probabilities, key=lambda key: probabilities[key])
+    answer = {"type": "choice", "choice": best, "probabilities": probabilities, "confidence": probabilities[best]}
+    return JSONResponse(
+        {"model": body.get("model", "stub"), "answers": {"rank": answer}, "usage": {"input_tokens": 1, "output_tokens": 1}}
+    )
+
+
+def _recall_check_answers(stubs: Stubs, state: object, questions: dict) -> dict | None:
+    """The answers to a recall check's request, or None when the request is not one.
+
+    Told apart by shape: the injection gate lists its memories in a structured state, and the
+    other two each ask one question under a fixed id.
+    """
+    checks = stubs.recall_checks
+    if isinstance(state, dict) and "memories" in state:
+        checks.asked.append("gate")
+        texts = {memory["id"]: memory["text"] for memory in state["memories"]}
+        answers = {}
+        for key in questions:
+            text = texts[key.split("_", 1)[1]]  # "inj_m3" and "skip_m3" both ask about memory m3
+            answers[key] = {"type": "noul", "noul": 0.9 if any(p in text for p in checks.planted) else 0.01}
+        return answers
+    if set(questions) == {"current_state"}:
+        checks.asked.append("current_state")
+        return {"current_state": {"type": "noul", "noul": checks.current_state}}
+    if set(questions) == {"flag"}:
+        checks.asked.append("relevance")
+        return {"flag": {"type": "noul", "noul": checks.any_helps}}
+    return None
 
 
 def _usage(

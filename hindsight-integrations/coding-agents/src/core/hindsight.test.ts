@@ -728,6 +728,7 @@ describe("HindsightClient.recallObservations", () => {
 
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
       query: "goal",
+      purpose: "auto_context",
       types: ["world", "experience"],
       max_tokens: 250,
       // An option the client knows nothing about rides along untouched — the point of the object.
@@ -782,11 +783,45 @@ describe("HindsightClient.recallObservations", () => {
     expect(String(url)).toBe("http://x/v1/default/banks/b/memories/recall");
     expect(JSON.parse(String(init?.body))).toEqual({
       query: "goal",
+      // The automatic injection says what it is, so a bank with context admission on judges it
+      // strictly; with no recallContext there is no `context` to send.
+      purpose: "auto_context",
       types: ["observation"],
       budget: "low",
       max_tokens: 2000,
       include: { entities: null },
     });
+  });
+
+  it("sends the session's recallContext, which recallOptions may still override", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
+      jsonResponse(200, { results: [] })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const recallContext = {
+      repository: "github.com/acme/payments",
+      branch: "main",
+      module: "auth",
+    };
+
+    await new HindsightClient({ apiUrl: "http://x", bank: "b", recallContext }).recallObservations(
+      "goal",
+      { timeoutMs: 5_000 }
+    );
+    await new HindsightClient({
+      apiUrl: "http://x",
+      bank: "b",
+      recallContext,
+      recallOptions: { purpose: "explicit_search", context: { repository: "payments" } },
+    }).recallObservations("goal", { timeoutMs: 5_000 });
+
+    const first = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect([first.purpose, first.context]).toEqual(["auto_context", recallContext]);
+    const second = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+    expect([second.purpose, second.context]).toEqual([
+      "explicit_search",
+      { repository: "payments" },
+    ]);
   });
 });
 

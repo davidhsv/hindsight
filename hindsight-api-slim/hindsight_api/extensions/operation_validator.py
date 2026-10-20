@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from hindsight_api.extensions.base import Extension
 
@@ -198,6 +198,14 @@ class RecallContext:
     tags: list[str] | None = None
     tags_match: "TagsMatch" = "any"
     tag_groups: "list[TagGroup] | None" = None
+    # Adaptive memory lifecycle mode: the claim view the caller asked for (None = the bank's default
+    # view) and the validity instant. A validator can refuse a historical recall from them.
+    lifecycle_view: str | None = None
+    as_of: datetime | None = None
+    # Context admission: why the caller recalls (auto_context, explicit_search, historical_search;
+    # None = explicit_search) and what the task is about (repository, branch, module, ...).
+    purpose: str | None = None
+    task_context: dict[str, Any] | None = None
 
 
 @dataclass
@@ -419,6 +427,7 @@ class BankWriteOperation(StrEnum):
     CLEAR_MENTAL_MODEL = "clear_mental_model"
     CLEAR_OBSERVATIONS = "clear_observations"
     CLEAR_OBSERVATIONS_FOR_MEMORY = "clear_observations_for_memory"
+    CONFIRM_MEMORY = "confirm_memory"
     CREATE_BANK_ALIAS = "create_bank_alias"
     CREATE_DIRECTIVE = "create_directive"
     CREATE_KNOWLEDGE_FOLDER = "create_knowledge_folder"
@@ -443,6 +452,7 @@ class BankWriteOperation(StrEnum):
     RETRY_OPERATION = "retry_operation"
     RUN_CONSOLIDATION = "run_consolidation"
     SET_BANK_MISSION = "set_bank_mission"
+    SUBMIT_ASYNC_ADAPTIVE_MEMORY_MAINTENANCE = "submit_async_adaptive_memory_maintenance"
     SUBMIT_ASYNC_CONSOLIDATION = "submit_async_consolidation"
     SUBMIT_ASYNC_GRAPH_MAINTENANCE = "submit_async_graph_maintenance"
     SUBMIT_ASYNC_VECTOR_INDEX_MAINTENANCE = "submit_async_vector_index_maintenance"
@@ -452,6 +462,7 @@ class BankWriteOperation(StrEnum):
     UPDATE_DIRECTIVE = "update_directive"
     UPDATE_DOCUMENT = "update_document"
     UPDATE_KNOWLEDGE_PAGE = "update_knowledge_page"
+    UPDATE_MEMORY_LIFECYCLE = "update_memory_lifecycle"
     UPDATE_MEMORY_UNIT = "update_memory_unit"
     UPDATE_MENTAL_MODEL = "update_mental_model"
     UPDATE_WEBHOOK = "update_webhook"

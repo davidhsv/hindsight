@@ -82,6 +82,11 @@ class RetainExtractionErrors:
         if len(self.sample) < MAX_EXTRACTION_ERROR_SAMPLES:
             self.sample.append(message[:500])
 
+    def merge(self, other: "RetainExtractionErrors") -> None:
+        """Fold another run's errors into this one, keeping the sample bounded."""
+        self.count += other.count
+        self.sample.extend(other.sample[: MAX_EXTRACTION_ERROR_SAMPLES - len(self.sample)])
+
     def merge_metadata(self, metadata: Mapping[str, Any]) -> None:
         """Merge errors already present on an operation result_metadata object."""
         self.count += int(metadata.get("extraction_errors_count") or 0)
@@ -100,6 +105,26 @@ class RetainExtractionErrors:
         if self.sample:
             data["extraction_errors_sample"] = self.sample
         return data
+
+
+@dataclass
+class RetainPartialCommit:
+    """What a failed retain left behind of one document.
+
+    Streaming retain commits a document's chunks in batches as they are extracted, and a
+    failure does not roll those back: the batches are what a retried attempt resumes from,
+    and the document's previous version was already replaced by the first one. Recorded
+    under ``result_metadata.kept_after_failure[document_id]`` so a failed operation says
+    how much of the document is nevertheless stored.
+    """
+
+    chunks_total: int
+    chunks_failed: int
+    memories_kept: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return asdict(self)
 
 
 @dataclass

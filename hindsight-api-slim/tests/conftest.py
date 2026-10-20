@@ -127,6 +127,36 @@ def _reset_config_cache():
     clear_config_cache()
 
 
+@pytest.fixture
+def context_admission_experimental(monkeypatch):
+    """A server with ``HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL`` on.
+
+    Filter, strict and the decision-model scorers are refused without it; a test that exercises
+    them asks for this fixture. The cache is cleared after the env changes, so an engine built
+    before the test body still reads the switch on its next ``get_config()``.
+    """
+    from hindsight_api.config import clear_config_cache
+
+    monkeypatch.setenv("HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL", "true")
+    clear_config_cache()
+    return monkeypatch
+
+
+@pytest.fixture
+def adaptive_memory_decay_experimental(monkeypatch):
+    """A server with ``HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL`` on.
+
+    A positive ``adaptive_memory_score_alpha`` is refused (and a stored one reads as 0) without it;
+    a test that ranks by retention asks for this fixture. The cache is cleared after the env
+    changes, as in ``context_admission_experimental``.
+    """
+    from hindsight_api.config import clear_config_cache
+
+    monkeypatch.setenv("HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL", "true")
+    clear_config_cache()
+    return monkeypatch
+
+
 @pytest.fixture(autouse=True)
 def _cleanup_leaked_span_recorders():
     """Fail-safe for the process-global LLM-trace recorder registry (#2229).
@@ -195,6 +225,7 @@ DEFAULT_PG0_PORT = int(os.environ.get("HINDSIGHT_TEST_PG_PORT", "5556"))
 # races the others are disabled to avoid.
 os.environ.setdefault("HINDSIGHT_API_CONSOLIDATION_RECONCILE_INTERVAL_SECONDS", "0")
 os.environ.setdefault("HINDSIGHT_API_MENTAL_MODEL_REFRESH_TICK_SECONDS", "0")
+os.environ.setdefault("HINDSIGHT_API_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS", "0")
 os.environ.setdefault("HINDSIGHT_API_LLM_TRACE_RETENTION_DAYS", "-1")
 
 

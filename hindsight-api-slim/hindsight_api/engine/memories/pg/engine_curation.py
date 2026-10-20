@@ -17,6 +17,12 @@ from typing import Any
 
 from ...search.tags import TagsMatch, build_tag_filter_clause, tag_filter_active
 from ..base import BankContentCounts, MemoryLocation, StoredMemory, TypedMemoryScope
+from .adaptive_claims import (
+    relock_relations_before_delete,
+    repair_lifecycle_for_deleted_facts,
+    requeue_bank,
+    requeue_units,
+)
 from .curation import visible_entity_mentions_sql, visible_entity_stats_sql
 from .graph import _ops_for
 
@@ -49,6 +55,14 @@ async def delete_memory(*, conn, ops, fq_table: Callable[[str], str], bank_id: s
     # Links in lock order before the cascade reaches them (see delete_unit_links).
     if bank_id:
         await ops.delete_unit_links(conn, fq_table("memory_links"), bank_id, [unit_id])
+    # The lifecycle side, before the cascade: relation rows in one order for their SET NULL, and the
+    # claims this memory alone justified back to active. Unscoped deletes resolve the bank.
+    lifecycle_bank = bank_id or await conn.fetchval(
+        f"SELECT bank_id FROM {fq_table('memory_units')} WHERE id = $1", unit_id
+    )
+    if lifecycle_bank:
+        await relock_relations_before_delete(conn, fq_table=fq_table, bank_id=lifecycle_bank, unit_ids=[unit_id])
+        await repair_lifecycle_for_deleted_facts(conn, fq_table=fq_table, bank_id=lifecycle_bank, doomed_ids=[unit_id])
     deleted = await conn.fetchval(f"DELETE FROM {fq_table('memory_units')} WHERE id = $1 RETURNING id", unit_id)
     return str(deleted) if deleted is not None else None
 
@@ -57,6 +71,9 @@ async def delete_memories(*, conn, ops, fq_table: Callable[[str], str], bank_id:
     """Delete one bank's ``unit_ids`` (links first, then chunked); how many rows went."""
     # Links in lock order before the cascade reaches them (see delete_unit_links).
     await ops.delete_unit_links(conn, fq_table("memory_links"), bank_id, unit_ids)
+    # Relation rows in one order for their SET NULL; claims only these memories justified revert.
+    await relock_relations_before_delete(conn, fq_table=fq_table, bank_id=bank_id, unit_ids=unit_ids)
+    await repair_lifecycle_for_deleted_facts(conn, fq_table=fq_table, bank_id=bank_id, doomed_ids=unit_ids)
 
     # Chunked delete. Cascade handles unit_entities / memory_links / observation history via FK.
     deleted = 0
@@ -102,6 +119,18 @@ async def delete_bank_memories_of_type(
     """Delete a bank's live and archived memories of one fact_type (links first)."""
     # Links in lock order before the cascade reaches them (see delete_unit_links).
     await ops.delete_unit_links(conn, fq_table("memory_links"), bank_id, unit_ids)
+    # Every memory of the type goes, so the lifecycle side needs all their ids; ``unit_ids`` is
+    # filled for the source types only (see bank_memories_of_type).
+    doomed = unit_ids
+    if fact_type not in ("experience", "world"):
+        doomed = [
+            str(row["id"])
+            for row in await conn.fetch(
+                f"SELECT id FROM {fq_table('memory_units')} WHERE bank_id = $1 AND fact_type = $2", bank_id, fact_type
+            )
+        ]
+    await relock_relations_before_delete(conn, fq_table=fq_table, bank_id=bank_id, unit_ids=doomed)
+    await repair_lifecycle_for_deleted_facts(conn, fq_table=fq_table, bank_id=bank_id, doomed_ids=doomed)
     await conn.execute(
         f"DELETE FROM {fq_table('memory_units')} WHERE bank_id = $1 AND fact_type = $2",
         bank_id,
@@ -148,8 +177,13 @@ async def purge_bank_rows(*, conn, fq_table: Callable[[str], str], bank_id: str)
     # that stays would otherwise keep every one of them.
     await conn.execute(f"DELETE FROM {fq_table('attachments')} WHERE bank_id = $1", bank_id)
 
-    # Delete memory units (cascades to unit_entities, memory_links)
+    # Delete memory units (cascades to unit_entities, memory_links and the per-memory adaptive rows).
+    # No lifecycle repair: every claim of the bank, and everything its evidence could justify, goes
+    # with it (claims never cite another bank's memories).
     await conn.execute(f"DELETE FROM {fq_table('memory_units')} WHERE bank_id = $1", bank_id)
+    # Lifecycle relations reference memories ON DELETE SET NULL, so they outlive their endpoints as
+    # audit tombstones and nothing cascades them; with every memory of the bank gone, so are they.
+    await conn.execute(f"DELETE FROM {fq_table('memory_lifecycle_relations')} WHERE bank_id = $1", bank_id)
 
     # Observation history no longer cascades from memory_units (that FK was
     # dropped so history can be recorded for observations kept outside SQL), so
@@ -179,53 +213,24 @@ async def clear_observations_and_requeue(*, conn, fq_table: Callable[[str], str]
         bank_id,
     )
 
-    # Reset consolidated_at on source memories so they get re-consolidated.
+    # Requeue the source memories so they get re-consolidated, except superseded/refuted ones.
     # Bookkeeping only: `updated_at` stays put (see META_UPDATED_AT).
-    await conn.execute(
-        f"UPDATE {fq_table('memory_units')} SET consolidated_at = NULL WHERE bank_id = $1 AND fact_type IN ('experience', 'world')",
-        bank_id,
-    )
+    await requeue_bank(conn, fq_table=fq_table, bank_id=bank_id, reason="clear_observations")
     return count
 
 
 async def requeue_failed_consolidation(*, conn, fq_table: Callable[[str], str], bank_id: str) -> int:
-    """Clear the failure (and consolidated) marker on a bank's failed sources; how many."""
-    count = await conn.fetchval(
-        f"""
-        SELECT COUNT(*) FROM {fq_table("memory_units")}
-        WHERE bank_id = $1
-          AND consolidation_failed_at IS NOT NULL
-          AND fact_type IN ('experience', 'world')
-        """,
-        bank_id,
-    )
+    """Clear the failure (and consolidated) marker on a bank's failed sources; how many.
+
+    A superseded or refuted fact stays out of the queue (and is not counted).
+    """
     # Bookkeeping only: `updated_at` stays put (see META_UPDATED_AT).
-    await conn.execute(
-        f"""
-        UPDATE {fq_table("memory_units")}
-        SET consolidation_failed_at = NULL, consolidated_at = NULL
-        WHERE bank_id = $1
-          AND consolidation_failed_at IS NOT NULL
-          AND fact_type IN ('experience', 'world')
-        """,
-        bank_id,
-    )
-    return count
+    return await requeue_bank(conn, fq_table=fq_table, bank_id=bank_id, reason="retry_failed", only_failed=True)
 
 
 async def requeue_source_memory(*, conn, fq_table: Callable[[str], str], bank_id: str, unit_id: uuid.UUID) -> None:
     """Clear one source memory's consolidated marker. Bookkeeping: `updated_at` stays put."""
-    await conn.execute(
-        f"""
-        UPDATE {fq_table("memory_units")}
-        SET consolidated_at = NULL
-        WHERE id = $1
-          AND bank_id = $2
-          AND fact_type IN ('experience', 'world')
-        """,
-        unit_id,
-        bank_id,
-    )
+    await requeue_units(conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[unit_id], reason="clear_for_memory")
 
 
 async def entity_names_by_id(*, conn, fq_table: Callable[[str], str], bank_id: str, entity_ids: list[str]) -> list[str]:

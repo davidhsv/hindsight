@@ -1245,7 +1245,7 @@ ZeroEntropy's `zembed-1` supports Matryoshka dimensions: `2560`, `1280`, `640`, 
 | `HINDSIGHT_API_RERANKER_NVIDIA_BATCH_SIZE` | Max passages per rerank request (the hosted API caps it at 512) | `512` |
 | `HINDSIGHT_API_RERANKER_NVIDIA_MAX_CONCURRENT` | Max in-flight NVIDIA rerank requests | `8` |
 | `HINDSIGHT_API_RERANKER_TYPESAFE_API_KEY` | TypeSafe API key for reranking | - |
-| `HINDSIGHT_API_RERANKER_TYPESAFE_MODEL` | TypeSafe model used to judge relevance | `jev-latest` |
+| `HINDSIGHT_API_RERANKER_TYPESAFE_MODEL` | TypeSafe model used to judge relevance. An explicit release, so recall's ranking does not change when TypeSafe moves `jev-latest` to a new one; set `jev-latest` to follow the alias instead. | `jev-1.14.0` |
 | `HINDSIGHT_API_RERANKER_TYPESAFE_BASE_URL` | Base URL for the TypeSafe API | `https://api.typesafe.ai` |
 | `HINDSIGHT_API_RERANKER_TYPESAFE_TIMEOUT` | HTTP request timeout for the TypeSafe reranker (seconds). | `60.0` |
 | `HINDSIGHT_API_RERANKER_TYPESAFE_MAX_CONCURRENT` | Maximum in-flight TypeSafe requests. | `24` |
@@ -1409,7 +1409,7 @@ export HINDSIGHT_API_RERANKER_NVIDIA_API_KEY=nvapi-your-key
 # TypeSafe - relevance judged by a typed-decision model (Jev), not a /rerank endpoint
 export HINDSIGHT_API_RERANKER_PROVIDER=typesafe
 export HINDSIGHT_API_RERANKER_TYPESAFE_API_KEY=your-api-key
-# export HINDSIGHT_API_RERANKER_TYPESAFE_MODEL=jev-latest              # default
+# export HINDSIGHT_API_RERANKER_TYPESAFE_MODEL=jev-1.14.0              # default
 # export HINDSIGHT_API_RERANKER_TYPESAFE_PRUNE_CANDIDATES=true          # also prune irrelevant candidates
 
 # Alibaba Cloud DashScope - qwen3-rerank via Cohere-compatible /reranks endpoint
@@ -1525,11 +1525,16 @@ Every request is retried on its own when it is rate-limited (429) or fails trans
 
 | Provider | API | Default model | Default base URL |
 |----------|-----|---------------|------------------|
-| `typesafe` | [TypeSafe](https://typesafe.ai) System One (`/v1/systemone`) | `jev-latest` | `https://api.typesafe.ai` |
+| `typesafe` | [TypeSafe](https://typesafe.ai) System One (`/v1/systemone`) | `jev-1.14.0` | `https://api.typesafe.ai` |
 | `cloudflare` | [Clef](https://blog.cloudflare.com/clef-decision-models) on Workers AI (System One body, `/@cf/cloudflare/<model>`) | `clef` (or `clef-flash`) | none: set `https://api.cloudflare.com/client/v4/accounts/<account_id>/ai/run`, or an AI Gateway `https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway>/workers-ai` |
 | `openai` | [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) (`/v1/decisions`, public beta) | `gpt-6-luna` | `https://api.openai.com` |
 
-**Per-operation overrides.** `HINDSIGHT_API_{RECALL,REFLECT,CONSOLIDATION}_DECISION_MODEL_{PROVIDER,API_KEY,MODEL,BASE_URL}`
+The `typesafe` default is an explicit Jev release, not the `jev-latest` alias, so no decision
+changes when TypeSafe moves the alias to a new release. It is `jev-1.14.0`, the same release
+the TypeSafe reranker defaults to; the recall checks' questions were developed on `jev-1.13.0`
+and re-measured unchanged on `jev-1.14.0`. Set `HINDSIGHT_API_DECISION_MODEL_MODEL` to move it.
+
+**Per-operation overrides.** `HINDSIGHT_API_{RECALL,REFLECT,CONSOLIDATION,CONTEXT_ADMISSION,RECALL_CHECKS}_DECISION_MODEL_{PROVIDER,API_KEY,MODEL,BASE_URL}`
 replace the global value for that operation only. Key, model and URL fall back to the global
 value only while the operation uses the global provider; an operation that switches to another
 provider takes that provider's defaults and needs its own key. Set an operation's provider to
@@ -1561,6 +1566,13 @@ LLM call; only the rest reach the consolidation LLM. On the consolidation eval t
 calls by about 40% at the same pass rate. Turn it off per bank with
 [`HINDSIGHT_API_CONSOLIDATION_USE_DECISION_MODEL`](#observations), or for every bank with
 `HINDSIGHT_API_CONSOLIDATION_DECISION_MODEL_PROVIDER=none`.
+
+**Recall checks.** The `recall_checks` operation is the decision model the per-bank
+[recall checks](#recall-checks) ask. It is separate from `recall` so the checks can run beside
+the cross-encoder: set the global decision model and `HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER=none`,
+or set only `HINDSIGHT_API_RECALL_CHECKS_DECISION_MODEL_*`. Only the `typesafe` provider is
+supported here, since the checks' wordings and thresholds were measured on Jev: with another
+provider the checks are skipped and a warning is logged.
 
 ### Authentication
 
@@ -1705,6 +1717,107 @@ existing links below a raised threshold, and nodes that already have enough sema
 when the threshold is lowered. To make an existing semantic graph fully conform to a new threshold, rebuild the
 graph or re-ingest the source data into a new memory bank.
 
+#### Adaptive memory
+
+Adaptive memory gives each memory its own retention state (how readily it comes back without a strong cue, strengthened by independent reinforcement) and, in `lifecycle` mode, a claim state (whether what it says is still current). **Recency decay is not forgetting.** The `HINDSIGHT_API_RECENCY_DECAY_*` settings above apply one small freshness adjustment to every memory by its event age alone and keep no per-memory state. Adaptive memory is separate and runs alongside it: a memory that keeps being confirmed stays strong however old it is, and one that was never reinforced fades.
+
+The feature is off by default. With `HINDSIGHT_API_ADAPTIVE_MEMORY_MODE=off` recall is byte-identical to a server without it: no extra queries, response keys, trace keys or metrics. A mode only reaches the recall path for banks whose storage can hold the state; on any other bank it behaves as `off`.
+
+[Adaptive memory](./adaptive-memory.md) explains the concepts, walks through examples and shows how to roll it out safely; this section is the settings reference. In `rank` and `lifecycle` (never in `off` or `observe`), reinforcement raises a memory's stability: an explicit confirmation (`POST /v1/default/banks/{bank_id}/memories/{memory_id}/confirm`), an observation restated or extended during consolidation by a source it has not heard from before, a successful reflect that cited the memory, and, only with `HINDSIGHT_API_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED`, an HTTP or MCP recall that returned it. A retain item's `importance` and `forgetting_exempt`, or `PATCH /v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle`, set a memory's retention policy in the same two modes, and `GET /v1/default/banks/{bank_id}/memories/{memory_id}` shows its retention under `lifecycle`. Claim state is written only in `lifecycle` mode (see [Claim views in recall](#claim-views-in-recall)). With `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_ENABLED`, memories that stayed unretrievable are archived in the same two modes (and, with pruning on, eventually deleted); the same `PATCH` takes `hold: true` (never archived or pruned) and `retention_state: "active"` (unarchive). In `lifecycle` mode a mental model citing a memory whose claim was superseded or refuted is refreshed in full over current recall, and its refresh trace records `retraction.cause` and `successor_ids`.
+
+| Mode | What changes |
+|------|--------------|
+| `off` (default) | Nothing. |
+| `observe` | Retention is loaded and scored, and reported in the recall trace (`trace: true`) and metrics, including whether the top results would have changed. Results and their order are unchanged. |
+| `rank` | Retention and reinforcement state is kept. Each memory's final recall score is multiplied by `(1 - alpha) + alpha * retention_factor`, which at the default alpha of `0` is exactly `1`: ranking is the same as `off`. A positive alpha is experimental and needs `HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL`; with it, the factor only penalises and never removes a memory (with alpha `0.1` and the default floor the lowest it can go is `0.93`). |
+| `lifecycle` | `rank`, plus claim lifecycle: a memory can be superseded (a later one replaced it), refuted (it was wrong) or uncertain (conflicting evidence), and superseded or refuted memories stop answering current recall. History stays available through recall's `lifecycle_view` and `as_of`. |
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_MODE` | `off`, `observe`, `rank` or `lifecycle` (see above). An unknown value fails start-up rather than silently meaning `off`. A stored per-bank value that is no longer valid resolves to `off`. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `off` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_SCORE_ALPHA` | Weight of the retention factor in the final score, in `[0, 1]`. `0` keeps retention out of ranking entirely while keeping the rest of the mode (state, reinforcement, claims, trace and metrics). Decay showed no measured ranking benefit in the benchmarks, so a value above `0` is experimental: it needs `HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL`, and without it it fails start-up (env) or returns HTTP 400 (bank config), and a stored or tenant value reads as `0`. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `0` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_DECAY_EXPERIMENTAL` | Allow a positive `HINDSIGHT_API_ADAPTIVE_MEMORY_SCORE_ALPHA`, which puts retention decay into recall ranking. Without it a positive alpha is rejected at start-up and on bank-config writes, and every bank ranks at alpha `0`. Server-level. | `false` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_SCORE_FLOOR` | Lowest retention factor a fully faded memory can reach, in `[0, 1]`. A memory's importance raises its own floor. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `0.3` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_REINFORCEMENT_ENABLED` | Let reinforcement events (explicit confirmation, an independent source restating an observation, a successful reflect, new evidence for an observation) raise a memory's stability. `false` keeps decay without reinforcement. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `true` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_BASE_STABILITY_DAYS` | Initial stability, in days, of an unreinforced world fact of default importance: its retrievability falls to `e^-1` after this long. Scaled per fact type by `HINDSIGHT_API_ADAPTIVE_MEMORY_TYPE_STABILITY` and by importance. Must be `> 0`. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `30` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_MAX_STABILITY_DAYS` | Cap on a memory's stability, in days. Must be `>=` the base stability: validated on the server and on per-bank config writes; a tenant override below the base is clamped up to it. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `3650` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_DEFAULT_VIEW` | Lifecycle recall view when a request names none: `current` drops superseded and refuted claims, `historical` keeps superseded ones, annotated. Only read in `lifecycle` mode. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `current` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_HISTORICAL_CUES` | Detect historical phrasing in an external (HTTP or MCP) recall that names no `lifecycle_view` or `as_of` — "used to", "what did we use", "what was … before", "before the upgrade/migration/switch/change", "previously", "formerly", "originally", "earlier version", "history of", "changed from" — and answer it from the historical view. A query that also says "before" followed by a date the temporal analyzer resolves is answered as of that date. Queries over 30 words never match. Internal recalls (reflect tools, consolidation) never use it. Only read in `lifecycle` mode. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `false` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_RECALL_REINFORCEMENT_ENABLED` | Let a memory returned by an external (HTTP/MCP) recall count as weak reinforcement. Off by default: being retrieved is not evidence that a memory was useful, and it would make repeated benchmark queries depend on their order. Server-level. | `false` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_REFLECT_REINFORCEMENT_ENABLED` | Let a successful reflect count as reinforcement for the memories its answer cited (never for a failed reflect, a mental-model refresh, or an answer that found nothing). Reflect events carry the wall clock, not a query timestamp, so turn this off for evaluation runs that replay historical timestamps. Server-level. | `true` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_REINFORCEMENT_COOLDOWN_HOURS` | A reinforcement within this many hours of the memory's last one adds nothing, so a burst of events counts once. Must be `>= 0`. Server-level. | `6` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_REINFORCEMENT_GAIN` | Global multiplier on how much one reinforcement raises stability. Must be `>= 0`. Server-level. | `1.0` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_SOURCE_WEIGHTS` | JSON object of reinforcement weight per source type, merged over the defaults (set only the ones you change). Keys: `explicit_confirmation` (1.0), `independent_retain_confirmation` (0.8), `successful_reflect_use` (0.6), `observation_new_evidence` (0.5), `final_external_recall` (0.2). An unknown key fails start-up. Values must be `>= 0`. Server-level. | _(the weights listed)_ |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_TYPE_STABILITY` | JSON object of initial-stability multiplier per fact type, merged over the defaults: `experience` (0.5), `world` (1.0), `observation` (2.0). An unknown key fails start-up. Values must be `> 0`. Server-level. | _(the multipliers listed)_ |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_SOURCE_TRUST` | JSON object of trust per metadata `source` value (for example `{"crm": 0.9, "chat": 0.4}`), used only to settle conflicting claims (a consolidation `conflicts_with` label). Empty means a conflict never resolves automatically, so repeating a claim never makes it true. Values must be `>= 0`. Lifecycle mode only. Server-level. | `{}` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_CONFLICT_POLICY` | How conflicting claims resolve. `evidence`: a side wins only if it has higher source trust and more recent evidence; otherwise both stay uncertain. `latest`: the most recent side wins. Lifecycle mode only. Server-level. | `evidence` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_SCOPE_KEYS` | Comma-separated metadata keys whose values scope a claim. When every fact a consolidation label cites agrees on these keys, the claim gets a scope fingerprint (`environment=prod,service=api`), and consolidation never lets a claim retire, split or contest one with a different fingerprint: two environments' diverging facts both stay current. Lifecycle mode only. A lifecycle bank's consolidation prompt shows each fact's values for these keys as its scope, along with `environment`, `service`, `module` and `repository` (which every mode shows), so the model sees every key the check compares; in the other modes the setting changes no prompt. Server-level. | `environment,service,module` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_ENABLED` | Archive memories whose retrievability stayed below `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_THRESHOLD` for `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_GRACE_DAYS`, in `rank` and `lifecycle` banks. A per-bank `adaptive_memory_maintenance` job does it after every consolidation and, on PostgreSQL, every `HINDSIGHT_API_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS`. An archived memory stays stored and in recall's candidate pool, but is returned only on a strong cue (`HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE`); any applied reinforcement, `PATCH .../lifecycle` with `retention_state: "active"`, or a `PATCH .../lifecycle` that protects it (a `hold`, an exemption, or importance at `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE`) brings it back. Exempt memories (a `hold` is an exemption), important ones, and evidence of a claim that is not active are never archived. Only memories with a stored retention row are swept: one still on its default retention (never reinforced, no importance or exemption set) is never archived. Server-level. | `false` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_THRESHOLD` | Retrievability below which a memory starts its archive grace period, in `[0, 1]`. The grace period counts from the first sweep that sees it below, not from when it crossed. Server-level. | `0.05` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_GRACE_DAYS` | Days retrievability must stay below the threshold before the memory is archived. Must be `>= 0`. Server-level. | `30` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_RECALL_MIN_SCORE` | Normalised reranker score, in `[0, 1]`, an archived memory needs to be returned by recall. Archived memories below it are dropped after scoring and listed under `adaptive.archive_suppressed` in the recall trace. Server-level. | `0.8` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_ARCHIVE_PROTECT_IMPORTANCE` | Memories with at least this importance, in `[0, 1]`, are never archived. Server-level. | `0.8` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_ENABLED` | Permanently delete memories that have been archived longer than `HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS`, in the same maintenance job (so only while archiving is on). Separate from archiving and off by default, because it cannot be undone. Never deletes an exempt memory or one on hold, evidence of any claim, a memory another claim names as its successor, or a fact an observation that is still current is built on. Server-level. | `false` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_PRUNE_AFTER_DAYS` | Days a memory stays archived before pruning may delete it. Must be `>= 0`. Server-level. | `180` |
+| `HINDSIGHT_API_ADAPTIVE_MEMORY_MAINTENANCE_INTERVAL_SECONDS` | How often the background maintenance loop submits the archive job for every bank with retention state, while archiving is on. PostgreSQL only (the loop does not run on Oracle, where the job runs after each consolidation). `0` disables the periodic submission. Server-level. | `3600` |
+
+#### Claim views in recall
+
+In `lifecycle` mode every recall applies a claim view before the reranker sees its candidates, so a retired memory never takes a slot from a current one:
+
+| View | Shows |
+|------|-------|
+| `current` | Everything except superseded and refuted memories. Raw facts that inherited an observation's retirement are left out too, so a stale fact does not answer as current. |
+| `historical` | Superseded memories as well, each with a `lifecycle` annotation (`truth_status`, `valid_from`, `valid_to`, `superseded_by`). Refuted memories, and observations merged into another one (a rewording, not an earlier state), are never shown. |
+| `as_of` | The memories whose claim was valid at that instant: `valid_from` unset or not after it, `valid_to` unset or after it. Refuted and merged memories never. An unset `valid_from` means "since before anything recorded". |
+
+A recall request picks the view with `lifecycle_view` (`current` or `historical`) or `as_of` (an ISO 8601 instant, which wins over `lifecycle_view`); without either, the bank's `HINDSIGHT_API_ADAPTIVE_MEMORY_DEFAULT_VIEW` applies, or the historical-cue detector when it is on. `as_of` filters claims only: ranking still uses `query_timestamp`. Results whose claim is not plain active carry `lifecycle`; uncertain memories are shown in every view, annotated. The MCP recall tools take no view parameter (their tool list is the same in every mode): they use the bank's default view and its historical cues. In reflect, the recall tool gains an `include_history` flag in `lifecycle` mode, so the agent asks for history only when the question is about the past.
+
+The claim state is read for every lifecycle-mode recall. If it cannot be read, the recall fails closed with HTTP 503 and `Retry-After` rather than return memories it could not check.
+
+`PATCH /v1/default/banks/{bank_id}/memories/{memory_id}/lifecycle` changes a claim explicitly in `lifecycle` mode: `truth_status` `superseded` or `refuted` (optionally `superseded_by`, a memory of the same bank with exactly the same tags, and a `reason`), `active` to restore, or `uncertain`. Retiring an observation retires the raw facts only it stood on; retiring a raw fact rebuilds the observations built on it from their other sources.
+
+**Retired observations are history.** A superseded or refuted observation keeps its row, its text and its history when one of its source facts is edited, re-scoped, invalidated, retired or re-ingested: those changes rebuild the current observations on the fact, not the record of what was believed. Re-ingesting a document points it at the re-extracted facts; deleting a source fact removes it from its sources. It is deleted only when the evidence behind its retirement is deleted too and none of its sources is left, since it would otherwise become a current belief resting on nothing. Consolidation shows a retired observation next to its current successor, and one with no successor (refuted without a correction, or retired explicitly) on its own, so a fact restating it is attached to it as history instead of becoming a current claim again.
+
+**Downgrading a bank that holds claims.** Switching a `lifecycle` bank back to `rank`, `observe` or `off` keeps its claim rows but stops applying them: recall shows superseded and refuted memories again, unannotated, and consolidation no longer sees their status. Switching back to `lifecycle` applies them again. `GET /v1/default/banks/{bank_id}/memories/{memory_id}` still shows a stored claim under `lifecycle` in every mode. Prefer not to downgrade a bank that holds claims: consolidation in the lower mode can rewrite a retired observation as if it were current.
+
+#### Context admission
+
+Recall ranks memories; context admission decides which of them are worth putting into an agent's context at all, and may decide that none is. It runs only on external recalls (HTTP and MCP; the recalls inside reflect, consolidation and mental-model refreshes are never gated), on the top `HINDSIGHT_API_CONTEXT_ADMISSION_CANDIDATES` results after the `min_scores` floors and before the prefer-observations dedup and the token budget. It is off by default, and with it off recall is unchanged. [Context admission](./adaptive-memory.md#context-admission) explains how the recall request's `purpose` and `context` steer it and how to roll it out.
+
+Only `off` and `observe` are available by default. `filter` and `strict`, which change what recall returns, and the `jev` and `hybrid` scorers met none of their benchmark bars, so they are experimental: they need `HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL=true`, and without it setting one fails start-up (env) or returns HTTP 400 (bank config).
+
+| Mode | What changes |
+|------|--------------|
+| `off` (default) | Nothing. |
+| `observe` | Each external recall computes the per-memory decisions and the set `strict` would return, and reports them in the trace (`trace.context_admission`) and metrics. Results are unchanged. Always scored by the deterministic scorer, so it never sends a memory to a decision model. |
+| `filter` (experimental) | Rejected memories are dropped, and a recall where no memory clears the threshold returns no results. Results past the judged top `CANDIDATES` are dropped too, never used to refill. |
+| `strict` (experimental) | `filter`, plus hard scope (a mismatch on a hard-scope key rejects), near-duplicate suppression over the stored embeddings, and the memory and token budget. |
+
+While a bank is in `filter` or `strict`, the recalls it gates never count as reinforcement, so admission cannot feed its own selection.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HINDSIGHT_API_CONTEXT_ADMISSION_MODE` | `off`, `observe`, `filter` or `strict` (see above; the last two need `CONTEXT_ADMISSION_EXPERIMENTAL`). An unknown value fails start-up; a stored per-bank value that is no longer valid, or a stored `filter`/`strict` on a server without the experimental switch, reads as `off`. Hierarchical — overridable per bank via the [config API](#hierarchical-configuration). | `off` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_THRESHOLD_AUTO` | Admission score, in `[0, 1]`, a memory needs on a recall with `purpose: "auto_context"` (memories injected that nobody asked for). Hierarchical. | `0.6` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_THRESHOLD_EXPLICIT` | Admission score, in `[0, 1]`, a memory needs on a recall with `purpose` `explicit_search` (the default) or `historical_search`. Hierarchical. | `0.35` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_REFERENCE_BONUS` | Subtracted from the auto threshold when an `auto_context` query refers to something shared before: "do you remember", "remember when/what/…", "last time", "previously", "what did we decide/agree/choose", "we discussed", "as we said". A bare "remember" ("remember to run the tests") does not count. In `[0, 1]`. Hierarchical. | `0.15` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_CANDIDATES` | How many of the top-ranked results the gate judges (`>= 1`). Hierarchical. | `30` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_MAX_MEMORIES` | Most memories admitted per recall, `strict` only (`>= 1`). Hierarchical. | `10` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_MAX_TOKENS` | Most memory tokens admitted per recall, `strict` only (`>= 1`). Memories are admitted by value per token until it runs out. Hierarchical. | `2000` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_MMR_LAMBDA` | Trade-off, in `[0, 1]`, between a memory's admission score and its novelty against the memories already admitted (`1` = score only), `strict` only. Hierarchical. | `0.7` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_DUP_SIMILARITY` | Embedding cosine, in `[0, 1]`, above which a memory is a near-duplicate of one already admitted and is dropped, `strict` only. Hierarchical. | `0.92` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_SCORER` | `deterministic`: a logistic score over the recall's own signals (reranker and semantic scores, keyword hit, how many retrieval arms found it, rank, scope match, retrievability and importance, uncertainty, token cost), no model call. `jev`: one [decision model](#decision-model) request per recall asks, for every candidate, whether including it would help the current task. `hybrid`: the two blended by `JEV_WEIGHT`. `jev` and `hybrid` need `CONTEXT_ADMISSION_EXPERIMENTAL` and score `filter` and `strict` recalls only; `observe` always uses the deterministic score. The gates (refuted, superseded, hard scope) hold under every scorer, and a decision-model failure falls back to the deterministic score. Server-level. | `deterministic` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_WEIGHTS` | JSON object of deterministic-scorer weights, merged over the defaults. Keys: `bias`, `reranker`, `semantic`, `bm25`, `arm_agreement`, `rank`, `retrievability`, `importance`, `uncertain`, `token_cost`, `scope_match.<key>` and `scope_mismatch.<key>` for each scope key, `fact_type.<world\|experience\|observation>`. An unknown key fails start-up. The defaults are hand-set starting values; `trace.context_admission.decisions[].features` carries each candidate's inputs for fitting your own. Server-level. | built-in |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_SCOPE_KEYS` | Comma-separated memory metadata keys compared with the recall request's `context`: each is a match, a mismatch, or unknown when either side lacks it. A mismatch lowers the score; it does not filter on its own. Server-level. | `repository,module,environment,branch,service` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_HARD_SCOPE_KEYS` | Metadata keys whose mismatch, when both sides are known, rejects the memory in `strict` mode (another repository's memories never enter the context). Compared whether or not they are also in `CONTEXT_ADMISSION_SCOPE_KEYS`; one that is not only gates and adds nothing to the score unless `CONTEXT_ADMISSION_WEIGHTS` weighs it. An observation is compared on its source facts' values. Server-level. | `repository` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_UNCERTAIN_MARGIN` | An uncertain claim is admitted only with a score of at least the threshold plus this margin, in `[0, 1]`. Server-level. | `0.1` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_JEV_WEIGHT` | `hybrid` scorer: weight of the decision-model probability against the deterministic score, in `[0, 1]`. Server-level. | `0.5` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_EXPERIMENTAL` | Allow the experimental parts of context admission: the `filter` and `strict` modes and the `jev` and `hybrid` scorers. Without it they are rejected at start-up and on bank-config writes. Server-level. | `false` |
+| `HINDSIGHT_API_CONTEXT_ADMISSION_DECISION_MODEL_{PROVIDER,API_KEY,MODEL,BASE_URL}` | The decision model the `jev` and `hybrid` scorers ask, overriding the global `HINDSIGHT_API_DECISION_MODEL_*` for context admission only (see [per-operation overrides](#decision-model)). With none configured those scorers use the deterministic score. Server-level. | global decision model |
+
+A memory is rejected for one of these reasons, counted per recall in `trace.context_admission.reasons` and in the `hindsight.context_admission.rejected` metric: `wrong_scope` (hard-scope mismatch), `below_threshold`, `superseded` (unless the recall is historical: `purpose: "historical_search"`, a historical `lifecycle_view`, `as_of`, or a historical cue), `refuted`, `redundant` (a near-duplicate) and `budget`.
+
 #### Graph Retrieval Algorithm
 
 - **`link_expansion`** (default): Fast graph expansion from semantic seeds via entity co-occurrence, semantic kNN, and causal links. Target latency under 100ms.
@@ -1761,6 +1874,26 @@ still maintained, so a bank can be switched back without a reindex. The
 |----------|-------------|---------|
 | `HINDSIGHT_API_RECALL_PREFER_OBSERVATIONS` | Value of recall's [`prefer_observations`](./api/recall.md#prefer_observations) when a REST or MCP request leaves it out: drop raw facts that a returned observation was consolidated from, so results carry no duplicates. A value in the request still wins. Hierarchical — overridable per bank. Useful when callers you don't control (MCP connectors, generic agents) never pass the flag. | `false` |
 
+##### Recall checks
+
+Questions recall asks a decision model (the [`recall_checks` operation](#decision-model)) about
+its own query and results. Each is off by default and costs one or a few decision-model requests
+per recall; each is hierarchical, so a bank opts in on its own. They run on REST and MCP recall
+only, never on the recalls consolidation and reflect make internally. A check that is on while
+the server has no decision model for recall checks is skipped, and a warning is logged.
+
+A recall waits on these requests, so they fail fast instead of on the decision model's own timeout and retries (`HINDSIGHT_API_DECISION_MODEL_TIMEOUT`, sized for consolidation and reflect). Each request has `HINDSIGHT_API_RECALL_CHECKS_TIMEOUT` seconds, one retry included; a recall stops asking after its first request that gets no answer; and a circuit breaker shared by every recall on the server opens after `HINDSIGHT_API_RECALL_CHECKS_BREAKER_FAILURES` requests in a row get no answer (a connection error, a timeout, a 5xx, a 429, a refused key or no credit left). While it is open no recall sends a request: each check falls back as on a failed request (the gate returns the memories unchecked, the rerank keeps the local order, the flag is left out, recency stays as configured). After `HINDSIGHT_API_RECALL_CHECKS_BREAKER_COOLDOWN` seconds one request probes the endpoint: an answer closes the breaker, another failure opens it again. The server logs one warning when it opens and one when it closes.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HINDSIGHT_API_RECALL_RELEVANCE_CHECK` | Ask whether any of the top ten results helps answer the query, and set the recall response's `nothing_relevant` to `true` when none does (or nothing was recalled), `false` otherwise. A warning, not a filter: the results are returned unchanged, so the caller decides what to do with them. `nothing_relevant` is left out of the response when the check is off or the decision model did not answer. Measured on coding-agent queries, it flagged 7 of 8 held-out queries that needed no memory and 3 of 38 that did; treat it as a hint. Hierarchical (per bank). | `false` |
+| `HINDSIGHT_API_RECALL_CONDITIONAL_RECENCY` | Apply the [recency boost](#retrieval) only when the query asks about the current or latest state of something ("what is X now?"); other queries ("when did X first…?") are ranked without it. Asked while retrieval runs, so it adds little latency. If the decision model does not answer, recency stays as configured. No effect when `HINDSIGHT_API_RECENCY_DECAY_FUNCTION=none`, or when a decision model [reranks recall](#decision-model) (its order is final). Hierarchical (per bank). | `false` |
+| `HINDSIGHT_API_RECALL_INJECTION_GATE` | Withhold recalled memories the decision model reads as instructions planted for an AI agent (run code fetched from outside, send data anywhere, ignore the user, skip review or tests…), using [jevmem](https://github.com/Avinash-jetwani/jevmem)'s gate questions. Screens the results and their source facts, and withholds a blocked memory's chunk with it. Fails open: a memory whose request fails or gets no answer is returned unchecked and a warning is logged (none of its own when the request was not sent, see above), so a decision-model outage does not empty recall. Hierarchical (per bank). | `false` |
+| `HINDSIGHT_API_RECALL_JEV_RERANK` | Have the decision model reorder the reranker's top 100 results in one request: the [`typesafe` reranker](#reranker)'s own rank question, told the date the question is asked (recall's clock, so [`query_timestamp`](./api/recall.md#query_timestamp) when the request has one) and each memory's date (when it was said, else when it happened). That order is final for those 100: the recency, temporal and proof boosts do not re-sort them, and the results below them follow in the local order. With conditional recency on too, its decision shapes the local order the 100 are taken from. A request that fails or outlasts `HINDSIGHT_API_RECALL_CHECKS_TIMEOUT` keeps the local order, as does a recall while the circuit breaker above is open, so recall never fails for it. Sends the query and up to 100 recalled memories with each recall. On recorded LoCoMo and LongMemEval pools (`jev-1.14.0`) it put a gold memory in the top five for 0.961 of LoCoMo questions against 0.902 for the local order, and all of a temporal-reasoning question's evidence in the top five for 0.827 against 0.701, but the latest value first on 0.764 of knowledge-update questions against 0.819. No effect when a decision model or the `typesafe` provider reranks recall (they already order the whole pool) or when reranking is off. Hierarchical (per bank). | `false` |
+| `HINDSIGHT_API_RECALL_CHECKS_TIMEOUT` | Seconds a recall waits on one recall-check request, its one retry included; past it the check falls back as on a failed request. The default is twice the slowest of 1,825 measured `jev-1.14.0` recall-check requests (p95 0.50 s, slowest 0.98 s, up to ten in flight at once), so a healthy endpoint does not reach it; an endpoint that does not answer costs a recall about this once. It includes the wait for a free request slot ([`HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT`](#decision-model)), so under heavy concurrent recall a check can fall back while the endpoint is up. Replaces `HINDSIGHT_API_DECISION_MODEL_TIMEOUT` for the recall checks only. Server-level. | `2` |
+| `HINDSIGHT_API_RECALL_CHECKS_BREAKER_FAILURES` | Recall-check requests in a row that get no answer (connection error, timeout, 5xx, 429, 401, 402, 403) before the circuit breaker opens and recalls stop sending them. An answer, even one the check cannot use, starts the count again, and a request sent before another was answered does not count (under load, a request can time out queued behind answered ones while the endpoint is up). At least 1. Server-level. | `5` |
+| `HINDSIGHT_API_RECALL_CHECKS_BREAKER_COOLDOWN` | Seconds the circuit breaker stays open before one request probes the endpoint again; an answer closes it, a failure opens it for another cool-down. Server-level. | `30` |
+
 ##### Pairing with the retain side: plain-retrieval ("RAG") banks
 
 These recall toggles only remove work from the *read* path. If a bank is being used as
@@ -1803,6 +1936,7 @@ Controls the retain (memory ingestion) pipeline.
 | `HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS` | Max completion tokens for fact extraction LLM calls | `64000` |
 | `HINDSIGHT_API_RETAIN_CHUNK_SIZE` | Max characters per chunk for fact extraction. Larger chunks extract fewer LLM calls but may lose context. | `3000` |
 | `HINDSIGHT_API_RETAIN_STRUCTURED_CHUNK_SIZE` | Max characters for a single JSONL line or conversation turn to keep whole. Unset uses `HINDSIGHT_API_RETAIN_CHUNK_SIZE`. Must be a positive integer when set. | - |
+| `HINDSIGHT_API_RETAIN_SKIP_REFUSED_CHUNKS` | Keep a retain when the provider refuses some of its chunks on content-policy grounds: the rest of the document is extracted and the refused chunks yield no facts, with a warning naming them. On an async retain each skipped chunk is also counted in the operation's `extraction_errors_count` / `extraction_errors_sample`, so `HINDSIGHT_API_FAIL_ON_EXTRACTION_ERRORS` still fails it. Off, one refused chunk fails the retain; a refusal is deterministic, so retrying never recovers it, and chunks a streaming retain already committed are not rolled back: the failed operation reports them per document under `result_metadata.kept_after_failure`. Covers the refusals Hindsight recognises (Anthropic, Claude Code and Cursor providers) on the synchronous extraction path; Batch API mode never fails a retain on a refused chunk. The document text is always kept, but a refused chunk's own chunk row is written only when its batch also produced facts. Configurable per bank. | `false` |
 | `HINDSIGHT_API_RETAIN_ATTACHMENT_MAX_SIZE_MB` | Max decoded size of a single attachment sent as inline retain content. Above every mainstream provider's own per-file ceiling, so the provider's limit binds first for legitimate content while an abusive upload is refused at the ingress. | `20` |
 | `HINDSIGHT_API_RETAIN_ATTACHMENT_MAX_COUNT` | Max inline attachments in one retain item. Split larger documents across several items. | `50` |
 | `HINDSIGHT_API_RETAIN_MAX_ATTACHMENTS_PER_CHUNK` | Max attachments in one extraction chunk. `HINDSIGHT_API_RETAIN_CHUNK_SIZE` budgets **text only** — a placeholder costs the ~22 characters it occupies and nothing more — so this is what bounds attachments, matching a provider's per-request limit. Lower it for a model with a smaller context. Configurable per bank. | `8` |
@@ -2564,6 +2698,7 @@ Configuration for background task processing. By default, the API processes task
 | `HINDSIGHT_API_WORKER_FILE_CONVERT_RETAIN_RESERVED_SLOTS` | Reserved (minimum) slots for file_convert_retain within `WORKER_MAX_SLOTS`. | `0` |
 | `HINDSIGHT_API_WORKER_REFRESH_MENTAL_MODEL_RESERVED_SLOTS` | Reserved (minimum) slots for refresh_mental_model within `WORKER_MAX_SLOTS`. | `0` |
 | `HINDSIGHT_API_WORKER_GRAPH_MAINTENANCE_RESERVED_SLOTS` | Reserved (minimum) slots for graph_maintenance within `WORKER_MAX_SLOTS`. | `0` |
+| `HINDSIGHT_API_WORKER_ADAPTIVE_MEMORY_MAINTENANCE_RESERVED_SLOTS` | Reserved (minimum) slots for adaptive_memory_maintenance within `WORKER_MAX_SLOTS`. | `0` |
 | `HINDSIGHT_API_WORKER_IMPORT_DOCUMENTS_RESERVED_SLOTS` | Reserved (minimum) slots for import_documents within `WORKER_MAX_SLOTS`. | `0` |
 | `HINDSIGHT_API_WORKER_EXPORT_BANK_RESERVED_SLOTS` | Reserved (minimum) slots for export_bank within `WORKER_MAX_SLOTS`. | `0` |
 | `HINDSIGHT_API_WORKER_IMPORT_BANK_RESERVED_SLOTS` | Reserved (minimum) slots for import_bank within `WORKER_MAX_SLOTS`. | `0` |
@@ -2945,6 +3080,7 @@ Configuration fields are categorized for security:
 1. **Configurable Fields** - Safe behavioral settings that can be customized per-bank:
    - Retention: `retain_chunk_size`, `retain_structured_chunk_size`, `retain_extraction_mode`, `retain_mission`, `retain_custom_instructions`
    - Observations: `enable_observations`, `enable_auto_consolidation`, `observations_mission`, `max_observations_per_scope`
+   - Adaptive memory: `adaptive_memory_mode`, `adaptive_memory_score_alpha`, `adaptive_memory_score_floor`, `adaptive_memory_reinforcement_enabled`, `adaptive_memory_base_stability_days`, `adaptive_memory_max_stability_days`, `adaptive_memory_default_view`, `adaptive_memory_historical_cues`
    - MCP access control: `mcp_enabled_tools`
 
 2. **Credential Fields** - NEVER exposed or configurable via API:
